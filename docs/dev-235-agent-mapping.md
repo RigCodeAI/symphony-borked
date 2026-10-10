@@ -75,11 +75,12 @@ small interface needs owner agreement before integration:
    this mapping without deriving the reviewer from the cloud identity.
 
 Build-slot readiness: this worktree has neither Elixir/mise nor a build/dependency
-cache. Docker Elixir `1.19.5-otp-28` is available. DEV-234 retains the heavy-build
-and live-worker slot. Ready for an isolated compile and
+cache. Docker Elixir `1.19.5-otp-28` is available. The released interim heavy-build
+slot has now completed compilation and focused checks below and is released again.
+DEV-234 retains the live-worker slot. The checked mapping files are
 `test/symphony_elixir/linear_agent_mapping_test.exs` and
 `test/symphony_elixir/linear_agent_mapping_config_test.exs`, followed by relevant existing
-workstream/delegation tests after integration. Broad checks remain required before
+workstream/delegation tests; integrated behavior still needs its own checks. Broad checks remain required before
 engineer handoff under the alpha guidance.
 
 ## Minimum additional-app setup card
@@ -137,7 +138,8 @@ current Workstream, AgentReadiness, Webhook, Config and mapping sources are load
 explicitly. The image's old Workstream/Config modules produce redefinition and
 stale export-metadata warnings; its missing Delegation module also produces a
 warning in an uncalled existing Config function. All 14 helper/config tests pass.
-This is helper-level verification, not a full application compile.
+This interpreter command provides helper-level verification. The later full
+application compile and focused Mix run are recorded separately below.
 
 From this managed checkout, run:
 
@@ -175,3 +177,52 @@ references could resolve to the same value. The verifier now rejects such a
 configuration before authentication; its regression test signs a Daybreak-app
 body with the reused key and requires `ambiguous_signing_secrets`. The reviewer
 reported no further issue in the inspected reassignment/wait paths.
+
+## Interim application checks, 2026-10-10
+
+The coordinator released a bounded heavy-build slot for checkpoint
+`e019b409b064c901944426055ff1dcfb6300e549`. An isolated Docker container copied
+that Git archive over the existing dependency cache, removing old source
+directories first. The active DEV-234 and DEV-233 containers/files were preserved.
+No shared-file integration or live worker probe ran.
+
+The complete application compiled with warnings treated as errors (76 source files).
+The first focused run found one failure: the existing software-change fixture
+copied only Default Cloud, but the updated workstream also references High Effort,
+Daybreak and Default Review. The fixture now copies all shipped agent definitions
+and their shared resources. Its simulated stage result remains test-only.
+
+After that fix, these exact commands passed from the isolated `elixir/` directory:
+
+```bash
+MIX_ENV=test mix compile --force --warnings-as-errors
+MIX_ENV=test mix test \
+  test/symphony_elixir/linear_agent_mapping_test.exs \
+  test/symphony_elixir/linear_agent_mapping_config_test.exs \
+  test/symphony_elixir/workstream_test.exs \
+  test/symphony_elixir/workstream_runner_test.exs \
+  test/symphony_elixir/linear_delegation_test.exs \
+  test/symphony_elixir/linear_webhook_test.exs \
+  test/symphony_elixir/linear_http_test.exs \
+  test/symphony_elixir/agent_readiness_test.exs \
+  test/symphony_elixir/software_change_test.exs
+mix specs.check
+mix format --check-formatted \
+  lib/symphony_elixir/config.ex \
+  lib/symphony_elixir/linear/agent_mapping.ex \
+  test/symphony_elixir/linear_agent_mapping_test.exs \
+  test/symphony_elixir/linear_agent_mapping_config_test.exs \
+  test/symphony_elixir/software_change_test.exs
+```
+
+Expected and observed: compile success, **112 tests with zero failures**, all public
+functions specified, and formatting success. The [receipt](evidence/dev235/checkpoint-validation.json)
+pins exact tested source hashes and commands; retained [compile](evidence/dev235/compile.log),
+[focused tests](evidence/dev235/focused-tests.log) and [specs](evidence/dev235/specs.log)
+outputs record the result. Docker used two CPU schedulers/cores and 4 GiB memory.
+
+Both DEV-235 containers and the temporary DEV-235 cache image were removed. The
+heavy slot is released. Broad CI remains queued for final integration as directed;
+this interim run is not engineer handoff or live acceptance. Additional app
+installation, visible Linear blocking, atomic reassignment integration and real
+qualified cloud-identity tasks still remain.

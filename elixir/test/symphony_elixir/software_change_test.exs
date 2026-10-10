@@ -6,28 +6,15 @@ defmodule SymphonyElixir.SoftwareChangeTest do
   test "the shipped entry pins Default Cloud and pauses the local candidate without publication" do
     root = Path.join(System.tmp_dir!(), "software-change-#{System.unique_integer([:positive])}")
     File.mkdir_p!(Path.join(root, "workstreams"))
-    File.mkdir_p!(Path.join(root, "agents"))
     source = Path.expand("../../../factory/workstreams/software-change.yaml", __DIR__)
     path = Path.join(root, "workstreams/software-change.yaml")
     File.cp!(source, path)
     on_exit(fn -> File.rm_rf!(root) end)
 
-    # This controlled definition supplies the shared DEV-231 reference without
-    # substituting a production qualification claim.
-    File.write!(Path.join(root, "agents/default-cloud.yaml"), """
-    version: 1
-    name: default-cloud
-    model: gpt-6-luna
-    reasoning_effort: medium
-    daybreak: false
-    approval_policy: never
-    sandbox: workspace-write
-    instructions: [instructions.md]
-    skills: [SKILL.md]
-    """)
-
-    File.write!(Path.join(root, "agents/instructions.md"), "Keep the candidate local.")
-    File.write!(Path.join(root, "agents/SKILL.md"), "Do not publish or merge.")
+    # Pin all shipped definitions and their shared resources. The controlled
+    # stage result below is not a production qualification receipt.
+    factory_root = source |> Path.dirname() |> Path.dirname()
+    Enum.each(~w(agents instructions skills), &File.cp_r!(Path.join(factory_root, &1), Path.join(root, &1)))
 
     assert {:ok, definition} = Workstream.load(path, %{"task" => "DEV pilot task"})
     assert definition.stages[definition.entry].agent == "default-cloud"

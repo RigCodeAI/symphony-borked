@@ -153,3 +153,37 @@ Only after ticket boundaries pass should a real PR be opened for human merge.
 - Combined broad behavior run (`mix test --cover`): **577 tests, zero failures,
   six skipped, ten excluded**. Command exits 3 at 79.54% coverage against the
   unchanged 100% threshold.
+
+## Initial live activation and maintenance correction
+
+The combined release `2b55c54` was uploaded immutably and read back byte-for-byte,
+then built as the coordinator service user and activated successfully. The
+stopped pre-migration backup records schema 2, five runs, 44 events, seven attempts
+and seven operations, 16 native events and five native tasks. The new index has
+five recovered baselines and five immutable bundles. Existing private config
+values match the pre-activation config except the approved release identity fields.
+
+Unsigned task requests return 403; the external unsigned request redirects to
+Google sign-in (302). Allowed signed-in inspection remains pending: this chat's
+in-app browser reports blocked, the Mac is locked, and Chrome is not running.
+No programmatic OAuth client or service-account grant was added to bypass that
+boundary. Google's documented programmatic flow requires separately configured
+clients; browser verification remains the requested acceptance path.
+
+A controlled transport failure on the actual retained bundles produced five
+failed root receipts and zero verified receipts. The real maintenance retry then
+exited 127 before cloud I/O because its shell guard was unavailable. The source
+fix adds the existing startup guard to the shared library and requires the active
+release. A disposable Linux entrypoint test invokes the matching isolated helper
+for archive and backup, and rejects non-root ownership, group writes and an
+inactive source. This live failure blocks archival acceptance until the corrected
+release succeeds; no workspace has been deleted.
+
+DEV-252 is the approved, explicitly disposable native arithmetic/redaction probe,
+Adam-assigned and initially undelegated. It uses a dedicated Rig clone and the
+existing workstream, app and worker settings. It is evidence/lifecycle validation,
+not Rust coding or trusted final candidate validation. The service failure/repair
+cycle and deletion/merge prerequisites remain distinct pending boundaries.
+
+Combined Dialyzer exits 2 with five findings: the earlier three unchanged findings
+and two inherited from deployed DEV-235. No warnings were suppressed.

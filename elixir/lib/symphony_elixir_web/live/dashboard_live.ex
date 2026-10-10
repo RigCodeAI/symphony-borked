@@ -53,6 +53,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <p class="hero-copy">
               Current state, retry pressure, token usage, and orchestration health for the active Symphony runtime.
             </p>
+            <p><a href="/tasks">Private task evidence</a></p>
           </div>
 
           <div class="status-stack">

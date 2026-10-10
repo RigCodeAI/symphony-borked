@@ -260,6 +260,12 @@ defmodule SymphonyElixir.Linear.Coordinator do
               authorized_until: 0
             }
 
+            task =
+              case SymphonyElixir.Evidence.url(state.workstreams.runs[run_id]) do
+                nil -> task
+                url -> Map.put(task, :evidence_url, url)
+              end
+
             commit(state, record, task, :handled)
 
           {:error, reason} ->
@@ -358,6 +364,7 @@ defmodule SymphonyElixir.Linear.Coordinator do
     case WorkstreamRun.linear_reply(run, record.event.body, record.event.activity_id) do
       {:ok, updated} ->
         :ok = WorkstreamStore.commit(state.workstreams.store, updated, event_id, receipt)
+        :ok = SymphonyElixir.Evidence.sync!(state.workstreams.store)
         state = put_in(state.workstreams.runs[run.id], updated)
         task = state.linear.tasks[record.event.issue_id] |> Map.merge(%{authorized_stage: nil, authorized_until: 0, check_at: 0})
         send(self(), :advance_workstreams)
@@ -389,6 +396,12 @@ defmodule SymphonyElixir.Linear.Coordinator do
   end
 
   defp run_publications(task, run) do
+    task =
+      case SymphonyElixir.Evidence.url(run) do
+        nil -> task
+        url -> add_publication(task, "evidence-url", "thought", "Private conversation and test evidence: #{url}")
+      end
+
     task =
       Enum.reduce(Map.get(run, :questions, %{}), task, fn {_id, question}, acc ->
         add_publication(acc, "question/" <> question.id, "elicitation", question.prompt <> "\n\nReply: answer #{question.id}: <your answer>")

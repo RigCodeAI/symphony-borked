@@ -36,7 +36,7 @@ defmodule SymphonyElixir.WorkstreamStoreTest do
     assert [["attempt-1"]] = database_rows(context.path, "SELECT attempt_id FROM stage_attempts")
     assert [["op-1", "run-1"]] = database_rows(context.path, "SELECT operation_id, run_id FROM operations")
     assert [["event-1", "run-1"]] = database_rows(context.path, "SELECT event_id, run_id FROM events")
-    assert [[2]] = database_rows(context.path, "PRAGMA user_version")
+    assert [[3]] = database_rows(context.path, "PRAGMA user_version")
     assert [["delete"]] = database_rows(context.path, "PRAGMA journal_mode")
   end
 
@@ -136,10 +136,11 @@ defmodule SymphonyElixir.WorkstreamStoreTest do
     migrations = [
       {1, "SELECT 1"},
       {2, "SELECT 2"},
-      {3, "CREATE TABLE partial_migration (value TEXT); INSERT INTO partial_migration VALUES ('x'); INVALID SQL;"}
+      {3, "SELECT 3"},
+      {4, "CREATE TABLE partial_migration (value TEXT); INSERT INTO partial_migration VALUES ('x'); INVALID SQL;"}
     ]
 
-    assert {:error, {:migration_failed, 3, _reason}} =
+    assert {:error, {:migration_failed, 4, _reason}} =
              start_store(context.path, migrations: migrations)
 
     assert [] = database_rows(context.path, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'partial_migration'")
@@ -149,11 +150,11 @@ defmodule SymphonyElixir.WorkstreamStoreTest do
   end
 
   test "rejects a database created by a newer migration list", context do
-    migrations = [{1, "SELECT 1"}, {2, "SELECT 2"}, {3, "SELECT 3"}]
+    migrations = [{1, "SELECT 1"}, {2, "SELECT 2"}, {3, "SELECT 3"}, {4, "SELECT 4"}]
     assert {:ok, pid} = start_store(context.path, migrations: migrations)
     assert :ok = GenServer.stop(pid)
 
-    assert {:error, {:unsupported_schema_version, 3, 2}} = start_store(context.path)
+    assert {:error, {:unsupported_schema_version, 4, 3}} = start_store(context.path)
   end
 
   test "exclusive locking prevents a second coordinator from opening the same database", context do

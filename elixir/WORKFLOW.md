@@ -1,4 +1,7 @@
 ---
+# Optional trusted deployment config: evidence root/base_url/iap_audience and
+# allowed_domains/allowed_emails. Omit for ordinary upstream workflows. See
+# ../docs/private-evidence.md. Do not use this sample unchanged for Factory Setup.
 tracker:
   kind: linear
   provider:

@@ -83,6 +83,11 @@ termination. Continuation reconstructs saved context in a fresh Codex conversati
 Coordinator-only client credentials mint app tokens in memory per delegated run; see
 [Linear app setup](docs/linear-delegation.md#linear-app-setup) for scopes, events and secret references.
 
+DEV-237 adds an opt-in private evidence index, signed-IAP HTML viewer and verified
+GCS archive receipts. Durable capture, restart replay and native Linear links are
+locally tested against merged main; live qualification remains pending. See [private task evidence](docs/private-evidence.md) for configuration,
+retention and the current acceptance boundary.
+
 Use live ticket dependencies to schedule work. The local files
 `docs/rig-software-factory-spec.md` and `docs/factory-setup-ticket-drafts.md`, if present,
 are earlier drafts. They predate the workstream additions and published ticket updates;

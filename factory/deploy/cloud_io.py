@@ -11,6 +11,7 @@ from contextlib import closing
 import fcntl
 import gzip
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -40,6 +41,7 @@ WORKER_HOST_PRIVATE_KEY = WORKER_HOST_KEY_DIR / "ssh_host_ed25519_key"
 WORKER_HOST_PUBLIC_KEY = WORKER_HOST_KEY_DIR / "ssh_host_ed25519_key.pub"
 WORKER_HOST_KEY_MARKER = DATA_ROOT / "worker-hostkey.json"
 MAX_MODEL_AUTH_BYTES = 1024 * 1024
+MAX_EVIDENCE_INDEX_BYTES = 256 * 1024 * 1024
 TOKEN_PATTERN = re.compile(r"(?:sk-|gh[pousr]_|github_pat_)[A-Za-z0-9_-]+|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
 
 
@@ -588,6 +590,36 @@ def regular_read(directory_fd, name):
         return data
 
 
+def _cloud_object(cloud, bucket, name):
+    reader = getattr(cloud, "object", None)
+    if callable(reader):
+        return reader(bucket, name)
+    # Older in-memory test transports expose their stored bytes directly.
+    objects = getattr(cloud, "objects", None)
+    if isinstance(objects, dict) and (bucket, name) in objects:
+        return objects[(bucket, name)]
+    raise RuntimeError("cloud transport cannot read back uploaded objects")
+
+
+def _put_and_verify(cloud, bucket, name, payload):
+    cloud.put(bucket, name, payload)
+    uploaded = _cloud_object(cloud, bucket, name)
+    if uploaded != payload:
+        raise RuntimeError("cloud object readback did not match uploaded bytes")
+
+
+def _load_evidence_archiver():
+    helper = Path(__file__).resolve().with_name("evidence_archive.py")
+    if not helper.is_file():
+        raise RuntimeError("evidence archive helper is unavailable")
+    spec = importlib.util.spec_from_file_location("factory_evidence_archive", helper)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("evidence archive helper is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.archive_evidence
+
+
 def archive_runs(cloud):
     root = DATA_ROOT / "runs"
     for run in sorted(root.iterdir()):
@@ -613,10 +645,10 @@ def archive_runs(cloud):
             for name in names:
                 data = redact(regular_read(fd, name), values)
                 digest = hashlib.sha256(data).hexdigest()
-                cloud.put(cloud.config["archive_bucket"], f"runs/{run.name}/{name}", data)
+                _put_and_verify(cloud, cloud.config["archive_bucket"], f"runs/{run.name}/{name}", data)
                 manifest["artifacts"][name] = {"sha256": digest, "bytes": len(data)}
             data = json.dumps(manifest, sort_keys=True, indent=2).encode()
-            cloud.put(cloud.config["archive_bucket"], f"runs/{run.name}/manifest.json", data)
+            _put_and_verify(cloud, cloud.config["archive_bucket"], f"runs/{run.name}/manifest.json", data)
             marker_fd = os.open(".archived", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                                 0o600, dir_fd=fd)
             with os.fdopen(marker_fd, "w") as handle:
@@ -634,6 +666,26 @@ def backup(cloud):
     revision = json.loads(active.read_text())["service_revision"] if active.exists() else cloud.config["service_revision"]
     manifest = {"version": 1, "service_revision": revision, "databases": []}
     state = DATA_ROOT / "state"
+    evidence_root = DATA_ROOT / "evidence"
+    evidence_index = evidence_root / "index.sqlite"
+    evidence_index_info = None
+    _assert_no_symlink_components(DATA_ROOT)
+    try:
+        evidence_root_info = evidence_root.lstat()
+    except FileNotFoundError:
+        evidence_root_info = None
+    if evidence_root_info is not None:
+        if not stat.S_ISDIR(evidence_root_info.st_mode):
+            raise ValueError("evidence backup root must be a real directory")
+        _assert_no_symlink_components(evidence_root)
+        try:
+            evidence_index_info = evidence_index.lstat()
+        except FileNotFoundError:
+            evidence_index_info = None
+        if evidence_index_info is not None and (
+                not stat.S_ISREG(evidence_index_info.st_mode) or evidence_index_info.st_nlink != 1 or
+                evidence_index_info.st_size > MAX_EVIDENCE_INDEX_BYTES):
+            raise ValueError("evidence index must be a single-link regular file within the backup size limit")
     with tempfile.TemporaryDirectory(prefix="factory-backup-") as directory:
         for path in sorted(state.glob("*.sqlite")):
             if path.is_symlink():
@@ -646,6 +698,21 @@ def backup(cloud):
             payload = target.read_bytes()
             cloud.put(bucket, f"backups/{stamp}/{path.name}", payload)
             manifest["databases"].append({"name": path.name, "sha256": hashlib.sha256(payload).hexdigest()})
+        if evidence_index_info is not None:
+            target = Path(directory) / "evidence-index.sqlite"
+            with closing(sqlite3.connect(f"file:{evidence_index}?mode=ro", uri=True, timeout=30)) as source, closing(sqlite3.connect(target)) as dest:
+                source.backup(dest)
+                if dest.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                    raise RuntimeError("SQLite evidence index backup integrity check failed")
+            if target.stat().st_size > MAX_EVIDENCE_INDEX_BYTES:
+                raise ValueError("evidence index backup exceeds the size limit")
+            payload = target.read_bytes()
+            cloud.put(bucket, f"backups/{stamp}/evidence-index.sqlite", payload)
+            manifest["databases"].append({
+                "name": "evidence-index.sqlite",
+                "restore_path": "evidence/index.sqlite",
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            })
         if not manifest["databases"]:
             manifest["note"] = "This deployed pilot has no durable runtime SQLite database yet."
         public = PUBLIC_CONFIG.read_bytes()
@@ -756,7 +823,8 @@ def main():
     sub.add_parser("ensure-hostkey")
     sub.add_parser("publish-hostkey")
     sub.add_parser("hostkeys")
-    sub.add_parser("archive")
+    archive_parser = sub.add_parser("archive")
+    archive_parser.add_argument("--reverify-evidence", action="store_true")
     sub.add_parser("backup")
     args = parser.parse_args()
     if args.command == "pack":
@@ -806,7 +874,18 @@ def main():
             records.append(worker["ip"] + " " + " ".join(raw[:2]))
         Path("/run/factory/known_hosts").write_text("\n".join(records) + "\n")
     elif args.command == "archive":
-        archive_runs(cloud)
+        archive_error = False
+        try:
+            _load_evidence_archiver()(cloud, root=DATA_ROOT / "evidence",
+                                      reverify=args.reverify_evidence)
+        except Exception:
+            archive_error = True
+        try:
+            archive_runs(cloud)
+        except Exception:
+            archive_error = True
+        if archive_error:
+            raise RuntimeError("archive failed") from None
     elif args.command == "backup":
         backup(cloud)
 

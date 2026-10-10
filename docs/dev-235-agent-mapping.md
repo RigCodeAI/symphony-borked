@@ -2,9 +2,14 @@
 
 Status: controlled integration verified; additional app setup and native acceptance pending. Additional apps are
 not installed. No complete acceptance claim or PR is made by this document.
-The read-only 2026-10-10 preflight observed coordinator `4ea729c6` still active;
-DEV-234's merged upgrade correction is included in this branch for its next
-scoped deployment.
+The tested local source checkpoint is `366734057481aa2c160319f05205e8e7f582a30e`.
+The read-only 2026-10-10 preflight observed coordinator `4ea729c6` still active,
+all five prior pilot tasks stopped, and no worker operations. DEV-234's merged
+upgrade correction is included in the candidate but remains undeployed.
+Automatic approval review rejected remote staging because internal source export
+and persistent deployment files lacked explicit destination authorization in the
+trusted transcript. No deployment occurred. Explicit deployment and additional-app
+setup approval have been requested. See the [deployment boundary](evidence/dev235/deployment-boundary.json).
 
 ## Settings and boundaries
 
@@ -148,8 +153,8 @@ live cases are not enabled. Compilation, public specs, formatting and escript
 build logs are retained alongside the receipt.
 
 `make all` ran in the background and [stopped at Credo](evidence/dev235/integrated-all.log).
-Its saved log has trailing spaces removed; the raw container output is retained
-for this run. It reports existing and new readability/design/complexity findings; coverage and
+Its saved log has trailing spaces removed. It reports existing and new
+readability/design/complexity findings; coverage and
 dialyzer were not reached. This is an alpha nonblocking broad-CI result, not a
 green CI claim. The separate full test run covers the broad behavior suite.
 
@@ -204,3 +209,27 @@ outputs record the result. Docker used two CPU schedulers/cores and 4 GiB memory
 That checkpoint's containers and temporary image were removed and its slot released.
 Those results cover the helper checkpoint only; the integrated source requires the
 separate checks above. They do not establish native multi-app acceptance.
+
+## Engineer handoff
+
+Source is retained locally on `cycle/dev-235`; no PR was created because native
+multi-app acceptance is incomplete. Approval is the remaining prerequisite for
+coordinator staging/activation and the [reviewable additional app setup](dev-235-app-setup.md).
+The packaged candidate archive SHA-256 is
+`c09c449144e63b387f4c297a36b390782d12684666d6195a49266d145b032ec2`.
+It was created from the clean committed source and has not been uploaded.
+
+After explicit approval, recheck the active revision and worker idleness, stage
+with rollback snapshots, activate and verify health. Preserve the existing worker
+control/application pins, database, workspace maps, subscription auth and sandbox.
+Install only the two approved apps and the four exact secret/scoped-access pairs;
+review the Terraform plan before applying. Complete the native task/reassignment/
+Daybreak-visible-block acceptance, then create a real PR. Do not use a placeholder.
+
+DEV-237 integration must accept recorded agent-selection revisions and retain each
+prior manifest under the same run ID. It remains a coordinated follow-up to this
+source, with no dependency here on its unmerged Evidence module.
+
+The local build/test container is removed at handoff and the heavy/live pilot slot
+is released. Read-only preflight is the only live action from this integration
+checkpoint. No candidate coding turn or native multi-app test was performed.

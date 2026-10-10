@@ -1,0 +1,86 @@
+{
+  "candidate_source": "366734057481aa2c160319f05205e8e7f582a30e",
+  "candidate_archive_sha256": "c09c449144e63b387f4c297a36b390782d12684666d6195a49266d145b032ec2",
+  "coordinator_active": "4ea729c6bb1b44e379161ea3543e68086cdbd1e6",
+  "stage_result": "automatic approval review rejected; no remote mutation occurred",
+  "rejection_reason": "Internal source export and persistent deployment-side effects lack explicit destination authorization in the trusted transcript.",
+  "coordinator_deployment_approval": "requested; pending",
+  "additional_app_setup_approval": "requested; pending",
+  "additional_apps_installed": false,
+  "new_secrets_or_iam_grants": false,
+  "safe_idle_preflight": {
+    "active": "4ea729c6bb1b44e379161ea3543e68086cdbd1e6",
+    "linear_tasks": [
+      {
+        "issue_id": "20a39293-18fa-4272-b33e-c8ba12fe3bb0",
+        "run_id": "run-e65005caafe229f8a542d4b80b12c82f",
+        "status": "stopped",
+        "phase": "stopped",
+        "agent_id": "default-cloud",
+        "cancellation": {
+          "termination": "terminated"
+        }
+      },
+      {
+        "issue_id": "4082e503-0c3c-40e4-a4a7-8680d4353b35",
+        "run_id": "run-ef2e798787754ccf02ef91637fc5eb7d",
+        "status": "stopped",
+        "phase": "stopped",
+        "agent_id": "default-cloud",
+        "cancellation": {
+          "termination": "terminated"
+        }
+      },
+      {
+        "issue_id": "698bb5f5-1d4e-41b5-aa26-f372edb6f59a",
+        "run_id": "run-3ad6097ae6d960249b681a580aba6119",
+        "status": "stopped",
+        "phase": "stopped",
+        "agent_id": "default-cloud",
+        "cancellation": {
+          "termination": "terminated"
+        }
+      },
+      {
+        "issue_id": "8c0f44a2-05a0-4fa8-b262-5b981e0e5244",
+        "run_id": "run-d8d02683e2ce5992d098289c3edf4cc3",
+        "status": "stopped",
+        "phase": "stopped",
+        "agent_id": "default-cloud",
+        "cancellation": {
+          "termination": "terminated"
+        }
+      },
+      {
+        "issue_id": "b2227bf7-76b8-4c06-a968-021f6c34b665",
+        "run_id": "run-755c6496a6d2a56b40545cb09e088289",
+        "status": "stopped",
+        "phase": "stopped",
+        "agent_id": "default-cloud",
+        "cancellation": {
+          "termination": "terminated"
+        }
+      }
+    ],
+    "worker_operations": [],
+    "protected_files": {
+      "config.json": {
+        "uid": 0,
+        "mode": "0o600",
+        "regular": true
+      },
+      "public.json": {
+        "uid": 0,
+        "mode": "0o644",
+        "regular": true
+      }
+    },
+    "pending_config_exists": false,
+    "safe_idle_upgrade": true
+  },
+  "upgrade_correction_in_candidate": "52ef0e47a87d458961221c1547e8fc39cf1b01d2",
+  "worker_control_revision": "064f892f95847ea2eed0eb684da36c6e1bb5fce6",
+  "worker_control_archive_sha256": "67267e73e9c587f0b6115398d89cdac462b23dcb8749df34895a34b9d0a0af89",
+  "native_multi_app_acceptance": "not run; additional app setup and explicit deployment authorization required",
+  "pr_created": false
+}

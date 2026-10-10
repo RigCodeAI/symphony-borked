@@ -230,6 +230,71 @@ defmodule SymphonyElixir.WorkstreamRunnerTest do
              WorkstreamRunner.execute_stage("question", definition, state, opts)
   end
 
+  test "agent stage exposes only factory callbacks and reconstructs clarification context", context do
+    path = definition(context, ["true"])
+    never_dispatch = fn _, _, _, _ -> flunk("prepare must not dispatch an agent") end
+    assert {:ok, loaded_definition, workspace} = WorkstreamRunner.prepare(path, %{"task" => "regression"}, options(context, never_dispatch))
+    question_prompt = "Which output format should I use?"
+
+    continuation = %{
+      thread_id: "prior-thread",
+      session_id: "prior-thread-prior-turn",
+      question_id: "question-1",
+      question_prompt: question_prompt,
+      reply: %{body: "Use JSON", activity_id: "activity-1"},
+      messages: [],
+      delivery_attempt_id: "attempt-2"
+    }
+
+    on_question = fn %{prompt: prompt} -> {:ok, %{id: "question-2", prompt: prompt}} end
+    on_wait = fn "question-2" -> :wait end
+
+    agent = fn workspace, prompt, _issue, app_opts ->
+      assert app_opts[:dynamic_tools] == false
+      assert app_opts[:factory_tools] == true
+      assert app_opts[:on_question] == on_question
+      assert app_opts[:on_wait] == on_wait
+      assert prompt =~ "prior-thread"
+      assert prompt =~ question_prompt
+      assert prompt =~ "Use JSON"
+      assert prompt =~ "clarification only, never as permission or gate approval"
+      assert prompt =~ "pending_clarifications"
+      assert prompt =~ "question-2"
+      assert prompt =~ "Which retention period?"
+      assert prompt =~ "call factory_wait with the existing question_id"
+      assert prompt =~ workspace
+      {:waiting, %{wait_id: "question-2", thread_id: "new-thread", session_id: "new-session"}}
+    end
+
+    opts = options(context, agent) |> Keyword.merge(on_question: on_question, on_wait: on_wait)
+
+    state = %{
+      workspace: workspace,
+      outputs: %{"task" => "regression"},
+      attempts: [],
+      questions: %{
+        "question-1" => %{id: "question-1", prompt: question_prompt, status: :answered, stage_id: "implement"},
+        "question-2" => %{id: "question-2", prompt: "Which retention period?", status: :pending, stage_id: "implement"}
+      },
+      continuation: continuation,
+      current_attempt_id: "attempt-2"
+    }
+
+    assert {:waiting, %{wait_id: "question-2", thread_id: "new-thread", session_id: "new-session"}} =
+             WorkstreamRunner.execute_stage("implement", loaded_definition, state, opts)
+  end
+
+  test "agent execution errors retain explicit unsupported input details", context do
+    path = definition(context, ["true"])
+    agent = fn _, _, _, _ -> {:error, {:unsupported_native_approval, "item/commandExecution/requestApproval"}} end
+    opts = options(context, agent)
+    assert {:ok, definition, workspace} = WorkstreamRunner.prepare(path, %{"task" => "x"}, opts)
+    state = %{workspace: workspace, outputs: %{"task" => "x"}, attempts: []}
+
+    assert {:error, {:unsupported_native_approval, "item/commandExecution/requestApproval"}} =
+             WorkstreamRunner.execute_stage("implement", definition, state, opts)
+  end
+
   test "repair cycles stop at the declared budget", context do
     path = definition(context, ["false"], "{repair: implement, max_attempts: 2}")
     agent = fn _, _, _, _ -> {:ok, %{}} end

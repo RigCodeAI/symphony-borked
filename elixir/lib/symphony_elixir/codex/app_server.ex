@@ -11,6 +11,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   @turn_start_id 3
   @port_line_bytes 1_048_576
   @max_stream_log_bytes 1_000
+  @factory_tool_names ["factory_question", "factory_wait"]
   @disabled_dynamic_tool_secret_names [
     "LINEAR_API_KEY",
     "LINEAR_API_TOKEN",
@@ -42,6 +43,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           worker_host: String.t() | nil,
           dynamic_tool_binding: map(),
           dynamic_tools_enabled: boolean(),
+          factory_tools_enabled: boolean(),
           requested_model: String.t() | nil,
           effective_model: String.t() | nil,
           reasoning_effort: String.t() | nil,
@@ -59,7 +61,8 @@ defmodule SymphonyElixir.Codex.AppServer do
           turn_timeout_ms: pos_integer() | nil
         }
 
-  @spec run(Path.t(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()} | {:uncertain, term()}
+  @spec run(Path.t(), String.t(), map(), keyword()) ::
+          {:ok, map()} | {:waiting, map()} | {:error, term()} | {:uncertain, term()}
   def run(workspace, prompt, issue, opts \\ []) do
     with {:ok, session} <- start_session(workspace, opts) do
       result =
@@ -97,6 +100,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          {:ok, session_policies} <- session_policies(expanded_workspace, worker_host, opts),
          {:ok, initial_binding, dynamic_tools_enabled} <- dynamic_tool_binding(opts),
          {:ok, dynamic_tool_binding} <- exclude_environment_names(initial_binding, opts),
+         {:ok, factory_tools_enabled} <- factory_tools_enabled(opts),
          {:ok, requested_model} <- requested_model(opts),
          {:ok, reasoning_effort} <- reasoning_effort(opts),
          {:ok, read_timeout_ms} <- timeout_setting(opts, :read_timeout_ms),
@@ -108,6 +112,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         invocation_settings(requested_model, reasoning_effort, read_timeout_ms, turn_timeout_ms)
         |> Map.put(:agent, agent)
         |> Map.put(:authentication_reference, opts[:authentication_reference])
+        |> Map.put(:factory_tools_enabled, factory_tools_enabled)
 
       case safe_session_start(fn ->
              do_start_session(
@@ -126,7 +131,7 @@ defmodule SymphonyElixir.Codex.AppServer do
              worker_control: opts[:worker_control],
              metadata: metadata,
              approval_policy: session_policies.approval_policy,
-             auto_approve_requests: session_policies.approval_policy == "never",
+             auto_approve_requests: session_policies.approval_policy == "never" and not factory_tools_enabled,
              thread_sandbox: session_policies.thread_sandbox,
              turn_sandbox_policy: session_policies.turn_sandbox_policy,
              thread_id: thread_id,
@@ -134,6 +139,7 @@ defmodule SymphonyElixir.Codex.AppServer do
              worker_host: worker_host,
              dynamic_tool_binding: dynamic_tool_binding,
              dynamic_tools_enabled: dynamic_tools_enabled,
+             factory_tools_enabled: factory_tools_enabled,
              requested_model: requested_model,
              effective_model: effective_model,
              reasoning_effort: reasoning_effort,
@@ -164,7 +170,8 @@ defmodule SymphonyElixir.Codex.AppServer do
     _, _ -> {:error, :session_initialization_failed}
   end
 
-  @spec run_turn(session(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
+  @spec run_turn(session(), String.t(), map(), keyword()) ::
+          {:ok, map()} | {:waiting, map()} | {:error, term()}
   def run_turn(
         %{
           port: port,
@@ -176,6 +183,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           workspace: workspace,
           dynamic_tool_binding: dynamic_tool_binding,
           dynamic_tools_enabled: dynamic_tools_enabled,
+          factory_tools_enabled: factory_tools_enabled,
           effective_model: effective_model,
           reasoning_effort: session_reasoning_effort,
           read_timeout_ms: read_timeout_ms,
@@ -187,14 +195,26 @@ defmodule SymphonyElixir.Codex.AppServer do
       ) do
     on_message = Keyword.get(opts, :on_message, &default_on_message/1)
 
-    tool_executor =
-      if dynamic_tools_enabled do
-        Keyword.get(opts, :tool_executor, fn tool, arguments ->
-          DynamicTool.execute(tool, arguments, dynamic_tool_binding, issue: issue)
-        end)
-      else
-        fn _tool, _arguments -> %{"success" => false, "error" => "dynamic tools are disabled"} end
+    tool_executor = fn tool, arguments ->
+      cond do
+        tool == "__factory_native_request_user_input__" and not factory_tools_enabled ->
+          :unavailable
+
+        factory_tools_enabled and tool in @factory_tool_names ->
+          execute_factory_tool(tool, arguments, opts)
+
+        factory_tools_enabled and tool == "__factory_native_request_user_input__" ->
+          execute_native_user_input(arguments, opts)
+
+        dynamic_tools_enabled ->
+          Keyword.get(opts, :tool_executor, fn name, args ->
+            DynamicTool.execute(name, args, dynamic_tool_binding, issue: issue)
+          end).(tool, arguments)
+
+        true ->
+          %{"success" => false, "error" => "dynamic tools are disabled"}
       end
+    end
 
     reasoning_effort = Keyword.get(opts, :reasoning_effort, session_reasoning_effort)
 
@@ -232,7 +252,8 @@ defmodule SymphonyElixir.Codex.AppServer do
                on_message,
                tool_executor,
                auto_approve_requests,
-               if(opts[:absolute_turn_timeout], do: {:deadline, System.monotonic_time(:millisecond) + turn_timeout_ms}, else: turn_timeout_ms)
+               if(opts[:absolute_turn_timeout], do: {:deadline, System.monotonic_time(:millisecond) + turn_timeout_ms}, else: turn_timeout_ms),
+               factory_tools_enabled
              ) do
           {:ok, result} ->
             Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
@@ -248,6 +269,9 @@ defmodule SymphonyElixir.Codex.AppServer do
             run_result = put_if_present(run_result, :reasoning_effort, reasoning_effort)
 
             {:ok, run_result}
+
+          {:waiting, wait_id} ->
+            {:waiting, %{wait_id: wait_id, thread_id: thread_id, session_id: session_id}}
 
           {:error, reason} ->
             Logger.warning("Codex session ended with error for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}")
@@ -479,6 +503,213 @@ defmodule SymphonyElixir.Codex.AppServer do
         {:error, {:invalid_dynamic_tools_option, value}}
     end
   end
+
+  defp factory_tools_enabled(opts) do
+    case Keyword.get(opts, :factory_tools, false) do
+      false ->
+        {:ok, false}
+
+      true ->
+        if is_function(Keyword.get(opts, :on_question), 1) and is_function(Keyword.get(opts, :on_wait), 1) do
+          {:ok, true}
+        else
+          {:error, :factory_tools_require_question_and_wait_callbacks}
+        end
+
+      value ->
+        {:error, {:invalid_factory_tools_option, value}}
+    end
+  end
+
+  defp factory_tool_specs(false), do: []
+
+  defp factory_tool_specs(true) do
+    [
+      %{
+        "type" => "function",
+        "name" => "factory_question",
+        "description" => "Record a clarification question for the human while you continue independent work; the service publishes it in Linear.",
+        "inputSchema" => %{
+          "type" => "object",
+          "properties" => %{"prompt" => %{"type" => "string", "description" => "The specific information needed to continue."}},
+          "required" => ["prompt"],
+          "additionalProperties" => false
+        }
+      },
+      %{
+        "type" => "function",
+        "name" => "factory_wait",
+        "description" => "Wait at an input boundary for the answer to a factory_question or a pending clarification from prior continuation context.",
+        "inputSchema" => %{
+          "type" => "object",
+          "properties" => %{"question_id" => %{"type" => "string", "description" => "An id returned by factory_question or listed under pending_clarifications in prior continuation context."}},
+          "required" => ["question_id"],
+          "additionalProperties" => false
+        }
+      }
+    ]
+  end
+
+  defp execute_factory_tool("factory_question", arguments, opts) do
+    prompt = get_argument(arguments, "prompt")
+
+    if is_binary(prompt) and String.trim(prompt) != "" do
+      case invoke_callback(opts[:on_question], [%{prompt: prompt}], :question_callback_failed) do
+        {:ok, %{id: id}} when is_binary(id) ->
+          output = "Clarification question recorded with id #{id}; the service will publish it in Linear. Continue independent work, then call factory_wait with this id at the input boundary."
+          success_tool_result(output)
+
+        {:ok, %{"id" => id}} when is_binary(id) ->
+          output = "Clarification question recorded with id #{id}; the service will publish it in Linear. Continue independent work, then call factory_wait with this id at the input boundary."
+          success_tool_result(output)
+
+        {:error, reason} ->
+          {:error, {:question_callback_failed, reason}}
+
+        other ->
+          {:error, {:invalid_question_callback_result, other}}
+      end
+    else
+      {:error, :invalid_factory_question_prompt}
+    end
+  end
+
+  defp execute_factory_tool("factory_wait", arguments, opts) do
+    id = get_argument(arguments, "question_id")
+
+    if is_binary(id) and String.trim(id) != "" do
+      case invoke_callback(opts[:on_wait], [id], :wait_callback_failed) do
+        {:answered, %{body: body}} when is_binary(body) ->
+          success_tool_result("Human clarification: " <> body)
+
+        :wait ->
+          {:stop, id}
+
+        {:error, reason} ->
+          {:error, {:wait_callback_failed, reason}}
+
+        other ->
+          {:error, {:invalid_wait_callback_result, other}}
+      end
+    else
+      {:error, :invalid_factory_question_id}
+    end
+  end
+
+  defp execute_native_user_input(%{"questions" => [question]}, opts) when is_map(question) do
+    question_id = get_argument(question, "id")
+
+    cond do
+      get_argument(question, "isSecret") == true ->
+        {:error, :unsupported_sensitive_input}
+
+      native_approval_question?(question) ->
+        {:error, :unsupported_native_approval}
+
+      not is_binary(question_id) or not is_binary(get_argument(question, "question")) ->
+        {:error, :unsupported_native_input}
+
+      true ->
+        prompt = native_question_prompt(question)
+
+        case invoke_callback(opts[:on_question], [%{prompt: prompt}], :question_callback_failed) do
+          {:ok, %{id: service_id}} when is_binary(service_id) ->
+            answer_native_question(service_id, question_id, opts)
+
+          {:ok, %{"id" => service_id}} when is_binary(service_id) ->
+            answer_native_question(service_id, question_id, opts)
+
+          {:error, reason} ->
+            {:error, {:question_callback_failed, reason}}
+
+          other ->
+            {:error, {:invalid_question_callback_result, other}}
+        end
+    end
+  end
+
+  defp execute_native_user_input(%{"questions" => questions}, _opts) when is_list(questions) do
+    cond do
+      Enum.any?(questions, &(get_argument(&1, "isSecret") == true)) -> {:error, :unsupported_sensitive_input}
+      Enum.any?(questions, &native_approval_question?/1) -> {:error, :unsupported_native_approval}
+      true -> {:error, :unsupported_native_input}
+    end
+  end
+
+  defp execute_native_user_input(_params, _opts), do: {:error, :unsupported_native_input}
+
+  defp native_approval_question?(question) when is_map(question) do
+    id = get_argument(question, "id") || ""
+    header = get_argument(question, "header") || ""
+    prompt = get_argument(question, "question") || ""
+    normalized = String.downcase(header <> " " <> prompt)
+    options = get_argument(question, "options") || []
+    labels = Enum.map_join(options, " ", fn option -> get_argument(option, "label") || "" end) |> String.downcase()
+
+    String.starts_with?(id, "mcp_tool_call_approval_") or
+      String.contains?(String.downcase(header), ["approve", "approval", "permission"]) or
+      String.contains?(normalized, ["allow this action", "request approval", "permission to", "approve this"]) or
+      (String.contains?(labels, "deny") and
+         (String.contains?(labels, "approve") or String.contains?(labels, "allow")))
+  end
+
+  defp native_approval_question?(_question), do: false
+
+  defp answer_native_question(service_id, native_question_id, opts) do
+    case invoke_callback(opts[:on_wait], [service_id], :wait_callback_failed) do
+      {:answered, %{body: body}} when is_binary(body) ->
+        {:native_answer, %{"answers" => %{native_question_id => %{"answers" => [body]}}}}
+
+      :wait ->
+        {:stop, service_id}
+
+      {:error, reason} ->
+        {:error, {:wait_callback_failed, reason}}
+
+      other ->
+        {:error, {:invalid_wait_callback_result, other}}
+    end
+  end
+
+  defp native_question_prompt(question) do
+    header = get_argument(question, "header")
+    text = get_argument(question, "question")
+    options = get_argument(question, "options")
+
+    option_text =
+      case options do
+        values when is_list(values) and values != [] ->
+          labels = Enum.map_join(values, ", ", fn option -> get_argument(option, "label") || "" end)
+          "\nChoices offered by Codex: " <> labels
+
+        _ ->
+          ""
+      end
+
+    base =
+      [header, text]
+      |> Enum.reject(&(not is_binary(&1) or String.trim(&1) == ""))
+      |> Enum.join("\n")
+
+    base <> option_text
+  end
+
+  defp invoke_callback(callback, arguments, failure) when is_function(callback) do
+    apply(callback, arguments)
+  rescue
+    _ -> {:error, failure}
+  catch
+    _, _ -> {:error, failure}
+  end
+
+  defp invoke_callback(_callback, _arguments, failure), do: {:error, failure}
+
+  defp success_tool_result(output) do
+    %{"success" => true, "output" => output, "contentItems" => dynamic_tool_content_items(output)}
+  end
+
+  defp get_argument(map, key) when is_map(map), do: Map.get(map, key)
+  defp get_argument(_map, _key), do: nil
 
   # Additional names are exclusions only; values are never forwarded.
   defp exclude_environment_names(binding, opts) do
@@ -752,7 +983,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       "approvalPolicy" => session_policies.approval_policy,
       "sandbox" => session_policies.thread_sandbox,
       "cwd" => workspace,
-      "dynamicTools" => dynamic_tool_binding.tool_specs
+      "dynamicTools" => dynamic_tool_binding.tool_specs ++ factory_tool_specs(settings.factory_tools_enabled)
     }
 
     params =
@@ -864,7 +1095,8 @@ defmodule SymphonyElixir.Codex.AppServer do
          on_message,
          tool_executor,
          auto_approve_requests,
-         turn_timeout_ms
+         turn_timeout_ms,
+         factory_tools_enabled
        ) do
     timeout_ms = turn_timeout_ms || Config.settings!().codex.turn_timeout_ms
 
@@ -874,11 +1106,12 @@ defmodule SymphonyElixir.Codex.AppServer do
       timeout_ms,
       "",
       tool_executor,
-      auto_approve_requests
+      auto_approve_requests,
+      factory_tools_enabled
     )
   end
 
-  defp receive_loop(port, on_message, timeout_ms, pending_line, tool_executor, auto_approve_requests) do
+  defp receive_loop(port, on_message, timeout_ms, pending_line, tool_executor, auto_approve_requests, factory_tools_enabled) do
     remaining_ms = remaining_turn_timeout(timeout_ms)
 
     if remaining_ms == 0 do
@@ -887,7 +1120,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       receive do
         {^port, {:data, {:eol, chunk}}} ->
           complete_line = pending_line <> to_string(chunk)
-          handle_incoming(port, on_message, complete_line, timeout_ms, tool_executor, auto_approve_requests)
+          handle_incoming(port, on_message, complete_line, timeout_ms, tool_executor, auto_approve_requests, factory_tools_enabled)
 
         {^port, {:data, {:noeol, chunk}}} ->
           receive_loop(
@@ -896,7 +1129,8 @@ defmodule SymphonyElixir.Codex.AppServer do
             timeout_ms,
             pending_line <> to_string(chunk),
             tool_executor,
-            auto_approve_requests
+            auto_approve_requests,
+            factory_tools_enabled
           )
 
         {^port, {:exit_status, status}} ->
@@ -911,7 +1145,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp remaining_turn_timeout({:deadline, deadline}), do: max(0, deadline - System.monotonic_time(:millisecond))
   defp remaining_turn_timeout(timeout_ms), do: timeout_ms
 
-  defp handle_incoming(port, on_message, data, timeout_ms, tool_executor, auto_approve_requests) do
+  defp handle_incoming(port, on_message, data, timeout_ms, tool_executor, auto_approve_requests, factory_tools_enabled) do
     payload_string = to_string(data)
 
     case Jason.decode(payload_string) do
@@ -960,7 +1194,8 @@ defmodule SymphonyElixir.Codex.AppServer do
           method,
           timeout_ms,
           tool_executor,
-          auto_approve_requests
+          auto_approve_requests,
+          factory_tools_enabled
         )
 
       {:ok, payload} ->
@@ -974,7 +1209,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata_from_message(port, payload)
         )
 
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests, factory_tools_enabled)
 
       {:error, _reason} ->
         log_non_json_stream_line(payload_string, "turn stream")
@@ -991,7 +1226,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           )
         end
 
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests, factory_tools_enabled)
     end
   end
 
@@ -1016,7 +1251,8 @@ defmodule SymphonyElixir.Codex.AppServer do
          method,
          timeout_ms,
          tool_executor,
-         auto_approve_requests
+         auto_approve_requests,
+         factory_tools_enabled
        ) do
     metadata = metadata_from_message(port, payload)
 
@@ -1038,10 +1274,20 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata
         )
 
-        {:error, {:turn_input_required, payload}}
+        if factory_tools_enabled do
+          {:error, {:unsupported_native_input, method}}
+        else
+          {:error, {:turn_input_required, payload}}
+        end
 
       :approved ->
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests, factory_tools_enabled)
+
+      {:waiting, wait_id} ->
+        {:waiting, wait_id}
+
+      {:error, reason} ->
+        {:error, reason}
 
       :approval_required ->
         emit_message(
@@ -1051,7 +1297,11 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata
         )
 
-        {:error, {:approval_required, payload}}
+        if factory_tools_enabled do
+          {:error, {:unsupported_native_approval, method}}
+        else
+          {:error, {:approval_required, payload}}
+        end
 
       :unhandled ->
         if needs_input?(method, payload) do
@@ -1062,7 +1312,11 @@ defmodule SymphonyElixir.Codex.AppServer do
             metadata
           )
 
-          {:error, {:turn_input_required, payload}}
+          if factory_tools_enabled do
+            {:error, {:unsupported_native_input, method}}
+          else
+            {:error, {:turn_input_required, payload}}
+          end
         else
           emit_message(
             on_message,
@@ -1075,7 +1329,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           )
 
           Logger.debug("Codex notification: #{inspect(method)}")
-          receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+          receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests, factory_tools_enabled)
         end
     end
   end
@@ -1118,23 +1372,28 @@ defmodule SymphonyElixir.Codex.AppServer do
     result =
       tool_name
       |> tool_executor.(arguments)
-      |> normalize_dynamic_tool_result()
 
-    send_message(port, %{
-      "id" => id,
-      "result" => result
-    })
+    case result do
+      {:stop, wait_id} ->
+        {:waiting, wait_id}
 
-    event =
-      case result do
-        %{"success" => true} -> :tool_call_completed
-        _ when is_nil(tool_name) -> :unsupported_tool_call
-        _ -> :tool_call_failed
-      end
+      {:error, reason} ->
+        {:error, reason}
 
-    emit_message(on_message, event, %{payload: payload, raw: payload_string}, metadata)
+      result ->
+        result = normalize_dynamic_tool_result(result)
+        send_message(port, %{"id" => id, "result" => result})
 
-    :approved
+        event =
+          case result do
+            %{"success" => true} -> :tool_call_completed
+            _ when is_nil(tool_name) -> :unsupported_tool_call
+            _ -> :tool_call_failed
+          end
+
+        emit_message(on_message, event, %{payload: payload, raw: payload_string}, metadata)
+        :approved
+    end
   end
 
   defp maybe_handle_approval_request(
@@ -1210,19 +1469,36 @@ defmodule SymphonyElixir.Codex.AppServer do
          payload_string,
          on_message,
          metadata,
-         _tool_executor,
+         tool_executor,
          auto_approve_requests
        ) do
-    maybe_auto_answer_tool_request_user_input(
-      port,
-      id,
-      params,
-      payload,
-      payload_string,
-      on_message,
-      metadata,
-      auto_approve_requests
-    )
+    case tool_executor.("__factory_native_request_user_input__", params) do
+      {:native_answer, answer} ->
+        send_message(port, %{"id" => id, "result" => answer})
+        emit_message(on_message, :native_input_answered, %{payload: payload, raw: payload_string}, metadata)
+        :approved
+
+      {:stop, wait_id} ->
+        {:waiting, wait_id}
+
+      {:error, reason} ->
+        {:error, reason}
+
+      :unavailable ->
+        maybe_auto_answer_tool_request_user_input(
+          port,
+          id,
+          params,
+          payload,
+          payload_string,
+          on_message,
+          metadata,
+          auto_approve_requests
+        )
+
+      _ ->
+        :input_required
+    end
   end
 
   defp maybe_handle_approval_request(

@@ -50,11 +50,27 @@ defmodule SymphonyElixir.AgentRunner do
 
     stage = Map.fetch!(run.definition.stages, run.stage_id)
     executor = Keyword.get(opts, :stage_executor, &WorkstreamRunner.execute_stage/4)
-    coordinator = Keyword.get(opts, :name, recipient)
+    # The runtime supervisor can restart the coordinator while this task stays alive.
+    # Use its registered name for every callback rather than retaining its old pid.
+    coordinator = Keyword.get(opts, :orchestrator_name) || Keyword.get(opts, :name) || recipient
 
     execution =
       Keyword.put(Map.to_list(run.execution), :on_process_start, fn identity ->
         register_workstream_process(coordinator, run, identity)
+      end)
+      |> Keyword.put(:on_question, fn request ->
+        coordinator_call(
+          coordinator,
+          {:workstream_question, run.id, run.current_attempt_id, self(), request},
+          :question_coordinator_unavailable
+        )
+      end)
+      |> Keyword.put(:on_wait, fn id ->
+        coordinator_call(
+          coordinator,
+          {:workstream_wait, run.id, run.current_attempt_id, self(), id},
+          :wait_coordinator_unavailable
+        )
       end)
 
     result = executor.(stage, run.definition, run, execution)
@@ -66,6 +82,12 @@ defmodule SymphonyElixir.AgentRunner do
     GenServer.call(coordinator, {:workstream_process, run.id, run.current_attempt_id, self(), identity}, 5_000)
   catch
     :exit, _ -> {:error, :process_registration_unavailable}
+  end
+
+  defp coordinator_call(coordinator, message, unavailable) do
+    GenServer.call(coordinator, message, 5_000)
+  catch
+    :exit, _ -> {:error, unavailable}
   end
 
   defp deliver_workstream_receipt(identity, result, recipient) do

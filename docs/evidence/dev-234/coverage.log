@@ -1,0 +1,93 @@
+Cover compiling modules ...
+Running ExUnit with seed: 204216, max_cases: 6
+Excluding tags: [:validation_docker]
+
+.......................................................................................................
+
+  1) test the shipped entry pins Default Cloud and pauses the local candidate without publication (SymphonyElixir.SoftwareChangeTest)
+     test/symphony_elixir/software_change_test.exs:6
+     ** (File.CopyError) could not copy from "/workspace/factory/workstreams/software-change.yaml" to "/tmp/software-change-4900/workstreams/software-change.yaml": no such file or directory
+     code: File.cp!(source, path)
+     stacktrace:
+       (elixir 1.19.5) lib/file.ex:1080: File.cp!/3
+       test/symphony_elixir/software_change_test.exs:12: (test)
+
+................................................................**................*..........................*.................................................................................................................................................................................................................................................*...............................................*................
+Finished in 35.8 seconds (2.3s async, 33.4s sync)
+520 tests, 1 failure, 6 skipped (10 excluded)
+
+Generating cover results ...
+
+| Percentage | Module                                     |
+|------------|--------------------------------------------|
+|      0.00% | Mix.Tasks.Agent.Qualify                    |
+|      0.00% | Mix.Tasks.Validation.Run                   |
+|      0.00% | SymphonyElixir.ValidationCommand           |
+|     12.66% | SymphonyElixir.Validation                  |
+|     54.17% | SymphonyElixir.WorkerOperation             |
+|     60.00% | SymphonyElixirWeb.LinearWebhookController  |
+|     63.77% | SymphonyElixir.WorkstreamRunner            |
+|     77.63% | SymphonyElixir.CandidateGit                |
+|     77.68% | SymphonyElixir.WorkstreamCancellation      |
+|     77.69% | SymphonyElixir.WorkstreamStore             |
+|     77.78% | SymphonyElixirWeb.LinearBodyReader         |
+|     78.57% | SymphonyElixir.AgentRuntimeSupervisor      |
+|     80.00% | SymphonyElixir.Linear.Delegation           |
+|     80.49% | SymphonyElixir.Linear.OAuth                |
+|     84.72% | SymphonyElixir.AgentReadiness              |
+|     85.71% | SymphonyElixirWeb.LinearWebhookPlug        |
+|     86.46% | SymphonyElixir.Linear.Webhook              |
+|     86.55% | SymphonyElixir.ValidationPolicy            |
+|     87.12% | SymphonyElixir.Linear.Coordinator          |
+|     88.89% | SymphonyElixir.LinearWebhookServer         |
+|     89.33% | SymphonyElixir.WorkstreamRun               |
+|     90.63% | SymphonyElixir.AgentQualification          |
+|     98.28% | SymphonyElixir.Workstream                  |
+|    100.00% | Mix.Tasks.PrBody.Check                     |
+|    100.00% | Mix.Tasks.Specs.Check                      |
+|    100.00% | Mix.Tasks.Workspace.BeforeRemove           |
+|    100.00% | Mix.Tasks.Workstream.Run                   |
+|    100.00% | SymphonyElixir                             |
+|    100.00% | SymphonyElixir.Asana.Adapter               |
+|    100.00% | SymphonyElixir.Asana.AgentTool             |
+|    100.00% | SymphonyElixir.Config.Schema               |
+|    100.00% | SymphonyElixir.Config.Schema.Agent         |
+|    100.00% | SymphonyElixir.Config.Schema.Codex         |
+|    100.00% | SymphonyElixir.Config.Schema.Hooks         |
+|    100.00% | SymphonyElixir.Config.Schema.Observability |
+|    100.00% | SymphonyElixir.Config.Schema.Polling       |
+|    100.00% | SymphonyElixir.Config.Schema.Server        |
+|    100.00% | SymphonyElixir.Config.Schema.StringOrMap   |
+|    100.00% | SymphonyElixir.Config.Schema.Tracker       |
+|    100.00% | SymphonyElixir.Config.Schema.Worker        |
+|    100.00% | SymphonyElixir.Config.Schema.Workspace     |
+|    100.00% | SymphonyElixir.GitHub.Adapter              |
+|    100.00% | SymphonyElixir.GitHub.AgentTool            |
+|    100.00% | SymphonyElixir.GitLab.Adapter              |
+|    100.00% | SymphonyElixir.GitLab.AgentTool            |
+|    100.00% | SymphonyElixir.Jira.Adapter                |
+|    100.00% | SymphonyElixir.Jira.AgentTool              |
+|    100.00% | SymphonyElixir.Linear.Adapter              |
+|    100.00% | SymphonyElixir.Linear.AgentTool            |
+|    100.00% | SymphonyElixir.Linear.Text                 |
+|    100.00% | SymphonyElixir.PathSafety                  |
+|    100.00% | SymphonyElixir.PromptBuilder               |
+|    100.00% | SymphonyElixir.SSH                         |
+|    100.00% | SymphonyElixir.Tracker                     |
+|    100.00% | SymphonyElixir.Tracker.Issue               |
+|    100.00% | SymphonyElixir.Tracker.Memory              |
+|    100.00% | SymphonyElixir.Workflow                    |
+|    100.00% | SymphonyElixir.WorkflowStore               |
+|    100.00% | SymphonyElixir.WorkflowStore.State         |
+|    100.00% | SymphonyElixir.WorkstreamCommand           |
+|    100.00% | SymphonyElixir.WorkstreamStore.State       |
+|    100.00% | SymphonyElixirWeb.ObservabilityPubSub      |
+|------------|--------------------------------------------|
+|     77.42% | Total                                      |
+
+Coverage test failed, threshold not met:
+
+    Coverage:   77.42%
+    Threshold: 100.00%
+
+Generated HTML coverage results in "cover" directory

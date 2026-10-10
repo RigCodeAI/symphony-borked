@@ -131,6 +131,21 @@ defmodule SymphonyElixir.Workstream do
     end
   end
 
+  defp exact_optional_fields(document, required, optional, context) when is_map(document) do
+    actual = Map.keys(document)
+    missing = required -- actual
+    unknown = actual -- (required ++ optional)
+
+    if missing == [] and unknown == [] do
+      :ok
+    else
+      {:error, {:invalid_definition_fields, context, missing, unknown}}
+    end
+  end
+
+  defp approval_setting(value, _stage_id) when is_boolean(value), do: {:ok, value}
+  defp approval_setting(value, stage_id), do: {:error, {:invalid_human_wait_approval, stage_id, value}}
+
   defp validate_version(1, _context), do: :ok
   defp validate_version(version, context), do: {:error, {:unsupported_definition_version, context, version}}
 
@@ -212,13 +227,15 @@ defmodule SymphonyElixir.Workstream do
   end
 
   defp normalize_stage(%{"type" => "human_wait"} = stage) do
-    with :ok <- exact_fields(stage, ~w(id type inputs outputs prompt next), {:stage, Map.get(stage, "id")}),
+    with :ok <- exact_optional_fields(stage, ~w(id type inputs outputs prompt next), ["approval"], {:stage, Map.get(stage, "id")}),
          {:ok, id} <- required_name(Map.get(stage, "id"), :stage_id),
          {:ok, inputs} <- names(Map.get(stage, "inputs"), {:stage_inputs, id}),
          {:ok, outputs} <- names(Map.get(stage, "outputs"), {:stage_outputs, id}),
          {:ok, prompt} <- required_name(Map.get(stage, "prompt"), {:stage_prompt, id}),
-         {:ok, next} <- stage_next(Map.get(stage, "next"), {:stage_next, id}) do
-      {:ok, %{id: id, type: :human_wait, inputs: inputs, outputs: outputs, prompt: prompt, next: next}}
+         {:ok, next} <- stage_next(Map.get(stage, "next"), {:stage_next, id}),
+         {:ok, approval} <- approval_setting(Map.get(stage, "approval", false), id) do
+      normalized = %{id: id, type: :human_wait, inputs: inputs, outputs: outputs, prompt: prompt, next: next}
+      {:ok, if(approval, do: Map.put(normalized, :approval, true), else: normalized)}
     end
   end
 

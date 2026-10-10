@@ -1,0 +1,696 @@
+make setup
+make[1]: Entering directory '/workspace/elixir'
+mix setup
+Resolving Hex dependencies...
+Resolution completed in 0.068s
+Unchanged:
+  bandit 1.10.3 VULNERABLE!
+    EEF-CVE-2026-42788 (MEDIUM)
+    aka: CVE-2026-42788, GHSA-q6v9-r226-v65f
+    HTTP/2 frame size limit checked after body is buffered in bandit
+    https://osv.dev/vulnerability/EEF-CVE-2026-42788
+
+    EEF-CVE-2026-39805 (MEDIUM)
+    aka: CVE-2026-39805, GHSA-c67r-gc9j-2qf7
+    CL.CL HTTP request smuggling via duplicate Content-Length in bandit
+    https://osv.dev/vulnerability/EEF-CVE-2026-39805
+
+    EEF-CVE-2026-39807 (MEDIUM)
+    aka: CVE-2026-39807, GHSA-375f-4r2h-f99j
+    Client-supplied URI scheme trusted without transport verification in bandit
+    https://osv.dev/vulnerability/EEF-CVE-2026-39807
+
+    EEF-CVE-2026-39804 (HIGH)
+    aka: CVE-2026-39804, GHSA-frh3-6pv6-rc8j
+    WebSocket permessage-deflate inflate has no output-size cap in bandit
+    https://osv.dev/vulnerability/EEF-CVE-2026-39804
+
+    EEF-CVE-2026-42786 (HIGH)
+    aka: CVE-2026-42786, GHSA-pf94-94m9-536p
+    WebSocket fragmented message reassembly unbounded in bandit
+    https://osv.dev/vulnerability/EEF-CVE-2026-42786
+
+    EEF-CVE-2026-39806 (HIGH)
+    aka: CVE-2026-39806, GHSA-rf5q-vwxw-gmrf
+    HTTP/1 chunked decoder infinite loop on requests with trailer fields in bandit
+    https://osv.dev/vulnerability/EEF-CVE-2026-39806
+
+    EEF-CVE-2026-39803 (HIGH)
+    aka: CVE-2026-39803, GHSA-9q9q-324x-93r2
+    HTTP/1 chunked body reader ignores length cap in bandit
+    https://osv.dev/vulnerability/EEF-CVE-2026-39803
+
+    EEF-CVE-2026-74836 (HIGH)
+    aka: CVE-2026-74836, GHSA-xj8g-532w-jv94
+    HTTP/2 connection-window starvation pins Plug processes indefinitely in Bandit
+    https://osv.dev/vulnerability/EEF-CVE-2026-74836
+
+    EEF-CVE-2026-75484 (MEDIUM)
+    aka: CVE-2026-75484, GHSA-x3gh-xhj4-3vq8
+    HTTP/2 header field values containing CR, LF or NUL are passed to the application unvalidated in Bandit
+    https://osv.dev/vulnerability/EEF-CVE-2026-75484
+  bunt 1.0.0
+  burrito 1.5.0
+  cc_precompiler 0.1.11
+  credo 1.7.16
+  date_time_parser 1.3.0
+  db_connection 2.10.2
+  decimal 2.3.0 VULNERABLE!
+    EEF-CVE-2026-32686 (MEDIUM)
+    aka: CVE-2026-32686, GHSA-rhv4-8758-jx7v
+    Unbounded exponent in decimal enables unauthenticated DoS
+    https://osv.dev/vulnerability/EEF-CVE-2026-32686
+  dialyxir 1.4.7
+  ecto 3.13.5
+  elixir_make 0.9.0
+  erlex 0.2.8
+  exqlite 0.42.0
+  file_system 1.1.1
+  finch 0.21.0
+  fine 0.1.4
+  floki 0.38.0
+  hpax 1.0.3 VULNERABLE!
+    EEF-CVE-2026-58226 (HIGH)
+    aka: CVE-2026-58226, GHSA-jj2p-32j7-whj2
+    Unauthenticated denial-of-service via unbounded HPACK integer decoding in hpax
+    https://osv.dev/vulnerability/EEF-CVE-2026-58226
+  jason 1.4.4
+  kday 1.1.0
+  lazy_html 0.1.10 VULNERABLE!
+    EEF-CVE-2026-92106 (LOW)
+    aka: CVE-2026-92106, GHSA-8rqp-v692-v82q
+    lazy_html serializes SVG and MathML style and script text unescaped, allowing mutation XSS
+    https://osv.dev/vulnerability/EEF-CVE-2026-92106
+  mime 2.0.7
+  mint 1.7.1 VULNERABLE!
+    EEF-CVE-2026-82672 (MEDIUM)
+    aka: CVE-2026-82672, GHSA-rj5m-69wp-cxq9
+    Unvalidated chunk-size line tail in Mint HTTP/1 client enables response smuggling against strict intermediaries on pooled connections
+    https://osv.dev/vulnerability/EEF-CVE-2026-82672
+
+    EEF-CVE-2026-49754 (HIGH)
+    aka: CVE-2026-49754, GHSA-2p26-p43x-fhp8
+    HTTP/2 CONTINUATION flood in Mint client via unbounded header-block accumulation
+    https://osv.dev/vulnerability/EEF-CVE-2026-49754
+
+    EEF-CVE-2026-48861 (LOW)
+    aka: CVE-2026-48861, GHSA-2pg6-44cx-c49v
+    CRLF injection in HTTP/1 request line via unvalidated method in Mint
+    https://osv.dev/vulnerability/EEF-CVE-2026-48861
+
+    EEF-CVE-2026-48862 (HIGH)
+    aka: CVE-2026-48862, GHSA-g586-ccqf-7x4r
+    Unbounded conn.streams growth in Mint HTTP/2 client via unenforced PUSH_PROMISE concurrency
+    https://osv.dev/vulnerability/EEF-CVE-2026-48862
+
+    EEF-CVE-2026-49753 (MEDIUM)
+    aka: CVE-2026-49753, GHSA-mjqx-c6f6-7rc2
+    HTTP response smuggling in Mint HTTP/1 client via lenient Content-Length parsing
+    https://osv.dev/vulnerability/EEF-CVE-2026-49753
+
+    EEF-CVE-2026-91043 (HIGH)
+    aka: CVE-2026-91043, GHSA-9x8p-qrf4-jq7g
+    HPACK-indexed cookie fields in Mint HTTP/2 responses bypass max_header_list_size and exhaust client memory
+    https://osv.dev/vulnerability/EEF-CVE-2026-91043
+
+    EEF-CVE-2026-58229 (HIGH)
+    aka: CVE-2026-58229, GHSA-qrfr-wh4c-3qhw
+    Unbounded HTTP/1 response-header and chunked-trailer accumulation in Mint causes memory-exhaustion DoS
+    https://osv.dev/vulnerability/EEF-CVE-2026-58229
+
+    EEF-CVE-2026-92103 (MEDIUM)
+    aka: CVE-2026-92103, GHSA-q95c-ccq6-j5j6
+    Mint HTTP/2 client buffers oversized frames up to 16 MiB before enforcing max_frame_size
+    https://osv.dev/vulnerability/EEF-CVE-2026-92103
+
+    EEF-CVE-2026-94194 (MEDIUM)
+    aka: CVE-2026-94194, GHSA-gvrc-75rc-7gj9
+    Mint HTTP/1 client applies chunked framing when chunked is not the final transfer coding, enabling response smuggling through intermediaries
+    https://osv.dev/vulnerability/EEF-CVE-2026-94194
+
+    EEF-CVE-2026-59246 (MEDIUM)
+    aka: CVE-2026-59246, GHSA-8pf6-g464-h6h9
+    Zero-length HTTP/2 CONTINUATION frames bypass Mint's header-block byte-size cap and exhaust client memory
+    https://osv.dev/vulnerability/EEF-CVE-2026-59246
+
+    EEF-CVE-2026-56810 (HIGH)
+    aka: CVE-2026-56810, GHSA-c59h-fq4p-r36r
+    mint buffers an entire chunked response chunk in memory in Mint.HTTP1.decode_body/5
+    https://osv.dev/vulnerability/EEF-CVE-2026-56810
+
+    EEF-CVE-2026-82728 (HIGH)
+    aka: CVE-2026-82728, GHSA-g83f-2j6r-q6m4
+    Unbounded HTTP/1 status-line and chunk-extension buffering in Mint causes memory-exhaustion DoS
+    https://osv.dev/vulnerability/EEF-CVE-2026-82728
+
+    EEF-CVE-2026-59249 (MEDIUM)
+    aka: CVE-2026-59249, GHSA-x3x7-96vm-6h2w
+    Sign-tolerant HTTP/1 chunk-size parser in Mint enables response smuggling against strict intermediaries on pooled connections
+    https://osv.dev/vulnerability/EEF-CVE-2026-59249
+  nimble_options 1.1.1
+  nimble_pool 1.1.0
+  phoenix 1.8.4 VULNERABLE!
+    EEF-CVE-2026-56811 (HIGH)
+    aka: CVE-2026-56811, GHSA-6983-jfq8-485w
+    Phoenix transports do not limit channel joins per connection, enabling process-exhaustion denial of service
+    https://osv.dev/vulnerability/EEF-CVE-2026-56811
+
+    EEF-CVE-2026-32689 (HIGH)
+    aka: CVE-2026-32689, GHSA-628h-q48j-jr6q
+    Long-poll NDJSON body splitting causes unbounded memory allocation in Phoenix
+    https://osv.dev/vulnerability/EEF-CVE-2026-32689
+
+    EEF-CVE-2026-56812 (MEDIUM)
+    aka: CVE-2026-56812, GHSA-63mc-hw7g-86rr
+    Phoenix JavaScript presence client crashes on presence keys colliding with Object.prototype members in Presence.syncState/syncDiff
+    https://osv.dev/vulnerability/EEF-CVE-2026-56812
+  phoenix_html 4.3.0
+  phoenix_live_view 1.1.25 VULNERABLE!
+    EEF-CVE-2026-64941 (LOW)
+    aka: CVE-2026-64941, GHSA-36m4-rm57-3prf
+    Open redirect in Phoenix.LiveView.validate_local_url!/2 via ASCII tab, LF and CR
+    https://osv.dev/vulnerability/EEF-CVE-2026-64941
+  phoenix_pubsub 2.2.0
+  phoenix_template 1.0.4
+  plug 1.19.1 VULNERABLE!
+    EEF-CVE-2026-54892 (HIGH)
+    aka: CVE-2026-54892, GHSA-j43x-5hjq-rgxf
+    Plug: quadratic-time decoding of nested query/body parameters enables denial of service
+    https://osv.dev/vulnerability/EEF-CVE-2026-54892
+
+    EEF-CVE-2026-8468 (HIGH)
+    aka: CVE-2026-8468, GHSA-468c-vq7p-gh64
+    Unbounded buffer accumulation in multipart header parsing causes denial of service in plug
+    https://osv.dev/vulnerability/EEF-CVE-2026-8468
+
+    EEF-CVE-2026-56813 (LOW)
+    aka: CVE-2026-56813, GHSA-wpmj-jh88-rpgm
+    Cookie attribute injection in Plug.Conn.Cookies.encode/2
+    https://osv.dev/vulnerability/EEF-CVE-2026-56813
+
+    EEF-CVE-2026-56814 (MEDIUM)
+    aka: CVE-2026-56814, GHSA-95qv-c9g9-rm63
+    Plug: multipart :length limit is not charged for part headers, enabling unbounded temp-file creation (denial of service)
+    https://osv.dev/vulnerability/EEF-CVE-2026-56814
+  plug_crypto 2.1.1
+  req 0.5.17 VULNERABLE!
+    EEF-CVE-2026-49755 (HIGH)
+    aka: CVE-2026-49755, GHSA-655f-mp8p-96gv
+    Decompression bomb DoS in Req via auto-decoded archive and compressed response bodies
+    https://osv.dev/vulnerability/EEF-CVE-2026-49755
+
+    EEF-CVE-2026-49756 (LOW)
+    aka: CVE-2026-49756, GHSA-px9f-whj3-246m
+    Multipart form-data header injection in Req via unescaped name/filename/content_type
+    https://osv.dev/vulnerability/EEF-CVE-2026-49756
+  solid 1.2.2
+  telemetry 1.3.0
+  thousand_island 1.4.3
+  typed_struct 0.3.0
+  websock 0.5.3
+  websock_adapter 0.5.9
+  yamerl 0.10.0
+  yaml_elixir 2.12.0
+Found packages with security advisories, see above for details
+All dependencies have been fetched
+make[1]: Leaving directory '/workspace/elixir'
+make build
+make[1]: Entering directory '/workspace/elixir'
+mix build
+Generated escript bin/symphony with MIX_ENV=dev
+make[1]: Leaving directory '/workspace/elixir'
+make fmt-check
+make[1]: Entering directory '/workspace/elixir'
+mix format --check-formatted
+make[1]: Leaving directory '/workspace/elixir'
+make lint
+make[1]: Entering directory '/workspace/elixir'
+mix lint
+specs.check: all public functions have @spec or exemption
+Checking 126 source files (this might take a while) ...
+
+  Software Design                                                               
+┃ 
+┃ [D] ↘ Nested modules could be aliased at the top of the invoking module.
+┃       lib/symphony_elixir/orchestrator.ex:1494:31 #(SymphonyElixir.Orchestrator.handle_call)
+┃ [D] ↘ Nested modules could be aliased at the top of the invoking module.
+┃       lib/symphony_elixir/linear/webhook.ex:170:14 #(SymphonyElixir.Linear.Webhook.normalize_agent_action)
+┃ [D] ↘ Nested modules could be aliased at the top of the invoking module.
+┃       lib/symphony_elixir/linear/coordinator.ex:437:21 #(SymphonyElixir.Linear.Coordinator.add_publication)
+┃ [D] ↘ Nested modules could be aliased at the top of the invoking module.
+┃       lib/symphony_elixir/linear/client.ex:339:25 #(SymphonyElixir.Linear.Client.publish_agent_activity)
+┃ [D] ↘ Nested modules could be aliased at the top of the invoking module.
+┃       lib/symphony_elixir/linear/delegation.ex:140:11 #(SymphonyElixir.Linear.Delegation.client_opts)
+┃ [D] ↘ Nested modules could be aliased at the top of the invoking module.
+┃       test/symphony_elixir/linear_delegation_test.exs:740:58 #(SymphonyElixir.LinearDelegationTest)
+┃ [D] ↘ Nested modules could be aliased at the top of the invoking module.
+┃       test/symphony_elixir/linear_delegation_test.exs:739:58 #(SymphonyElixir.LinearDelegationTest)
+┃ [D] ↘ Nested modules could be aliased at the top of the invoking module.
+┃       test/symphony_elixir/linear_delegation_test.exs:738:23 #(SymphonyElixir.LinearDelegationTest)
+┃ [D] ↘ Nested modules could be aliased at the top of the invoking module.
+┃       test/symphony_elixir/linear_delegation_test.exs:653:14 #(SymphonyElixir.LinearDelegationTest)
+┃ [D] ↘ Nested modules could be aliased at the top of the invoking module.
+┃       lib/symphony_elixir/config.ex:50:15 #(SymphonyElixir.Config.linear_delegation)
+┃ [D] ↘ Nested modules could be aliased at the top of the invoking module.
+┃       test/symphony_elixir/linear_oauth_test.exs:49:71 #(SymphonyElixir.Linear.OAuthTest)
+
+  Code Readability                                                              
+┃ 
+┃ [R] → `with` contains only one <- clause and an `else` branch, consider using 
+┃       `case` instead
+┃       lib/symphony_elixir/orchestrator.ex:2283:5 #(SymphonyElixir.Orchestrator.register_workstream_process)
+┃ [R] → `with` contains only one <- clause and an `else` branch, consider using 
+┃       `case` instead
+┃       lib/symphony_elixir/linear/webhook.ex:78:7 #(SymphonyElixir.Linear.Webhook.verify_signature)
+┃ [R] → `with` contains only one <- clause and an `else` branch, consider using 
+┃       `case` instead
+┃       lib/symphony_elixir/codex/app_server.ex:305:5 #(SymphonyElixir.Codex.AppServer.qualify)
+┃ [R] → `with` contains only one <- clause and an `else` branch, consider using 
+┃       `case` instead
+┃       lib/symphony_elixir/workstream_cancellation.ex:211:5 #(SymphonyElixir.WorkstreamCancellation.group_members)
+┃ [R] ↘ Line is too long (max is 120, was 127).
+┃       lib/symphony_elixir/workstream_run.ex:585:121 #(SymphonyElixir.WorkstreamRun.approve_wait)
+┃ [R] ↘ Line is too long (max is 120, was 125).
+┃       lib/symphony_elixir/workstream_run.ex:479:121 #(SymphonyElixir.WorkstreamRun.store_question_answer)
+┃ [R] ↘ Line is too long (max is 120, was 144).
+┃       lib/symphony_elixir/validation_command.ex:108:121 #(SymphonyElixir.ValidationCommand.collect)
+┃ [R] ↘ Line is too long (max is 120, was 137).
+┃       lib/symphony_elixir/orchestrator.ex:2437:121 #(SymphonyElixir.Orchestrator.accept_workstream_result)
+┃ [R] ↘ Line is too long (max is 120, was 133).
+┃       lib/symphony_elixir/orchestrator.ex:2434:121 #(SymphonyElixir.Orchestrator.accept_workstream_result)
+┃ [R] ↘ Line is too long (max is 120, was 131).
+┃       lib/symphony_elixir/codex/app_server.ex:1123:121 #(SymphonyElixir.Codex.AppServer.receive_loop)
+┃ [R] ↘ Line is too long (max is 120, was 123).
+┃       test/symphony_elixir/durable_workstream_test.exs:132:121 #(SymphonyElixir.DurableWorkstreamTest.persist_stopped_run)
+┃ [R] ↘ Line is too long (max is 120, was 133).
+┃       lib/symphony_elixir/worker_operation.ex:969:121 #(SymphonyElixir.WorkerOperation.read_rpc_line)
+┃ [R] ↘ Line is too long (max is 120, was 133).
+┃       lib/symphony_elixir/worker_operation.ex:965:121 #(SymphonyElixir.WorkerOperation.read_rpc_line)
+┃ [R] ↘ Line is too long (max is 120, was 142).
+┃       lib/symphony_elixir/worker_operation.ex:326:121 #(SymphonyElixir.WorkerOperation.await_stream_ready)
+┃ [R] ↘ Line is too long (max is 120, was 124).
+┃       lib/symphony_elixir/linear/oauth.ex:68:121 #(SymphonyElixir.Linear.OAuth.handle_call)
+┃ [R] ↘ Line is too long (max is 120, was 141).
+┃       lib/symphony_elixir/linear/oauth.ex:64:121 #(SymphonyElixir.Linear.OAuth.handle_call)
+┃ [R] ↘ Line is too long (max is 120, was 160).
+┃       lib/symphony_elixir/linear/oauth.ex:18:121 #(SymphonyElixir.Linear.OAuth.client_opts)
+┃ [R] ↘ Line is too long (max is 120, was 135).
+┃       lib/symphony_elixir/linear/coordinator.ex:438:121 #(SymphonyElixir.Linear.Coordinator.add_publication)
+┃ [R] ↘ Line is too long (max is 120, was 135).
+┃       lib/symphony_elixir/linear/client.ex:353:121 #(SymphonyElixir.Linear.Client.publish_agent_activity)
+┃ [R] ↘ Line is too long (max is 120, was 129).
+┃       lib/symphony_elixir/codex/app_server.ex:1025:121 #(SymphonyElixir.Codex.AppServer.started_thread_response)
+┃ [R] ↘ Line is too long (max is 120, was 136).
+┃       lib/symphony_elixir/codex/app_server.ex:327:121 #(SymphonyElixir.Codex.AppServer.qualify)
+┃ [R] ↘ Line is too long (max is 120, was 143).
+┃       lib/symphony_elixir/codex/app_server.ex:255:121 #(SymphonyElixir.Codex.AppServer.run_turn)
+┃ [R] ↘ Line is too long (max is 120, was 137).
+┃       lib/symphony_elixir/codex/app_server.ex:108:121 #(SymphonyElixir.Codex.AppServer.start_session_impl)
+┃ [R] ↘ Line is too long (max is 120, was 191).
+┃       test/symphony_elixir/agent_qualification_test.exs:144:121 #(SymphonyElixir.AgentQualificationTest.options)
+┃ [R] ↘ Prefer using an implicit `try` rather than explicit `try`.
+┃       lib/symphony_elixir_web/controllers/linear_webhook_controller.ex:38:5 #(SymphonyElixirWeb.LinearWebhookController.dispatch_event)
+┃ [R] ↘ Line is too long (max is 120, was 135).
+┃       lib/symphony_elixir/workstream_runner.ex:752:121 #(SymphonyElixir.WorkstreamRunner.safe_agent_error)
+┃ [R] ↘ Line is too long (max is 120, was 133).
+┃       lib/symphony_elixir/workstream_run.ex:343:121 #(SymphonyElixir.WorkstreamRun.retry_transport)
+┃ [R] ↘ Line is too long (max is 120, was 168).
+┃       lib/symphony_elixir/workstream_run.ex:342:121 #(SymphonyElixir.WorkstreamRun.retry_transport)
+┃ [R] ↘ Line is too long (max is 120, was 173).
+┃       lib/symphony_elixir/workstream_run.ex:121:121 #(SymphonyElixir.WorkstreamRun.start_stage)
+┃ [R] ↘ Line is too long (max is 120, was 196).
+┃       lib/symphony_elixir/validation.ex:119:121 #(SymphonyElixir.Validation.storage_roots)
+┃ [R] ↘ Line is too long (max is 120, was 141).
+┃       lib/symphony_elixir/orchestrator.ex:2348:121 #(SymphonyElixir.Orchestrator.database_outside_workspace)
+┃ [R] ↘ Line is too long (max is 120, was 145).
+┃       lib/symphony_elixir/orchestrator.ex:2344:121 #(SymphonyElixir.Orchestrator.check_workstream_definition)
+┃ [R] ↘ Line is too long (max is 120, was 130).
+┃       lib/symphony_elixir/linear/coordinator.ex:452:121 #(SymphonyElixir.Linear.Coordinator.blocked_task)
+┃ [R] ↘ Line is too long (max is 120, was 175).
+┃       lib/symphony_elixir/codex/app_server.ex:388:121 #(SymphonyElixir.Codex.AppServer.named_options)
+┃ [R] ↘ Line is too long (max is 120, was 150).
+┃       test/symphony_elixir/workstream_test.exs:592:121 #(SymphonyElixir.WorkstreamTest)
+┃ [R] ↘ Line is too long (max is 120, was 150).
+┃       test/symphony_elixir/workstream_test.exs:572:121 #(SymphonyElixir.WorkstreamTest)
+┃ [R] ↘ More than 3 quotes found inside string literal, consider using a sigil 
+┃       instead.
+┃       test/symphony_elixir/workstream_cancellation_test.exs:73 #(SymphonyElixir.WorkstreamCancellationTest)
+┃ [R] ↘ More than 3 quotes found inside string literal, consider using a sigil 
+┃       instead.
+┃       test/symphony_elixir/workstream_cancellation_test.exs:34 #(SymphonyElixir.WorkstreamCancellationTest)
+┃ [R] ↘ More than 3 quotes found inside string literal, consider using a sigil 
+┃       instead.
+┃       test/symphony_elixir/workstream_cancellation_test.exs:12 #(SymphonyElixir.WorkstreamCancellationTest)
+┃ [R] ↘ Line is too long (max is 120, was 141).
+┃       test/symphony_elixir/worker_operation_test.exs:247:121 #(SymphonyElixir.WorkerOperationTest)
+┃ [R] ↘ Line is too long (max is 120, was 199).
+┃       test/symphony_elixir/validation_lifecycle_test.exs:146:121 #(SymphonyElixir.ValidationLifecycleTest)
+┃ [R] ↘ Line is too long (max is 120, was 199).
+┃       test/symphony_elixir/linear_delegation_test.exs:790:121 #(SymphonyElixir.LinearDelegationTest)
+┃ [R] ↘ Line is too long (max is 120, was 179).
+┃       test/symphony_elixir/linear_delegation_test.exs:509:121 #(SymphonyElixir.LinearDelegationTest)
+┃ [R] ↘ Line is too long (max is 120, was 156).
+┃       test/symphony_elixir/durable_workstream_test.exs:657:121 #(SymphonyElixir.DurableWorkstreamTest)
+┃ [R] ↘ Line is too long (max is 120, was 154).
+┃       test/symphony_elixir/durable_workstream_test.exs:652:121 #(SymphonyElixir.DurableWorkstreamTest)
+┃ [R] ↘ Line is too long (max is 120, was 143).
+┃       test/symphony_elixir/durable_workstream_test.exs:649:121 #(SymphonyElixir.DurableWorkstreamTest)
+┃ [R] ↘ Line is too long (max is 120, was 154).
+┃       test/symphony_elixir/durable_workstream_test.exs:648:121 #(SymphonyElixir.DurableWorkstreamTest)
+┃ [R] ↘ Line is too long (max is 120, was 172).
+┃       test/symphony_elixir/durable_workstream_test.exs:623:121 #(SymphonyElixir.DurableWorkstreamTest)
+┃ [R] ↘ Line is too long (max is 120, was 132).
+┃       test/symphony_elixir/durable_workstream_test.exs:485:121 #(SymphonyElixir.DurableWorkstreamTest)
+┃ [R] ↘ Line is too long (max is 120, was 143).
+┃       test/symphony_elixir/durable_workstream_test.exs:202:121 #(SymphonyElixir.DurableWorkstreamTest)
+┃ [R] ↘ Line is too long (max is 120, was 145).
+┃       test/symphony_elixir/durable_workstream_test.exs:199:121 #(SymphonyElixir.DurableWorkstreamTest)
+┃ [R] ↘ Line is too long (max is 120, was 127).
+┃       test/symphony_elixir/durable_workstream_test.exs:198:121 #(SymphonyElixir.DurableWorkstreamTest)
+┃ [R] ↘ Line is too long (max is 120, was 158).
+┃       test/symphony_elixir/durable_workstream_test.exs:196:121 #(SymphonyElixir.DurableWorkstreamTest)
+┃ [R] ↘ Line is too long (max is 120, was 143).
+┃       lib/symphony_elixir/workstream_runner.ex:12:121 #(SymphonyElixir.WorkstreamRunner)
+┃ [R] ↘ The alias `SymphonyElixir.Codex.AppServer` is not alphabetically ordered 
+┃       among its group.
+┃       lib/symphony_elixir/workstream_runner.ex:11:9 #(SymphonyElixir.WorkstreamRunner)
+┃ [R] ↘ Line is too long (max is 120, was 121).
+┃       lib/symphony_elixir/worker_operation.ex:204:121 #(SymphonyElixir.WorkerOperation)
+┃ [R] ↘ The alias `SymphonyElixir.Tracker.Issue` is not alphabetically ordered 
+┃       among its group.
+┃       lib/symphony_elixir/orchestrator.ex:11:9 #(SymphonyElixir.Orchestrator)
+┃ [R] ↘ Line is too long (max is 120, was 131).
+┃       lib/symphony_elixir/orchestrator.ex:10:121 #(SymphonyElixir.Orchestrator)
+┃ [R] ↘ Line is too long (max is 120, was 122).
+┃       lib/symphony_elixir/agent_qualification.ex:31:121 #(SymphonyElixir.AgentQualification.run)
+┃ [R] ↘ Line is too long (max is 120, was 124).
+┃       lib/mix/tasks/validation.run.ex:46:121 #(Mix.Tasks.Validation.Run.run)
+┃ [R] ↘ Line is too long (max is 120, was 154).
+┃       lib/mix/tasks/validation.run.ex:45:121 #(Mix.Tasks.Validation.Run.run)
+┃ [R] ↘ Line is too long (max is 120, was 140).
+┃       test/symphony_elixir/workstream_runner_test.exs:236:121 #(SymphonyElixir.WorkstreamRunnerTest)
+┃ [R] ↘ Line is too long (max is 120, was 132).
+┃       test/symphony_elixir/workstream_run_test.exs:274:121 #(SymphonyElixir.WorkstreamRunTest)
+┃ [R] ↘ Line is too long (max is 120, was 124).
+┃       test/symphony_elixir/workstream_run_test.exs:235:121 #(SymphonyElixir.WorkstreamRunTest)
+┃ [R] ↘ Line is too long (max is 120, was 145).
+┃       test/symphony_elixir/workstream_run_test.exs:184:121 #(SymphonyElixir.WorkstreamRunTest)
+┃ [R] ↘ Line is too long (max is 120, was 134).
+┃       test/symphony_elixir/workstream_run_test.exs:58:121 #(SymphonyElixir.WorkstreamRunTest)
+┃ [R] ↘ Line is too long (max is 120, was 160).
+┃       test/symphony_elixir/workstream_run_test.exs:50:121 #(SymphonyElixir.WorkstreamRunTest)
+┃ [R] ↘ Line is too long (max is 120, was 122).
+┃       test/symphony_elixir/workstream_run_test.exs:34:121 #(SymphonyElixir.WorkstreamRunTest)
+┃ [R] ↘ Line is too long (max is 120, was 162).
+┃       test/symphony_elixir/validation_test.exs:265:121 #(SymphonyElixir.ValidationStorageTest)
+┃ [R] ↘ Line is too long (max is 120, was 162).
+┃       test/symphony_elixir/validation_test.exs:264:121 #(SymphonyElixir.ValidationStorageTest)
+┃ [R] ↘ Line is too long (max is 120, was 137).
+┃       test/symphony_elixir/validation_test.exs:254:121 #(SymphonyElixir.ValidationGitSafetyTest)
+┃ [R] ↘ Line is too long (max is 120, was 150).
+┃       test/symphony_elixir/validation_test.exs:143:121 #(SymphonyElixir.ValidationTest)
+┃ [R] ↘ Line is too long (max is 120, was 142).
+┃       test/symphony_elixir/validation_test.exs:126:121 #(SymphonyElixir.ValidationTest)
+┃ [R] ↘ Line is too long (max is 120, was 134).
+┃       test/symphony_elixir/validation_test.exs:119:121 #(SymphonyElixir.ValidationTest)
+┃ [R] ↘ Line is too long (max is 120, was 128).
+┃       test/symphony_elixir/validation_test.exs:117:121 #(SymphonyElixir.ValidationTest)
+┃ [R] ↘ Line is too long (max is 120, was 142).
+┃       test/symphony_elixir/validation_test.exs:116:121 #(SymphonyElixir.ValidationTest)
+┃ [R] ↘ Line is too long (max is 120, was 141).
+┃       test/symphony_elixir/validation_test.exs:115:121 #(SymphonyElixir.ValidationTest)
+┃ [R] ↘ Line is too long (max is 120, was 193).
+┃       test/symphony_elixir/validation_test.exs:114:121 #(SymphonyElixir.ValidationTest)
+┃ [R] ↘ Line is too long (max is 120, was 136).
+┃       test/symphony_elixir/validation_test.exs:83:121 #(SymphonyElixir.ValidationTest)
+┃ [R] ↘ Line is too long (max is 120, was 126).
+┃       test/symphony_elixir/software_change_test.exs:50:121 #(SymphonyElixir.SoftwareChangeTest)
+┃ [R] ↘ Line is too long (max is 120, was 131).
+┃       test/symphony_elixir/software_change_test.exs:48:121 #(SymphonyElixir.SoftwareChangeTest)
+┃ [R] ↘ Line is too long (max is 120, was 142).
+┃       test/symphony_elixir/software_change_test.exs:46:121 #(SymphonyElixir.SoftwareChangeTest)
+┃ [R] ↘ Line is too long (max is 120, was 191).
+┃       test/symphony_elixir/linear_oauth_test.exs:92:121 #(SymphonyElixir.Linear.OAuthTest)
+┃ [R] ↘ Line is too long (max is 120, was 128).
+┃       test/symphony_elixir/linear_oauth_test.exs:88:121 #(SymphonyElixir.Linear.OAuthTest)
+┃ [R] ↘ Line is too long (max is 120, was 197).
+┃       test/symphony_elixir/linear_oauth_test.exs:80:121 #(SymphonyElixir.Linear.OAuthTest)
+┃ [R] ↘ Line is too long (max is 120, was 129).
+┃       test/symphony_elixir/linear_oauth_test.exs:64:121 #(SymphonyElixir.Linear.OAuthTest)
+┃ [R] ↘ Line is too long (max is 120, was 181).
+┃       test/symphony_elixir/linear_oauth_test.exs:54:121 #(SymphonyElixir.Linear.OAuthTest)
+┃ [R] ↘ Line is too long (max is 120, was 124).
+┃       test/symphony_elixir/linear_http_test.exs:40:121 #(SymphonyElixir.LinearHttpTest)
+┃ [R] ↘ Line is too long (max is 120, was 191).
+┃       test/symphony_elixir/linear_http_test.exs:35:121 #(SymphonyElixir.LinearHttpTest)
+┃ [R] ↘ Line is too long (max is 120, was 178).
+┃       test/symphony_elixir/linear_agent_client_test.exs:285:121 #(SymphonyElixir.Linear.AgentClientTest)
+┃ [R] ↘ Line is too long (max is 120, was 164).
+┃       test/symphony_elixir/app_server_test.exs:1050:121 #(SymphonyElixir.AppServerTest)
+┃ [R] ↘ More than 3 quotes found inside string literal, consider using a sigil 
+┃       instead.
+┃       test/symphony_elixir/agent_qualification_test.exs:101 #(SymphonyElixir.AgentQualificationTest)
+┃ [R] ↘ More than 3 quotes found inside string literal, consider using a sigil 
+┃       instead.
+┃       test/symphony_elixir/agent_qualification_test.exs:74 #(SymphonyElixir.AgentQualificationTest)
+
+  Refactoring opportunities                                                     
+┃ 
+┃ [F] ↗ Last clause in `with` is redundant.
+┃       lib/symphony_elixir/workstream_store.ex:920:11 #(SymphonyElixir.WorkstreamStore.query)
+┃ [F] ↗ Last clause in `with` is redundant.
+┃       lib/symphony_elixir/workstream_store.ex:754:5 #(SymphonyElixir.WorkstreamStore.persist_commit)
+┃ [F] ↗ Last clause in `with` is redundant.
+┃       lib/symphony_elixir/workstream_store.ex:574:5 #(SymphonyElixir.WorkstreamStore.persist_linear_commit)
+┃ [F] ↗ Last clause in `with` is redundant.
+┃       lib/symphony_elixir/workstream_store.ex:156:7 #(SymphonyElixir.WorkstreamStore.handle_call)
+┃ [F] ↗ Last clause in `with` is redundant.
+┃       lib/symphony_elixir/worker_operation.ex:102:5 #(SymphonyElixir.WorkerOperation.validate_registration_identity)
+┃ [F] ↗ Last clause in `with` is redundant.
+┃       lib/symphony_elixir/linear/webhook.ex:22:5 #(SymphonyElixir.Linear.Webhook.verify)
+┃ [F] ↗ Last clause in `with` is redundant.
+┃       lib/symphony_elixir/workstream_store.ex:344:11 #(SymphonyElixir.WorkstreamStore.ensure_parent_directory)
+┃ [F] ↗ Last clause in `with` is redundant.
+┃       lib/symphony_elixir/candidate_git.ex:92:5 #(SymphonyElixir.CandidateGit.copy_metadata)
+┃ [F] ↗ Last clause in `with` is redundant.
+┃       lib/symphony_elixir/agent_readiness.ex:86:5 #(SymphonyElixir.AgentReadiness.check)
+┃ [F] ↗ Last clause in `with` is redundant.
+┃       lib/symphony_elixir/agent_readiness.ex:61:5 #(SymphonyElixir.AgentReadiness.validate_definition)
+┃ [F] → Function is too complex (cyclomatic complexity is 18, max is 9).
+┃       lib/symphony_elixir/validation.ex:279:8 #(SymphonyElixir.Validation.evaluate)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/worker_operation.ex:581:13 #(SymphonyElixir.WorkerOperation.collect_stream)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/worker_operation.ex:521:13 #(SymphonyElixir.WorkerOperation.run_started_check)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/codex/app_server.ex:1315:11 #(SymphonyElixir.Codex.AppServer.handle_turn_method)
+┃ [F] → Function is too complex (cyclomatic complexity is 11, max is 9).
+┃       lib/symphony_elixir/worker_operation.ex:511:8 #(SymphonyElixir.WorkerOperation.run_started_check)
+┃ [F] → Function is too complex (cyclomatic complexity is 11, max is 9).
+┃       lib/symphony_elixir/codex/app_server.ex:1246:8 #(SymphonyElixir.Codex.AppServer.handle_turn_method)
+┃ [F] → Function is too complex (cyclomatic complexity is 11, max is 9).
+┃       lib/symphony_elixir/codex/app_server.ex:1148:8 #(SymphonyElixir.Codex.AppServer.handle_incoming)
+┃ [F] → Function takes too many parameters (arity is 9, max is 8).
+┃       lib/symphony_elixir/validation.ex:210:8 #(SymphonyElixir.Validation.execute_new)
+┃ [F] → Function takes too many parameters (arity is 9, max is 8).
+┃       lib/symphony_elixir/validation.ex:194:8 #(SymphonyElixir.Validation.execute_or_recover)
+┃ [F] → Function takes too many parameters (arity is 9, max is 8).
+┃       lib/symphony_elixir/codex/app_server.ex:1246:8 #(SymphonyElixir.Codex.AppServer.handle_turn_method)
+┃ [F] → Function is too complex (cyclomatic complexity is 10, max is 9).
+┃       lib/symphony_elixir/workstream_run.ex:593:8 #(SymphonyElixir.WorkstreamRun.apply_wait_answer)
+┃ [F] → Function is too complex (cyclomatic complexity is 10, max is 9).
+┃       lib/symphony_elixir/linear/coordinator.ex:315:8 #(SymphonyElixir.Linear.Coordinator.apply_result)
+┃ [F] → Function is too complex (cyclomatic complexity is 10, max is 9).
+┃       lib/symphony_elixir/linear/coordinator.ex:226:8 #(SymphonyElixir.Linear.Coordinator.apply_result)
+┃ [F] → Function body is nested too deep (max depth is 2, was 5).
+┃       lib/symphony_elixir/candidate_git.ex:137:15 #(SymphonyElixir.CandidateGit.copy_entry)
+┃ [F] → Function body is nested too deep (max depth is 2, was 4).
+┃       lib/symphony_elixir/workstream_store.ex:510:16 #(SymphonyElixir.WorkstreamStore.commit_transaction)
+┃ [F] → Function body is nested too deep (max depth is 2, was 4).
+┃       lib/symphony_elixir/worker_operation.ex:283:17 #(SymphonyElixir.WorkerOperation.open_and_release)
+┃ [F] → Function body is nested too deep (max depth is 2, was 4).
+┃       lib/symphony_elixir/linear/oauth.ex:32:33 #(SymphonyElixir.Linear.OAuth.graphql)
+┃ [F] → Function is too complex (cyclomatic complexity is 15, max is 9).
+┃       lib/symphony_elixir/codex/app_server.ex:175:7 #(SymphonyElixir.Codex.AppServer.run_turn)
+┃ [F] → Function is too complex (cyclomatic complexity is 14, max is 9).
+┃       lib/symphony_elixir/workstream_runner.ex:411:8 #(SymphonyElixir.WorkstreamRunner.execute_stage_attempt)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       test/symphony_elixir/validation_policy_test.exs:315:36 #(SymphonyElixir.ValidationPolicyTest.put_check_by_id)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       test/symphony_elixir/linear_delegation_test.exs:979:19 #(SymphonyElixir.LinearDelegationTest.wait_run)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       test/symphony_elixir/linear_delegation_test.exs:963:17 #(SymphonyElixir.LinearDelegationTest.wait_linear_task)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/workstream_store.ex:871:13 #(SymphonyElixir.WorkstreamStore.transaction)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/workstream_store.ex:799:11 #(SymphonyElixir.WorkstreamStore.upsert_operations)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/workstream_store.ex:779:11 #(SymphonyElixir.WorkstreamStore.upsert_attempts)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/workstream_store.ex:561:12 #(SymphonyElixir.WorkstreamStore.commit_linear_transaction)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/workstream_store.ex:541:13 #(SymphonyElixir.WorkstreamStore.receive_linear_event)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/workstream_store.ex:493:12 #(SymphonyElixir.WorkstreamStore.run_migration)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/workstream_runner.ex:270:11 #(SymphonyElixir.WorkstreamRunner.external_path_option)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/workstream_cancellation.ex:82:11 #(SymphonyElixir.WorkstreamCancellation.cancel)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/worker_operation.ex:432:11 #(SymphonyElixir.WorkerOperation.stop_result)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/orchestrator.ex:2672:9 #(SymphonyElixir.Orchestrator.find_workstream_worker)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/orchestrator.ex:1518:15 #(SymphonyElixir.Orchestrator.handle_call)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/linear/webhook.ex:170:9 #(SymphonyElixir.Linear.Webhook.normalize_agent_action)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/linear/webhook.ex:81:9 #(SymphonyElixir.Linear.Webhook.verify_signature)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/linear/oauth.ex:66:27 #(SymphonyElixir.Linear.OAuth.handle_call)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/linear/coordinator.ex:44:13 #(SymphonyElixir.Linear.Coordinator.receive_event)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/linear/client.ex:353:11 #(SymphonyElixir.Linear.Client.publish_agent_activity)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/linear/client.ex:323:11 #(SymphonyElixir.Linear.Client.acknowledge_agent_session)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/codex/app_server.ex:309:9 #(SymphonyElixir.Codex.AppServer.qualify)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/codex/app_server.ex:255:16 #(SymphonyElixir.Codex.AppServer.run_turn)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/codex/app_server.ex:157:11 #(SymphonyElixir.Codex.AppServer.start_session_impl)
+┃ [F] → Function is too complex (cyclomatic complexity is 13, max is 9).
+┃       lib/symphony_elixir/workstream_store.ex:823:8 #(SymphonyElixir.WorkstreamStore.validate_commit)
+┃ [F] → Function is too complex (cyclomatic complexity is 13, max is 9).
+┃       lib/symphony_elixir/linear/client.ex:300:7 #(SymphonyElixir.Linear.Client.acknowledge_agent_session)
+┃ [F] → Function is too complex (cyclomatic complexity is 13, max is 9).
+┃       lib/symphony_elixir/candidate_git.ex:119:8 #(SymphonyElixir.CandidateGit.copy_entry)
+┃ [F] → Function is too complex (cyclomatic complexity is 12, max is 9).
+┃       lib/symphony_elixir/linear/oauth.ex:49:7 #(SymphonyElixir.Linear.OAuth.handle_call)
+┃ [F] → Function is too complex (cyclomatic complexity is 11, max is 9).
+┃       lib/symphony_elixir/workstream_store.ex:860:8 #(SymphonyElixir.WorkstreamStore.transaction)
+┃ [F] → Function is too complex (cyclomatic complexity is 10, max is 9).
+┃       lib/symphony_elixir/worker_operation.ex:267:8 #(SymphonyElixir.WorkerOperation.open_and_release)
+┃ [F] → Function is too complex (cyclomatic complexity is 10, max is 9).
+┃       lib/symphony_elixir/linear/webhook.ex:157:8 #(SymphonyElixir.Linear.Webhook.normalize_agent_action)
+┃ [F] → Function is too complex (cyclomatic complexity is 10, max is 9).
+┃       lib/symphony_elixir/linear/coordinator.ex:33:7 #(SymphonyElixir.Linear.Coordinator.receive_event)
+┃ [F] → Function body is nested too deep (max depth is 2, was 5).
+┃       lib/symphony_elixir/candidate_git.ex:248:15 #(SymphonyElixir.CandidateGit.object_files)
+┃ [F] → Function body is nested too deep (max depth is 2, was 4).
+┃       lib/symphony_elixir/workstream_runner.ex:292:15 #(SymphonyElixir.WorkstreamRunner.validation_base_option)
+┃ [F] → Function body is nested too deep (max depth is 2, was 4).
+┃       lib/symphony_elixir/workstream_cancellation.ex:216:13 #(SymphonyElixir.WorkstreamCancellation.group_members)
+┃ [F] → Function body is nested too deep (max depth is 2, was 4).
+┃       lib/symphony_elixir/validation_policy.ex:467:15 #(SymphonyElixir.ValidationPolicy.required_assertions_passed)
+┃ [F] → Function body is nested too deep (max depth is 2, was 4).
+┃       lib/symphony_elixir/orchestrator.ex:2624:15 #(SymphonyElixir.Orchestrator.acknowledge_committed_receipts)
+┃ [F] → Function is too complex (cyclomatic complexity is 18, max is 9).
+┃       lib/symphony_elixir/linear/coordinator.ex:69:7 #(SymphonyElixir.Linear.Coordinator.process)
+┃ [F] → Function body is nested too deep (max depth is 2, was 4).
+┃       lib/symphony_elixir/candidate_git.ex:209:13 #(SymphonyElixir.CandidateGit.regular_files)
+┃ [F] → Function body is nested too deep (max depth is 2, was 4).
+┃       lib/symphony_elixir/candidate_git.ex:62:13 #(SymphonyElixir.CandidateGit.reject_metadata_links)
+┃ [F] → Function is too complex (cyclomatic complexity is 16, max is 9).
+┃       lib/symphony_elixir/worker_operation.ex:483:8 #(SymphonyElixir.WorkerOperation.terminal_proof?)
+┃ [F] → Function is too complex (cyclomatic complexity is 15, max is 9).
+┃       lib/symphony_elixir/workstream_run.ex:739:8 #(SymphonyElixir.WorkstreamRun.agent_continuation)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/workstream_store.ex:469:11 #(SymphonyElixir.WorkstreamStore.migrate)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/workstream_store.ex:379:13 #(SymphonyElixir.WorkstreamStore.ensure_database_file)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/workstream_store.ex:344:11 #(SymphonyElixir.WorkstreamStore.ensure_parent_directory)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/workstream_runner.ex:328:29 #(SymphonyElixir.WorkstreamRunner.validation_paths_outside_definitions)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/workstream_run.ex:725:11 #(SymphonyElixir.WorkstreamRun.preserve_retry_context)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/workstream_run.ex:667:11 #(SymphonyElixir.WorkstreamRun.question_current?)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/workstream_run.ex:556:13 #(SymphonyElixir.WorkstreamRun.parse_targeted_reply)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/workstream_run.ex:229:37 #(SymphonyElixir.WorkstreamRun.ask_question)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/workstream_run.ex:196:11 #(SymphonyElixir.WorkstreamRun.finish_stage)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/workstream_cancellation.ex:244:9 #(SymphonyElixir.WorkstreamCancellation.group_identities)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/validation_policy.ex:223:11 #(SymphonyElixir.ValidationPolicy.normalize_checks)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/validation_policy.ex:85:11 #(SymphonyElixir.ValidationPolicy.validate_required)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/validation.ex:394:14 #(SymphonyElixir.Validation.verify_artifacts)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/validation.ex:262:67 #(SymphonyElixir.Validation.writable_source)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/orchestrator.ex:2413:63 #(SymphonyElixir.Orchestrator.start_workstream_stage)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/orchestrator.ex:2221:11 #(SymphonyElixir.Orchestrator.init_workstreams)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/orchestrator.ex:180:13 #(SymphonyElixir.Orchestrator.handle_info)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/orchestrator.ex:82:13 #(SymphonyElixir.Orchestrator.init)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/linear/webhook.ex:221:11 #(SymphonyElixir.Linear.Webhook.normalize_issue_event)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/linear/coordinator.ex:404:21 #(SymphonyElixir.Linear.Coordinator.run_publications)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/linear/coordinator.ex:196:76 #(SymphonyElixir.Linear.Coordinator.process_task)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/linear/coordinator.ex:154:64 #(SymphonyElixir.Linear.Coordinator.ready?)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/linear/coordinator.ex:98:51 #(SymphonyElixir.Linear.Coordinator.process)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/linear/coordinator.ex:19:41 #(SymphonyElixir.Linear.Coordinator.init)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/linear/client.ex:281:13 #(SymphonyElixir.Linear.Client.fetch_agent_session)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/linear/client.ex:261:13 #(SymphonyElixir.Linear.Client.fetch_delegated_issue)
+┃ [F] → Function is too complex (cyclomatic complexity is 12, max is 9).
+┃       lib/symphony_elixir/linear/webhook.ex:248:8 #(SymphonyElixir.Linear.Webhook.required_identity)
+┃ [F] → Function is too complex (cyclomatic complexity is 12, max is 9).
+┃       lib/symphony_elixir/linear/coordinator.ex:181:8 #(SymphonyElixir.Linear.Coordinator.process_task)
+┃ [F] → Function is too complex (cyclomatic complexity is 11, max is 9).
+┃       lib/symphony_elixir/workstream_run.ex:171:7 #(SymphonyElixir.WorkstreamRun.finish_stage)
+┃ [F] → Function is too complex (cyclomatic complexity is 11, max is 9).
+┃       lib/symphony_elixir/workstream_cancellation.ex:106:8 #(SymphonyElixir.WorkstreamCancellation.normalize_identity)
+┃ [F] → Function is too complex (cyclomatic complexity is 11, max is 9).
+┃       lib/symphony_elixir/validation_policy.ex:415:8 #(SymphonyElixir.ValidationPolicy.normalize_evidence_checks)
+┃ [F] → Function is too complex (cyclomatic complexity is 11, max is 9).
+┃       lib/symphony_elixir/linear/coordinator.ex:391:8 #(SymphonyElixir.Linear.Coordinator.run_publications)
+┃ [F] → Function is too complex (cyclomatic complexity is 11, max is 9).
+┃       lib/symphony_elixir/codex/app_server.ex:641:8 #(SymphonyElixir.Codex.AppServer.native_approval_question?)
+┃ [F] → Function is too complex (cyclomatic complexity is 11, max is 9).
+┃       lib/symphony_elixir/candidate_git.ex:234:8 #(SymphonyElixir.CandidateGit.object_files)
+┃ [F] → Function is too complex (cyclomatic complexity is 10, max is 9).
+┃       lib/symphony_elixir/workstream_store.ex:634:8 #(SymphonyElixir.WorkstreamStore.validate_linear_commit)
+┃ [F] → Function is too complex (cyclomatic complexity is 10, max is 9).
+┃       lib/symphony_elixir/workstream_runner.ex:648:8 #(SymphonyElixir.WorkstreamRunner.continuation_prompt)
+┃ [F] → Function is too complex (cyclomatic complexity is 10, max is 9).
+┃       lib/symphony_elixir/workstream_run.ex:88:7 #(SymphonyElixir.WorkstreamRun.start_stage)
+┃ [F] → Function is too complex (cyclomatic complexity is 10, max is 9).
+┃       lib/symphony_elixir/validation.ex:384:8 #(SymphonyElixir.Validation.verify_artifacts)
+┃ [F] → Function is too complex (cyclomatic complexity is 10, max is 9).
+┃       lib/symphony_elixir/codex/app_server.ex:599:8 #(SymphonyElixir.Codex.AppServer.execute_native_user_input)
+┃ [F] → Avoid matches in `if` conditions.
+┃       lib/symphony_elixir/validation.ex:391:17 #(SymphonyElixir.Validation.verify_artifacts)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/symphony_elixir/linear/text.ex:11:11 #(SymphonyElixir.Linear.Text.safe)
+┃ [F] → Function body is nested too deep (max depth is 2, was 3).
+┃       lib/mix/tasks/validation.run.ex:52:11 #(Mix.Tasks.Validation.Run.run)
+┃ [F] → Function is too complex (cyclomatic complexity is 12, max is 9).
+┃       lib/mix/tasks/validation.run.ex:8:7 #(Mix.Tasks.Validation.Run.run)
+┃ [F] ↘ Avoid `apply/2` and `apply/3` when the number of arguments is known.
+┃       lib/symphony_elixir/linear/delegation.ex:156:11 #(SymphonyElixir.Linear.Delegation.qualified_agent)
+
+Please report incorrect results: https://github.com/rrrene/credo/issues
+
+Analysis took 1.6 seconds (0.07s to load, 1.5s running 69 checks on 126 files)
+3044 mods/funs, found 114 refactoring opportunities, 93 code readability issues, 11 software design suggestions.
+
+Use `mix credo explain` to explain issues, `mix credo --help` for options.
+make[1]: *** [Makefile:24: lint] Error 14
+make[1]: Leaving directory '/workspace/elixir'
+make: *** [Makefile:43: ci] Error 2

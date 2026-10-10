@@ -470,5 +470,10 @@ This qualifies the tested subscription-worker path; automatic conversation resum
 restart, signed-in dashboard access, provider token lifecycle, Daybreak, scaled capacity and the
 wider Factory Setup flow remain unqualified.
 
+Durable questions use service-owned `factory_question` and `factory_wait` tools, with native
+Linear elicitation and reply delivery. Native user-input requests are translated; permission
+approvals remain explicit blockers. Reply activity IDs are delivered once across restart,
+and approval stages require the current artifact digest. See [questions and replies](../docs/linear-questions.md).
+
 Trusted candidate validation is available locally through the pinned-policy runner and
 inline stage gates. See [trusted validation](../docs/trusted-validation.md) for development/final commands, evidence and limits.

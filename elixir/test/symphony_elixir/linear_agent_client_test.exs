@@ -255,6 +255,36 @@ defmodule SymphonyElixir.Linear.AgentClientTest do
     refute_received {:graphql_request, %{"query" => _query}}
   end
 
+  test "elicitation publication redacts text and reuses its durable provider ID" do
+    request_fun = fn payload, _headers ->
+      send(self(), {:publication_request, payload})
+
+      if String.contains?(payload["query"], "agentActivityCreate") do
+        {:ok, %{status: 200, body: %{"data" => %{"agentActivityCreate" => %{"success" => true, "agentActivity" => %{"id" => "question-1"}}}}}}
+      else
+        {:ok, %{status: 200, body: %{"data" => %{"agentActivity" => nil}}}}
+      end
+    end
+
+    assert {:ok, %{id: "question-1"}} =
+             Client.publish_agent_activity("session-1", "question-1", %{"type" => "elicitation", "body" => "Choose a label sk-testsecret123456789"}, client_opts(request_fun))
+
+    assert_receive {:publication_request, %{"variables" => %{"id" => "question-1"}}}
+    assert_receive {:publication_request, %{"variables" => %{"input" => %{"id" => "question-1", "agentSessionId" => "session-1", "content" => %{"type" => "elicitation", "body" => body}}}}}
+    refute body =~ "sk-testsecret"
+    assert body =~ "[REDACTED]"
+
+    existing = fn payload, _headers ->
+      send(self(), {:existing_publication, payload})
+      {:ok, %{status: 200, body: %{"data" => %{"agentActivity" => %{"id" => "question-1", "agentSession" => %{"id" => "session-1"}}}}}}
+    end
+
+    assert {:ok, %{id: "question-1"}} = Client.publish_agent_activity("session-1", "question-1", %{"type" => "elicitation", "body" => "Choose a label"}, client_opts(existing))
+    assert_receive {:existing_publication, _}
+    refute_received {:existing_publication, _}
+    assert {:error, :invalid_agent_activity_type} = Client.publish_agent_activity("session-1", "question-2", %{"type" => "prompt", "body" => "Human text"}, client_opts(existing))
+  end
+
   test "delegated status mutation only sends stateId" do
     request_fun = fn payload, _headers ->
       send(self(), {:graphql_request, payload})

@@ -22,7 +22,7 @@ defmodule SymphonyElixir.Linear.WebhookTest do
     refute Map.has_key?(event, :prompt_context)
   end
 
-  test "normalizes prompted activity without retaining its prompt text" do
+  test "normalizes prompted activity with bounded human reply text" do
     payload =
       agent_session_payload("prompted")
       |> Map.put("agentActivity", %{
@@ -36,8 +36,28 @@ defmodule SymphonyElixir.Linear.WebhookTest do
     assert event.kind == :prompted
     assert event.activity_id == "activity-1"
     assert event.signal == "continue"
-    refute Map.has_key?(event, :body)
+    assert event.body == "Please keep this out of storage"
     refute Map.has_key?(event, :prompt)
+  end
+
+  test "agent activities cannot loop back as human prompts" do
+    payload =
+      agent_session_payload("prompted")
+      |> Map.put("agentActivity", %{
+        "id" => "agent-update",
+        "agentSessionId" => "session-1",
+        "content" => %{"type" => "thought", "body" => "Agent progress"}
+      })
+
+    assert {:error, :invalid_payload} = verify_payload(payload)
+  end
+
+  test "prompt bodies are bounded and recognized credentials redacted before receipt" do
+    base = agent_session_payload("prompted")
+    activity = %{"id" => "user-reply", "agentSessionId" => "session-1", "content" => %{"type" => "prompt", "body" => "do not store sk-testsecret12345"}}
+    assert {:ok, %{body: "do not store [REDACTED]"}} = verify_payload(Map.put(base, "agentActivity", activity))
+    oversized = put_in(activity["content"]["body"], String.duplicate("x", 16_385))
+    assert {:error, :invalid_payload} = verify_payload(Map.put(base, "agentActivity", oversized))
   end
 
   test "normalizes a prompted stop signal and retains the signal" do
@@ -56,6 +76,7 @@ defmodule SymphonyElixir.Linear.WebhookTest do
     assert event.signal == "stop"
     assert event.activity_id == "activity-stop"
     refute Map.has_key?(event, :body)
+    assert {:ok, %{kind: :stop}} = verify_payload(put_in(payload["agentActivity"]["content"]["body"], ""))
   end
 
   test "rejects a prompted activity for another session" do

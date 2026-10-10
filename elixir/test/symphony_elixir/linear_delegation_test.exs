@@ -740,6 +740,115 @@ defmodule SymphonyElixir.LinearDelegationTest do
     assert {:error, :invalid_linear_delegation_config} = SymphonyElixir.Linear.Delegation.validate(Map.delete(config, "client_secret_env"))
   end
 
+  test "question releases the slot and a native reply resumes the same stage once after restart", c do
+    parent = self()
+
+    executor = fn stage, definition, run, opts ->
+      if stage.type == :agent do
+        if Map.get(run, :continuation) do
+          send(parent, {:continued_question, run.id, run.continuation})
+          File.write!(Path.join(run.workspace, "candidate"), "answered")
+          {:ok, %{thread_id: "original-thread", session_id: "original-thread-next"}}
+        else
+          {:ok, q} = opts[:on_question].(%{prompt: "Which harmless word should be written?"})
+          send(parent, {:question_saved, q.id, self(), run.id})
+
+          receive do
+            :release_wait -> :ok
+          end
+
+          :wait = opts[:on_wait].(q.id)
+          {:waiting, %{wait_id: q.id, thread_id: "original-thread", session_id: "original-thread-question"}}
+        end
+      else
+        WorkstreamRunner.execute_stage(stage, definition, run, opts)
+      end
+    end
+
+    publisher = fn _task, activity, _config ->
+      send(parent, {:native_activity, activity})
+      {:ok, %{id: activity.id}}
+    end
+
+    runtime = runtime(c, stage_executor: executor, linear_publisher: publisher, max_concurrent_agents: 1)
+    assert :ok = Orchestrator.receive_linear_event(runtime.coordinator, event(c, :created, "question-created"))
+    assert_receive {:question_saved, id, worker, run_id}, 5_000
+    refute_receive {:continued_question, _, _}, 100
+    send(worker, :release_wait)
+    waiting = wait_run(runtime, run_id, &(&1.status == :waiting_for_answer))
+    assert waiting.thread_id == "original-thread"
+    await(fn -> if Task.Supervisor.children(runtime.tasks) == [], do: true end)
+    assert is_pid(restart(runtime))
+    assert %{status: :waiting_for_answer, pending_wait: %{id: ^id}} = run_state(runtime, run_id)
+
+    # With the one execution slot released, a second controlled task can execute.
+    second = Path.join(c.workspace_root, "slot-proof")
+    File.mkdir_p!(second)
+    {_, 0} = System.cmd("git", ["init", "--quiet", second])
+
+    assert {:ok, second_id} =
+             Orchestrator.queue_workstream(runtime.coordinator, "slot-proof", "slot-proof", c.workstream_path, %{"task" => "Harmless slot proof"}, workspace: second, workspace_root: c.workspace_root)
+
+    assert_receive {:question_saved, second_question, second_worker, ^second_id}, 5_000
+    send(second_worker, :release_wait)
+    wait_run(runtime, second_id, &(&1.status == :waiting_for_answer and &1.pending_wait.id == second_question))
+
+    reply = event(c, :prompted, "question-reply", %{activity_id: "human-reply-1", body: "answer #{id}: blue"})
+    assert :ok = Orchestrator.receive_linear_event(runtime.coordinator, reply)
+    assert_receive {:continued_question, ^run_id, context}, 5_000
+    assert inspect(context) =~ "blue"
+    assert inspect(context) =~ "original-thread"
+    wait_run(runtime, run_id, &(&1.stage_id == "wait"))
+    assert {:duplicate, _} = Orchestrator.receive_linear_event(runtime.coordinator, reply)
+    assert :ok = Orchestrator.receive_linear_event(runtime.coordinator, %{reply | id: "second-delivery-same-activity"})
+    await(fn -> if :sys.get_state(runtime.coordinator).linear.events["second-delivery-same-activity"].status == :duplicate_reply, do: true end)
+    conflict = %{reply | id: "conflicting-activity-delivery", body: "answer #{id}: red"}
+    assert :ok = Orchestrator.receive_linear_event(runtime.coordinator, conflict)
+    await(fn -> if :sys.get_state(runtime.coordinator).linear.events[conflict.id].status == :reply_identity_conflict, do: true end)
+    assert is_pid(restart(runtime))
+    refute_receive {:continued_question, ^run_id, _}, 150
+    assert File.read!(Path.join(c.workspace, "effects")) == "checked"
+    assert_receive {:native_activity, %{content: %{"type" => "elicitation"}}}, 5_000
+  end
+
+  test "reply arriving during independent work is stored and delivered once at the safe boundary", c do
+    parent = self()
+
+    executor = fn stage, definition, run, opts ->
+      if stage.type == :agent do
+        {:ok, q} = opts[:on_question].(%{prompt: "Choose the harmless label."})
+        send(parent, {:midturn_question, q.id, self(), run.id})
+
+        receive do
+          :finish_independent_work -> :ok
+        end
+
+        {:answered, %{body: body}} = opts[:on_wait].(q.id)
+        send(parent, {:midturn_answer, body})
+        {:ok, %{thread_id: "same-live-thread"}}
+      else
+        WorkstreamRunner.execute_stage(stage, definition, run, opts)
+      end
+    end
+
+    runtime = runtime(c, stage_executor: executor)
+    assert :ok = Orchestrator.receive_linear_event(runtime.coordinator, event(c, :created, "midturn-created"))
+    assert_receive {:midturn_question, id, worker, run_id}, 5_000
+    reply = event(c, :prompted, "midturn-reply", %{activity_id: "midturn-activity", body: "answer #{id}: green"})
+    assert :ok = Orchestrator.receive_linear_event(runtime.coordinator, reply)
+    await(fn -> if :sys.get_state(runtime.coordinator).linear.events[reply.id].status == :reply_delivered, do: true end)
+    assert is_pid(restart(runtime))
+    assert Process.alive?(worker)
+    assert :ok = Orchestrator.receive_linear_event(runtime.coordinator, %{reply | id: "midturn-replay"})
+    send(worker, :finish_independent_work)
+    assert_receive {:midturn_answer, "green"}, 5_000
+    refute_receive {:midturn_answer, _}, 100
+    # The check deliberately fails without a candidate, surfacing failure as a native error.
+    wait_run(runtime, run_id, &(&1.status == :blocked))
+    task = :sys.get_state(runtime.coordinator).linear.tasks[c.issue_id]
+    assert Enum.any?(Map.values(task.publications), &(&1.content["type"] == "error"))
+  end
+
   defp runtime(context, extra) do
     suffix = System.unique_integer([:positive])
     supervisor = Module.concat(__MODULE__, "Runtime#{suffix}")
@@ -772,6 +881,7 @@ defmodule SymphonyElixir.LinearDelegationTest do
       linear_readiness: fn _definition, _agent_id -> :ok end,
       linear_execution_control: fn _definition, _agent_id -> :ok end,
       linear_acknowledger: fn task, _config -> {:ok, %{id: task.activity_id}} end,
+      linear_publisher: fn _task, activity, _config -> {:ok, %{id: activity.id}} end,
       workstream_canceller: fn _run, _operation, _worker -> :terminated end
     ]
 

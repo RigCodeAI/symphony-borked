@@ -1485,6 +1485,52 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  def handle_call({:workstream_question, _run_id, _attempt_id, _pid, _request}, _from, %{workstreams: nil} = state),
+    do: {:reply, {:error, :durable_workstreams_disabled}, state}
+
+  def handle_call({:workstream_question, run_id, attempt_id, pid, request}, {caller, _}, state) do
+    case {durable_run(state, run_id), state.workstreams.workers[attempt_id]} do
+      {%{status: :executing, current_attempt_id: ^attempt_id} = run, %{pid: ^pid}} when caller == pid ->
+        with {:ok, prompt} <- SymphonyElixir.Linear.Text.safe(request[:prompt]),
+             {:ok, updated, question} <- WorkstreamRun.ask_question(run, Map.put(request, :prompt, prompt)) do
+          event = %{kind: :question_created, question_id: question.id}
+          updated_state = commit_workstream(state, updated, question.id <> "/asked", event)
+          {:reply, {:ok, question}, updated_state}
+        else
+          {:error, _} = error -> {:reply, error, state}
+        end
+
+      _ ->
+        {:reply, {:error, :question_not_current_worker}, state}
+    end
+  end
+
+  def handle_call({:workstream_wait, _run_id, _attempt_id, _pid, _id}, _from, %{workstreams: nil} = state),
+    do: {:reply, {:error, :durable_workstreams_disabled}, state}
+
+  def handle_call({:workstream_wait, run_id, attempt_id, pid, id}, {caller, _}, state) do
+    case {durable_run(state, run_id), state.workstreams.workers[attempt_id]} do
+      {%{status: :executing, current_attempt_id: ^attempt_id} = run, %{pid: ^pid}} when caller == pid ->
+        case Map.get(Map.get(run, :questions, %{}), id) do
+          %{stage_id: stage_id, active_attempt_id: question_attempt, artifact_ids: artifacts, reply: reply}
+          when stage_id == run.stage_id and question_attempt == attempt_id and artifacts == run.artifacts ->
+            answer =
+              case reply do
+                %{body: body} -> {:answered, %{body: body}}
+                nil -> :wait
+              end
+
+            {:reply, answer, state}
+
+          _ ->
+            {:reply, {:error, :unknown_or_stale_question}, state}
+        end
+
+      _ ->
+        {:reply, {:error, :question_not_current_worker}, state}
+    end
+  end
+
   def handle_call({:workstream_process, _run_id, _attempt_id, _pid, _identity}, _from, %{workstreams: nil} = state),
     do: {:reply, {:error, :durable_workstreams_disabled}, state}
 
@@ -2303,6 +2349,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp commit_workstream(state, run, event_id, event) do
+    send(self(), :linear_process)
+
     case WorkstreamStore.commit(state.workstreams.store, run, event_id, event) do
       :ok ->
         put_in(state.workstreams.runs[run.id], run)

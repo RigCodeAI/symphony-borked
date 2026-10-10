@@ -53,6 +53,59 @@ defmodule SymphonyElixir.WorkstreamStoreTest do
     assert [["same-event", "run-1"]] = database_rows(context.path, "SELECT event_id, run_id FROM events")
   end
 
+  test "loading a legacy run adds empty reply state without replacing pinned state", context do
+    expected =
+      run("run-1", "task-1")
+      |> Map.merge(%{
+        policy: %{version: 1, lifecycle_sha256: "historical-policy"},
+        definition: %{definitions: %{"agent" => %{sha256: "historical-agent"}}},
+        execution: %{codex_command: "pinned-command"},
+        artifacts: %{"candidate" => %{sha256: "existing-candidate"}},
+        pending_wait: %{id: "attempt-1/wait", artifact_ids: %{"candidate" => "existing-candidate"}},
+        current_attempt_id: "attempt-1",
+        thread_id: "existing-thread",
+        session_id: "existing-session",
+        future_extension: %{value: "preserved"}
+      })
+
+    legacy = Map.drop(expected, [:questions, :inbox, :activity_ids, :continuation])
+    assert {:ok, store} = start_store(context.path)
+    assert :ok = WorkstreamStore.commit(store, legacy, "legacy-snapshot", %{kind: :waiting})
+    assert :ok = GenServer.stop(store)
+
+    assert {:ok, reopened} = start_store(context.path)
+    assert {:ok, ^expected} = WorkstreamStore.fetch(reopened, "run-1")
+    assert {:ok, [^expected]} = WorkstreamStore.load(reopened)
+    assert {:ok, %{run_id: "run-1", event: %{kind: :waiting}}} = WorkstreamStore.event(reopened, "legacy-snapshot")
+    assert :ok = WorkstreamStore.commit(reopened, expected, "normalized-snapshot", %{kind: :loaded})
+    assert :ok = GenServer.stop(reopened)
+
+    assert {:ok, reopened} = start_store(context.path)
+    assert {:ok, ^expected} = WorkstreamStore.fetch(reopened, "run-1")
+    assert :ok = GenServer.stop(reopened)
+    assert [["attempt-1"]] = database_rows(context.path, "SELECT attempt_id FROM stage_attempts")
+    assert [["op-1", "run-1"]] = database_rows(context.path, "SELECT operation_id, run_id FROM operations")
+  end
+
+  test "loading current reply state preserves saved questions, messages and deduplication", context do
+    expected =
+      run("run-1", "task-1")
+      |> Map.merge(%{
+        questions: %{"question-1" => %{status: :answered, reply: %{body: "blue", activity_id: "activity-1"}}},
+        inbox: [%{body: "saved message", activity_id: "activity-2", delivered_attempt_id: nil}],
+        activity_ids: %{"activity-1" => "reply-fingerprint"},
+        continuation: %{thread_id: "prior-thread", question_id: "question-1"}
+      })
+
+    assert {:ok, store} = start_store(context.path)
+    assert :ok = WorkstreamStore.commit(store, expected, "current-snapshot", %{kind: :replied})
+    assert :ok = GenServer.stop(store)
+    assert {:ok, reopened} = start_store(context.path)
+    assert {:ok, ^expected} = WorkstreamStore.fetch(reopened, "run-1")
+    assert {:ok, [^expected]} = WorkstreamStore.load(reopened)
+    assert :ok = GenServer.stop(reopened)
+  end
+
   test "only the declared owner can commit while other processes can read", context do
     assert {:ok, pid} = start_store(context.path)
     first_run = run("run-1", "task-1")
@@ -251,6 +304,10 @@ defmodule SymphonyElixir.WorkstreamStoreTest do
       id: run_id,
       task_id: task_id,
       status: :running,
+      questions: %{},
+      inbox: [],
+      activity_ids: %{},
+      continuation: nil,
       attempts: [%{id: "attempt-1", stage: "implement", status: :complete}],
       operations: %{"op-1" => %{kind: :publish, status: :pending}}
     }

@@ -1,0 +1,28 @@
+mix compile --warnings-as-errors
+
+mix specs.check
+specs.check: all public functions have @spec or exemption
+
+mix test test/symphony_elixir/durable_workstream_test.exs test/symphony_elixir/workstream_store_test.exs test/symphony_elixir/workstream_run_test.exs test/symphony_elixir/linear_delegation_test.exs
+Running ExUnit with seed: 46011, max_cases: 6
+Excluding tags: [:validation_docker]
+
+....................................................................
+Finished in 22.3 seconds (0.7s async, 21.6s sync)
+68 tests, 0 failures
+
+mix test test/symphony_elixir/linear_store_test.exs
+Running ExUnit with seed: 929031, max_cases: 6
+Excluding tags: [:validation_docker]
+
+.....
+Finished in 0.09 seconds (0.09s async, 0.00s sync)
+5 tests, 0 failures
+
+mix test
+Running ExUnit with seed: 784040, max_cases: 6
+Excluding tags: [:validation_docker]
+
+.................................................................................................................................................................................................................................................................................................................................................................................................................*......................**............*..........**...........................................................................
+Finished in 36.4 seconds (2.5s async, 33.8s sync)
+526 tests, 0 failures, 6 skipped (10 excluded)

@@ -1,0 +1,34 @@
+{
+  "observed_at": 1791661005.8096495,
+  "coordinator_release": "4ea729c6bb1b44e379161ea3543e68086cdbd1e6",
+  "linear_tasks": [
+    {
+      "issue_id": "698bb5f5-1d4e-41b5-aa26-f372edb6f59a",
+      "run_id": "run-3ad6097ae6d960249b681a580aba6119",
+      "session_id": "b3fce47a-584d-4364-a138-8e01ea95358e",
+      "activity_id": "a0666784-feb1-4b92-b10b-082e70ca0911",
+      "assignee_id": "aec2db74-06bc-4e8b-bfef-3720c1a3fa53",
+      "status": "acknowledged",
+      "phase": "queued",
+      "current_attempt_id": null,
+      "stage_id": "inspect-candidate",
+      "cancellation": null,
+      "error": null
+    }
+  ],
+  "worker": {
+    "processes": [],
+    "fixture": {
+      "independent_ready": true,
+      "answer_blue": true,
+      "head": "39d6d5d998366bf13af19eb74ae47d598ecf92bd",
+      "commits_after_seed": "0",
+      "clean": false
+    }
+  },
+  "dashboard_counts": {
+    "blocked": 0,
+    "running": 0,
+    "retrying": 0
+  }
+}

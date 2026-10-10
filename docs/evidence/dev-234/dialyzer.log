@@ -1,0 +1,53 @@
+Finding suitable PLTs
+Checking PLT...
+[:asn1, :bandit, :compiler, :crypto, :date_time_parser, :db_connection, :decimal, :ecto, :eex, :elixir, :exqlite, :finch, :hpax, :jason, :kernel, :logger, :mime, :mint, :mix, :nimble_options, :nimble_pool, :phoenix, :phoenix_html, :phoenix_live_view, :phoenix_pubsub, :phoenix_template, :plug, :plug_crypto, :public_key, :req, :solid, :ssl, :stdlib, :symphony_elixir, :telemetry, :thousand_island, :websock, :websock_adapter, :yamerl, :yaml_elixir]
+Looking up modules in dialyxir_erlang-28.5.0.6_elixir-1.19.5_deps-dev.plt
+Looking up modules in dialyxir_erlang-28.5.0.6_elixir-1.19.5.plt
+Looking up modules in dialyxir_erlang-28.5.0.6.plt
+Finding applications for dialyxir_erlang-28.5.0.6.plt
+Finding modules for dialyxir_erlang-28.5.0.6.plt
+Creating dialyxir_erlang-28.5.0.6.plt
+Looking up modules in dialyxir_erlang-28.5.0.6.plt
+Removing 3 modules from dialyxir_erlang-28.5.0.6.plt
+Checking 19 modules in dialyxir_erlang-28.5.0.6.plt
+Adding 201 modules to dialyxir_erlang-28.5.0.6.plt
+done in 0m10.02s
+Finding applications for dialyxir_erlang-28.5.0.6_elixir-1.19.5.plt
+Finding modules for dialyxir_erlang-28.5.0.6_elixir-1.19.5.plt
+Copying dialyxir_erlang-28.5.0.6.plt to dialyxir_erlang-28.5.0.6_elixir-1.19.5.plt
+Looking up modules in dialyxir_erlang-28.5.0.6_elixir-1.19.5.plt
+Checking 220 modules in dialyxir_erlang-28.5.0.6_elixir-1.19.5.plt
+Adding 272 modules to dialyxir_erlang-28.5.0.6_elixir-1.19.5.plt
+done in 0m7.17s
+Finding applications for dialyxir_erlang-28.5.0.6_elixir-1.19.5_deps-dev.plt
+Finding modules for dialyxir_erlang-28.5.0.6_elixir-1.19.5_deps-dev.plt
+Copying dialyxir_erlang-28.5.0.6_elixir-1.19.5.plt to dialyxir_erlang-28.5.0.6_elixir-1.19.5_deps-dev.plt
+Looking up modules in dialyxir_erlang-28.5.0.6_elixir-1.19.5_deps-dev.plt
+Checking 492 modules in dialyxir_erlang-28.5.0.6_elixir-1.19.5_deps-dev.plt
+Adding 1152 modules to dialyxir_erlang-28.5.0.6_elixir-1.19.5_deps-dev.plt
+done in 0m46.01s
+No :ignore_warnings opt specified in mix.exs and default does not exist.
+
+Starting Dialyzer
+[
+  check_plt: false,
+  init_plt: ~c"/workspace/elixir/_build/dev/dialyxir_erlang-28.5.0.6_elixir-1.19.5_deps-dev.plt",
+  files: [~c"/workspace/elixir/_build/dev/lib/symphony_elixir/ebin/Elixir.SymphonyElixir.GitHub.Client.beam",
+   ~c"/workspace/elixir/_build/dev/lib/symphony_elixir/ebin/Elixir.SymphonyElixirWeb.Router.Helpers.beam",
+   ~c"/workspace/elixir/_build/dev/lib/symphony_elixir/ebin/Elixir.SymphonyElixir.GitLab.Adapter.beam",
+   ~c"/workspace/elixir/_build/dev/lib/symphony_elixir/ebin/Elixir.SymphonyElixir.WorkflowStore.State.beam",
+   ~c"/workspace/elixir/_build/dev/lib/symphony_elixir/ebin/Elixir.SymphonyElixir.Linear.Text.beam",
+   ...],
+  ...
+]
+Total errors: 3, Skipped: 0, Unnecessary Skips: 0
+done in 0m2.41s
+lib/symphony_elixir/workstream_run.ex:632:8:pattern_match_cov The pattern pattern <__reply@1, __outputs@1> can never match the type, because it is covered by previous clauses.
+lib/symphony_elixir/workstream_store.ex:879:11:pattern_match_cov The pattern variable _other@1 can never match the type, because it is covered by previous clauses.
+lib/symphony_elixir/workstream_store.ex:938:13:pattern_match The pattern can never match the type 
+  {:error,
+   :invalid_run_payload
+   | {:term_decode_failed, %{:__exception__ => true, :__struct__ => atom(), atom() => _}}}
+.
+done (warnings were emitted)
+Halting VM with exit status 2

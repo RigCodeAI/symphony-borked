@@ -9,8 +9,8 @@ DEV-248 passed the scoped native delegation, restart-survival, active-stop and d
 acceptance. DEV-246's earlier restart attempt failed when SSH stream closure ended the worker;
 DEV-247's separate live undelegation test stopped its operation with exact root proof. Startup
 repair reconciled the old confirmed stops without repeating cancellation. Rig candidate publication and merge
-were not attempted. DEV-234 owns human replies; ordinary prompt events still deduplicate the
-existing task rather than supplying reply inputs. See the [restart repair acceptance record](evidence/dev-233/restart-repair-acceptance.md)
+were not attempted. DEV-234 adds [durable question/reply handling](linear-questions.md); native human
+prompt activities now supply persisted reply inputs rather than being discarded as duplicate delegation. See the [restart repair acceptance record](evidence/dev-233/restart-repair-acceptance.md)
 and [earlier native checkpoint](evidence/dev-233/native-live-acceptance.md).
 
 ## Configuration

@@ -14,7 +14,7 @@ defmodule SymphonyElixir.Linear.Webhook do
   @doc """
   Verifies a signed Linear webhook and returns a minimal normalized event.
 
-  Prompt text and other webhook content are intentionally omitted from the result.
+  Only bounded, redacted prompted message text is retained; other webhook content is omitted.
   `:now_ms` may be supplied in `opts` for deterministic timestamp checks.
   """
   @spec verify(term(), term(), term(), keyword()) :: {:ok, normalized_event()} | {:error, atom()}
@@ -167,7 +167,10 @@ defmodule SymphonyElixir.Linear.Webhook do
       if signal == "stop" do
         {:ok, Map.merge(prompted_event, %{kind: :stop, reason: :stop_signal})}
       else
-        {:ok, Map.put(prompted_event, :kind, :prompted)}
+        case SymphonyElixir.Linear.Text.safe(content["body"]) do
+          {:ok, body} -> {:ok, Map.merge(prompted_event, %{kind: :prompted, body: body})}
+          {:error, _} -> {:error, :invalid_payload}
+        end
       end
     else
       _ -> {:error, :invalid_payload}

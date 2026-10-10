@@ -142,7 +142,12 @@ defmodule SymphonyElixir.LinearStoreTest do
     assert [[1]] = database_rows(context.path, "PRAGMA user_version")
 
     assert {:ok, reopened} = start_store(context.path)
-    assert {:ok, ^run} = WorkstreamStore.fetch(reopened, "run-1")
+    assert {:ok, loaded} = WorkstreamStore.fetch(reopened, "run-1")
+    assert Map.drop(loaded, [:questions, :inbox, :activity_ids, :continuation]) == run
+    assert loaded.questions == %{}
+    assert loaded.inbox == []
+    assert loaded.activity_ids == %{}
+    assert loaded.continuation == nil
     assert {:ok, %{events: %{}, tasks: %{}}} = WorkstreamStore.linear_load(reopened)
     assert :ok = GenServer.stop(reopened)
   end

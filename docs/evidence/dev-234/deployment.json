@@ -1,0 +1,30 @@
+{
+  "activation": [
+    {
+      "candidate": "4ea729c6bb1b44e379161ea3543e68086cdbd1e6",
+      "exit_code": 0,
+      "activation_log": "/srv/factory/dev234-rollbacks/4ea729c6bb1b44e379161ea3543e68086cdbd1e6/activation-private.log",
+      "activation_output_saved_root_only": true,
+      "active_release": "4ea729c6bb1b44e379161ea3543e68086cdbd1e6",
+      "candidate_environment_ready": true,
+      "workflow_has_dev245_dev246_dev247_dev248": true,
+      "worker_control_pin": {
+        "revision": "064f892f95847ea2eed0eb684da36c6e1bb5fce6",
+        "sha256": "67267e73e9c587f0b6115398d89cdac462b23dcb8749df34895a34b9d0a0af89"
+      },
+      "worker_application_update": "not performed"
+    },
+    {
+      "candidate": "4ea729c6bb1b44e379161ea3543e68086cdbd1e6",
+      "activation_verified": true,
+      "active_release": "4ea729c6bb1b44e379161ea3543e68086cdbd1e6",
+      "protected_config_owner": 0,
+      "protected_config_mode": "0o600",
+      "secret_values_printed": false
+    }
+  ],
+  "coordinator_source": "4ea729c6bb1b44e379161ea3543e68086cdbd1e6",
+  "coordinator_archive_sha256": "9232e8ef3100e9abe779fdc9ac7f279c4424d4365fece95a6b38988d61c5a616",
+  "worker_application_revision": "541279aeb6a5366571e1ee8935e134c728d91c63",
+  "disaster_recovery_from_absent_release_disk": "not qualified"
+}

@@ -302,7 +302,7 @@ defmodule SymphonyElixir.Linear.Client do
     with {:ok, response} <- graphql(@agent_activity_query, %{"id" => activity_id}, opts) do
       case response_object_or_nil(response, "agentActivity") do
         {:ok, nil} ->
-          create_agent_activity(session_id, activity_id, body, opts)
+          create_agent_activity(session_id, activity_id, %{"type" => "thought", "body" => body}, opts)
 
         {:ok, raw_activity} ->
           case normalize_agent_activity(raw_activity) do
@@ -321,7 +321,7 @@ defmodule SymphonyElixir.Linear.Client do
 
         {:error, {:linear_graphql_errors, errors} = reason} ->
           if missing_agent_activity?(errors) do
-            create_agent_activity(session_id, activity_id, body, opts)
+            create_agent_activity(session_id, activity_id, %{"type" => "thought", "body" => body}, opts)
           else
             {:error, reason}
           end
@@ -329,6 +329,35 @@ defmodule SymphonyElixir.Linear.Client do
         {:error, reason} ->
           {:error, reason}
       end
+    end
+  end
+
+  @doc "Publishes a service-owned activity with an identity persisted before the RPC."
+  @spec publish_agent_activity(String.t(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def publish_agent_activity(session_id, activity_id, content, opts \\ []) do
+    with true <- content["type"] in ["thought", "elicitation", "response", "error"],
+         {:ok, body} <- SymphonyElixir.Linear.Text.safe(content["body"]),
+         content = Map.put(content, "body", body),
+         {:ok, response} <- graphql(@agent_activity_query, %{"id" => activity_id}, opts) do
+      case response_object_or_nil(response, "agentActivity") do
+        {:ok, nil} ->
+          create_agent_activity(session_id, activity_id, content, opts)
+
+        {:ok, raw} ->
+          case normalize_agent_activity(raw) do
+            %{"id" => ^activity_id, "agentSessionId" => ^session_id} -> {:ok, %{id: activity_id}}
+            _ -> {:error, :linear_agent_activity_conflict}
+          end
+
+        {:error, {:linear_graphql_errors, errors} = reason} ->
+          if missing_agent_activity?(errors), do: create_agent_activity(session_id, activity_id, content, opts), else: {:error, reason}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    else
+      false -> {:error, :invalid_agent_activity_type}
+      {:error, _} = error -> error
     end
   end
 
@@ -352,11 +381,11 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
-  defp create_agent_activity(session_id, activity_id, body, opts) do
+  defp create_agent_activity(session_id, activity_id, content, opts) do
     input = %{
       "id" => activity_id,
       "agentSessionId" => session_id,
-      "content" => %{"type" => "thought", "body" => body}
+      "content" => content
     }
 
     with {:ok, response} <- graphql(@create_agent_activity_mutation, %{"input" => input}, opts),

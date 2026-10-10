@@ -102,6 +102,16 @@ defmodule SymphonyElixir.Linear.Delegation do
     ack.(task, config)
   end
 
+  @spec publish(map(), map(), map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def publish(task, activity, config, opts) do
+    publisher =
+      Keyword.get(opts, :linear_publisher, fn task, activity, config ->
+        Client.publish_agent_activity(task.session_id, activity.id, activity.content, client_opts(config, task.issue_id))
+      end)
+
+    publisher.(task, activity, config)
+  end
+
   @spec new_activity_id() :: String.t()
   def new_activity_id do
     <<a::32, b::16, _::4, c::12, _::2, d::14, e::48>> = :crypto.strong_rand_bytes(16)

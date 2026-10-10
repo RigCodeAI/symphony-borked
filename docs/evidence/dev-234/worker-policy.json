@@ -1,0 +1,46 @@
+{
+  "threads": [
+    {
+      "thread_id": "01a1274e-e268-7e60-b4ca-546a009f1875",
+      "turn_contexts": [
+        {
+          "cwd": "/srv/factory/contained-workspaces/dev233-control-qualification/rig-native-dev249",
+          "approval_policy": "never",
+          "sandbox_policy": {
+            "type": "workspace-write",
+            "network_access": false,
+            "exclude_tmpdir_env_var": false,
+            "exclude_slash_tmp": false
+          },
+          "model": "gpt-6-luna",
+          "effort": "medium"
+        }
+      ],
+      "git_errors": []
+    },
+    {
+      "thread_id": "01a12751-36ef-7cd3-839d-133f7f84e08d",
+      "turn_contexts": [
+        {
+          "cwd": "/srv/factory/contained-workspaces/dev233-control-qualification/rig-native-dev249",
+          "approval_policy": "never",
+          "sandbox_policy": {
+            "type": "workspace-write",
+            "network_access": false,
+            "exclude_tmpdir_env_var": false,
+            "exclude_slash_tmp": false
+          },
+          "model": "gpt-6-luna",
+          "effort": "medium"
+        }
+      ],
+      "git_errors": []
+    }
+  ],
+  "outside_codex_git_directory": {
+    "owner_uid": 1000,
+    "current_uid": 1000,
+    "mode": "0o755",
+    "worker_os_access_writable": true
+  }
+}

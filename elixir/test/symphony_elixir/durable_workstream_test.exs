@@ -126,6 +126,53 @@ defmodule SymphonyElixir.DurableWorkstreamTest do
     id
   end
 
+  defp fixture_run(context, task_id, path \\ nil) do
+    inputs = %{"task" => "controlled smoke"}
+    path = path || context.path
+    assert {:ok, definition, workspace} = SymphonyElixir.WorkstreamRunner.prepare(path, inputs, context.options)
+    assert {:ok, execution} = SymphonyElixir.WorkstreamRunner.pin_execution_context(context.options, workspace, definition)
+    WorkstreamRun.new(task_id, definition, workspace, context.options, execution)
+  end
+
+  defp persist_pre_dev234_run(context, run, event_id, expected_policy \\ WorkstreamRun.policy()) do
+    legacy = Map.drop(run, [:questions, :inbox, :activity_ids, :continuation])
+
+    assert Map.has_key?(run, :questions)
+    assert Map.has_key?(run, :inbox)
+    assert Map.has_key?(run, :activity_ids)
+    assert Map.has_key?(run, :continuation)
+    assert run.policy == expected_policy
+
+    assert {:ok, store} = WorkstreamStore.start_link(path: context.db, owner: self())
+    assert :ok = WorkstreamStore.commit(store, legacy, event_id, %{kind: :pre_dev234_fixture})
+    assert :ok = GenServer.stop(store)
+    legacy
+  end
+
+  defp coordinator_run(runtime, id) do
+    await(fn ->
+      case Map.get(:sys.get_state(runtime.coordinator).workstreams.runs, id) do
+        run when is_map(run) -> run
+        _ -> nil
+      end
+    end)
+  end
+
+  defp assert_pre_dev234_defaults(loaded, legacy) do
+    assert loaded.questions == %{}
+    assert loaded.inbox == []
+    assert loaded.activity_ids == %{}
+    assert loaded.continuation == nil
+    assert loaded.id == legacy.id
+    assert loaded.task_id == legacy.task_id
+    assert loaded.definition == legacy.definition
+    assert loaded.execution == legacy.execution
+    assert loaded.policy == legacy.policy
+    assert loaded.artifacts == legacy.artifacts
+    assert loaded.attempts == legacy.attempts
+    assert loaded.operations == legacy.operations
+  end
+
   defp persist_stopped_run(context, task_id, termination, operation_status) do
     inputs = %{"task" => "controlled smoke"}
     assert {:ok, definition, workspace} = SymphonyElixir.WorkstreamRunner.prepare(context.path, inputs, context.options)
@@ -177,6 +224,277 @@ defmodule SymphonyElixir.DurableWorkstreamTest do
     else
       SymphonyElixir.WorkstreamRunner.execute_stage(stage, definition, run, opts)
     end
+  end
+
+  test "a pre-DEV234 ready agent run dispatches once after the store is reopened", c do
+    run = fixture_run(c, "legacy-ready")
+    legacy = persist_pre_dev234_run(c, run, "legacy-ready-fixture")
+    parent = self()
+    effects = Path.join(c.root, "legacy-ready-effects")
+
+    executor = fn stage, definition, run, opts ->
+      if stage.type == :agent do
+        send(parent, {:pre_dev234_agent_started, run.id, run.operations[run.current_attempt_id].side_effect_id})
+        File.write!(effects, "agent\n", [:append])
+      end
+
+      normal_executor(stage, definition, run, opts)
+    end
+
+    runtime = runtime(c, executor, auto_advance: false)
+    loaded = coordinator_run(runtime, legacy.id)
+    assert_pre_dev234_defaults(loaded, legacy)
+    assert loaded.status == :ready
+    assert loaded.policy == WorkstreamRun.policy()
+
+    assert :ok = Orchestrator.step_workstreams(runtime.coordinator)
+    assert_receive {:pre_dev234_agent_started, run_id, side_effect_id}
+    assert run_id == legacy.id
+    assert side_effect_id == "#{legacy.id}/implement/1"
+    ready = run_state(runtime, legacy.id, :ready)
+    assert ready.stage_id == "validate"
+    assert File.read!(effects) == "agent\n"
+
+    restart(runtime)
+    assert run_state(runtime, legacy.id, :ready).stage_id == "validate"
+    refute_receive {:pre_dev234_agent_started, _, _}, 100
+    assert File.read!(effects) == "agent\n"
+  end
+
+  test "a pre-DEV234 human wait can be answered into an agent stage", c do
+    path = Path.join(c.root, "legacy-wait-agent.yaml")
+
+    File.write!(path, """
+    version: 1
+    name: legacy-wait-agent
+    inputs: [task]
+    agents:
+      worker: agent.yaml
+    entry: setup
+    stages:
+      - id: setup
+        type: agent
+        inputs: [task]
+        outputs: [initial_candidate]
+        agent: worker
+        prompt: Prepare the initial candidate.
+        next: setup_check
+      - id: setup_check
+        type: check
+        inputs: [initial_candidate]
+        outputs: [initial_validation]
+        gate:
+          command: [sh, -c, "test -f initial_candidate"]
+          timeout_ms: 1000
+          success: review
+          failure:
+            repair: setup
+            max_attempts: 1
+      - id: review
+        type: human_wait
+        inputs: [initial_candidate, initial_validation]
+        outputs: [answer]
+        prompt: Review the task.
+        next: implement
+      - id: implement
+        type: agent
+        inputs: [task, answer]
+        outputs: [candidate]
+        agent: worker
+        prompt: Use the answer.
+        next: validate
+      - id: validate
+        type: check
+        inputs: [candidate]
+        outputs: [validation]
+        gate:
+          command: [sh, -c, "printf checked >> effects; test -f candidate"]
+          timeout_ms: 1000
+          success: decision
+          failure:
+            repair: implement
+            max_attempts: 1
+      - id: decision
+        type: human_wait
+        inputs: [candidate, validation]
+        outputs: [review]
+        prompt: Approve the candidate.
+        next: complete
+    """)
+
+    run =
+      fixture_run(c, "legacy-wait-agent", path)
+      |> WorkstreamRun.start_stage()
+      |> WorkstreamRun.finish_stage({:ok, %{session_id: "initial-session", thread_id: "initial-thread", initial_candidate: "initial"}})
+      |> WorkstreamRun.start_stage()
+      |> WorkstreamRun.finish_stage({:ok, %{exit_status: 0, timed_out: false, output: "initial check passed"}})
+      |> WorkstreamRun.start_stage()
+
+    legacy = persist_pre_dev234_run(c, run, "legacy-wait-agent-fixture")
+    parent = self()
+    effects = Path.join(c.root, "legacy-wait-agent-effects")
+
+    executor = fn stage, definition, run, opts ->
+      if stage.type == :agent do
+        send(parent, {:pre_dev234_wait_agent_started, run.id, run.outputs["answer"]})
+        File.write!(effects, "agent\n", [:append])
+      end
+
+      normal_executor(stage, definition, run, opts)
+    end
+
+    runtime = runtime(c, executor, auto_advance: false)
+    loaded = coordinator_run(runtime, legacy.id)
+    assert_pre_dev234_defaults(loaded, legacy)
+    assert loaded.status == :waiting_for_answer
+    wait_id = loaded.pending_wait.id
+
+    assert {:ok, native_reply} =
+             WorkstreamRun.linear_reply(loaded, "answer #{wait_id}: {\"answer\":\"from Linear\"}", "legacy-linear-activity")
+
+    assert native_reply.status == :ready
+    assert native_reply.stage_id == "implement"
+    assert native_reply.outputs["answer"] == "from Linear"
+    assert Map.has_key?(native_reply.activity_ids, "legacy-linear-activity")
+
+    assert :ok =
+             Orchestrator.answer_workstream(
+               runtime.coordinator,
+               "legacy-answer",
+               legacy.id,
+               wait_id,
+               %{"answer" => "from legacy API"}
+             )
+
+    assert :ok = Orchestrator.step_workstreams(runtime.coordinator)
+    assert_receive {:pre_dev234_wait_agent_started, run_id, "from legacy API"}
+    assert run_id == legacy.id
+    assert run_state(runtime, legacy.id, :ready).stage_id == "validate"
+    assert File.read!(effects) == "agent\n"
+
+    restart(runtime)
+    assert run_state(runtime, legacy.id, :ready).stage_id == "validate"
+    refute_receive {:pre_dev234_wait_agent_started, _, _}, 100
+    assert File.read!(effects) == "agent\n"
+  end
+
+  test "an active pre-DEV234 operation reconciles to completion without replay", c do
+    run =
+      fixture_run(c, "legacy-active-completion")
+      |> WorkstreamRun.start_stage()
+      |> WorkstreamRun.finish_stage({:ok, %{session_id: "fixture-session", thread_id: "fixture-thread", candidate: "candidate"}})
+      |> WorkstreamRun.start_stage()
+
+    check_id = run.current_attempt_id
+    side_effect_id = "legacy-check-effect-1"
+    operation = Map.put(run.operations[check_id], :side_effect_id, side_effect_id)
+    run = put_in(run.operations[check_id], operation)
+    effects = Path.join(c.root, "legacy-check-effects")
+    File.write!(effects, side_effect_id <> "\n")
+    legacy = persist_pre_dev234_run(c, run, "legacy-active-completion-fixture")
+    parent = self()
+
+    reconciler = fn _run, operation ->
+      send(parent, {:pre_dev234_completed, operation.id, operation.side_effect_id})
+      {:completed, {:ok, %{exit_status: 0, timed_out: false, output: "already checked"}}}
+    end
+
+    executor = fn stage, _definition, _run, _opts ->
+      send(parent, {:unexpected_reexecution, stage.id})
+      {:error, :completed_operation_must_not_run_again}
+    end
+
+    runtime = runtime(c, executor, auto_advance: false, workstream_reconciler: reconciler)
+    recovered = coordinator_run(runtime, legacy.id)
+    assert recovered.questions == %{}
+    assert recovered.inbox == []
+    assert recovered.activity_ids == %{}
+    assert recovered.continuation == nil
+    assert recovered.id == legacy.id
+    assert recovered.definition == legacy.definition
+    assert recovered.execution == legacy.execution
+    assert recovered.policy == legacy.policy
+
+    for {artifact_id, artifact} <- legacy.artifacts do
+      assert recovered.artifacts[artifact_id] == artifact
+    end
+
+    assert Enum.map(recovered.attempts, & &1.id) == Enum.map(legacy.attempts, & &1.id)
+    assert Map.keys(recovered.operations) == Map.keys(legacy.operations)
+    assert recovered.operations[check_id].status == :completed
+    assert recovered.operations[check_id].side_effect_id == side_effect_id
+    assert Enum.find(recovered.attempts, &(&1.id == check_id)).status == :completed
+    assert recovered.stage_id == "decision"
+    assert_receive {:pre_dev234_completed, ^check_id, ^side_effect_id}
+    refute_receive {:unexpected_reexecution, _}
+    assert File.read!(effects) == side_effect_id <> "\n"
+
+    restart(runtime)
+    assert run_state(runtime, legacy.id, :ready).stage_id == "decision"
+    assert :ok = Orchestrator.step_workstreams(runtime.coordinator)
+    assert run_state(runtime, legacy.id, :waiting_for_answer).stage_id == "decision"
+    refute_receive {:pre_dev234_completed, _, _}
+    refute_receive {:unexpected_reexecution, _}
+    assert File.read!(effects) == side_effect_id <> "\n"
+  end
+
+  test "a terminated pre-DEV234 agent retry keeps its side effect ID", c do
+    run = fixture_run(c, "legacy-terminated-retry") |> WorkstreamRun.start_stage()
+    original_attempt_id = run.current_attempt_id
+    side_effect_id = "legacy-agent-effect-1"
+    run = put_in(run.operations[original_attempt_id].side_effect_id, side_effect_id)
+    effects = Path.join(c.root, "legacy-agent-effects")
+    File.write!(effects, side_effect_id <> "\n")
+    legacy = persist_pre_dev234_run(c, run, "legacy-terminated-retry-fixture")
+    parent = self()
+
+    reconciler = fn _run, operation ->
+      send(parent, {:pre_dev234_terminated, operation.id, operation.side_effect_id})
+      :terminated
+    end
+
+    executor = fn stage, definition, run, opts ->
+      if stage.type == :agent do
+        retry_effect_id = run.operations[run.current_attempt_id].side_effect_id
+        send(parent, {:pre_dev234_retry_started, run.current_attempt_id, retry_effect_id})
+
+        effects_before = File.read!(effects) |> String.split("\n", trim: true)
+        if retry_effect_id not in effects_before, do: File.write!(effects, retry_effect_id <> "\n", [:append])
+      end
+
+      normal_executor(stage, definition, run, opts)
+    end
+
+    runtime = runtime(c, executor, auto_advance: false, workstream_reconciler: reconciler)
+    recovered = coordinator_run(runtime, legacy.id)
+    assert recovered.questions == %{}
+    assert recovered.inbox == []
+    assert recovered.activity_ids == %{}
+    assert recovered.continuation == nil
+    assert recovered.id == legacy.id
+    assert recovered.definition == legacy.definition
+    assert recovered.execution == legacy.execution
+    assert recovered.policy == legacy.policy
+    assert recovered.artifacts == legacy.artifacts
+    assert recovered.retry_operation_id == original_attempt_id
+    assert recovered.operations[original_attempt_id].status == :not_applied
+    assert recovered.operations[original_attempt_id].side_effect_id == side_effect_id
+    assert Enum.map(recovered.attempts, & &1.id) == Enum.map(legacy.attempts, & &1.id)
+    assert_receive {:pre_dev234_terminated, ^original_attempt_id, ^side_effect_id}
+
+    assert :ok = Orchestrator.step_workstreams(runtime.coordinator)
+    assert_receive {:pre_dev234_retry_started, retry_attempt_id, ^side_effect_id}
+    refute retry_attempt_id == original_attempt_id
+    retried = run_state(runtime, legacy.id, :ready)
+    assert retried.stage_id == "validate"
+    assert retried.transport_retries == 1
+    assert retried.operations[retry_attempt_id].side_effect_id == side_effect_id
+    assert File.read!(effects) == side_effect_id <> "\n"
+
+    restart(runtime)
+    assert run_state(runtime, legacy.id, :ready).stage_id == "validate"
+    refute_receive {:pre_dev234_retry_started, _, _}, 100
+    assert File.read!(effects) == side_effect_id <> "\n"
   end
 
   test "restart retains pinned definitions, artifacts, workspace, waits and idempotent answers", c do
@@ -625,18 +943,14 @@ defmodule SymphonyElixir.DurableWorkstreamTest do
   end
 
   test "changed service policy blocks a saved ready stage instead of silently changing its behavior", c do
+    run = fixture_run(c, "legacy-policy")
+    historical = put_in(run.policy.lifecycle_sha256, "previous-service-policy")
+    legacy = persist_pre_dev234_run(c, historical, "previous-policy-fixture", historical.policy)
     runtime = runtime(c, &normal_executor/4, auto_advance: false)
-    id = queue(runtime, c)
-
-    :sys.replace_state(runtime.coordinator, fn state ->
-      run = put_in(state.workstreams.runs[id].policy.lifecycle_sha256, "previous-service-policy")
-      # replace_state returns the whole State; persist its modified run as an old release fixture.
-      :ok = WorkstreamStore.commit(state.workstreams.store, run.workstreams.runs[id], "previous-policy", %{kind: :old_release_fixture})
-      run
-    end)
-
-    restart(runtime)
-    blocked = run_state(runtime, id, :policy_blocked)
+    blocked = run_state(runtime, legacy.id, :policy_blocked)
+    loaded = coordinator_run(runtime, legacy.id)
+    assert_pre_dev234_defaults(loaded, legacy)
+    assert loaded.policy == legacy.policy
     assert blocked.policy.lifecycle_sha256 == "previous-service-policy"
     assert :ok = Orchestrator.step_workstreams(runtime.coordinator)
     assert Task.Supervisor.children(runtime.tasks) == []

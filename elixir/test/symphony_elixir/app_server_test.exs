@@ -855,6 +855,223 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "workstream factory tools stay separate from tracker tools and wait for durable input", do: setup_factory_tool_wait()
+
+  defp setup_factory_tool_wait do
+    test_root = Path.join(System.tmp_dir!(), "symphony-factory-tool-wait-#{System.unique_integer([:positive])}")
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "MT-FACTORY")
+    codex_binary = Path.join(test_root, "fake-codex")
+    trace_file = Path.join(test_root, "trace")
+    File.mkdir_p!(workspace)
+
+    File.write!(codex_binary, """
+    #!/bin/sh
+    trace="#{trace_file}"
+    count=0
+    while IFS= read -r line; do
+      count=$((count + 1))
+      printf 'JSON:%s\\n' "$line" >> "$trace"
+      case "$count" in
+        1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+        2) ;;
+        3) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-factory"}}}' ;;
+        4)
+          printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-factory"}}}'
+          printf '%s\\n' '{"id":"tool-question","method":"item/tool/call","params":{"name":"factory_question","arguments":{"prompt":"Which format?"}}}'
+          ;;
+        5)
+          printf '%s\\n' '{"id":"tool-wait","method":"item/tool/call","params":{"name":"factory_wait","arguments":{"question_id":"question-1"}}}'
+          ;;
+      esac
+    done
+    """)
+
+    File.chmod!(codex_binary, 0o755)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root, codex_command: "#{codex_binary} app-server")
+    issue = %Issue{id: "factory-tool-wait", identifier: "MT-FACTORY", title: "Question wait", description: "", state: "In Progress", url: "https://example.org/issues/MT-FACTORY", labels: []}
+    test_pid = self()
+
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    assert {:waiting, %{wait_id: "question-1", thread_id: "thread-factory", session_id: "thread-factory-turn-factory"}} =
+             AppServer.run(workspace, "Ask the operator", issue,
+               workspace_root: workspace_root,
+               command: "#{codex_binary} app-server",
+               dynamic_tools: false,
+               factory_tools: true,
+               on_question: fn %{prompt: prompt} ->
+                 send(test_pid, {:factory_question, prompt})
+                 {:ok, %{id: "question-1"}}
+               end,
+               on_wait: fn "question-1" -> :wait end
+             )
+
+    assert_received {:factory_question, "Which format?"}
+    trace = File.read!(trace_file)
+    messages = trace |> String.split("\n", trim: true) |> Enum.map(&String.trim_leading(&1, "JSON:")) |> Enum.map(&Jason.decode!/1)
+    thread_start = Enum.find(messages, &(&1["id"] == 2))
+    assert Enum.map(thread_start["params"]["dynamicTools"], & &1["name"]) == ["factory_question", "factory_wait"]
+    assert Enum.any?(messages, &(&1["id"] == "tool-question" and get_in(&1, ["result", "success"]) == true))
+    refute Enum.any?(messages, &(&1["id"] == "tool-wait" and Map.has_key?(&1, "result")))
+    refute Enum.any?(thread_start["params"]["dynamicTools"], &(&1["name"] == "linear_graphql"))
+  end
+
+  test "native requestUserInput persists and answers a single clarification without saving its request id" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-native-question-#{System.unique_integer([:positive])}")
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "MT-NATIVE")
+    codex_binary = Path.join(test_root, "fake-codex")
+    trace_file = Path.join(test_root, "trace")
+    File.mkdir_p!(workspace)
+
+    File.write!(codex_binary, """
+    #!/bin/sh
+    trace="#{trace_file}"
+    count=0
+    while IFS= read -r line; do
+      count=$((count + 1))
+      printf 'JSON:%s\\n' "$line" >> "$trace"
+      case "$count" in
+        1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+        2) ;;
+        3) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-native"}}}' ;;
+        4)
+          printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-native"}}}'
+          printf '%s\\n' '{"id":88,"method":"item/tool/requestUserInput","params":{"isBlocking":true,"itemId":"item-native","questions":[{"header":"Choose format","id":"format","isSecret":false,"options":null,"question":"JSON or TOML?"}],"threadId":"thread-native","turnId":"turn-native"}}'
+          ;;
+        5) printf '%s\\n' '{"method":"turn/completed"}' ;;
+      esac
+    done
+    """)
+
+    File.chmod!(codex_binary, 0o755)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root, codex_command: "#{codex_binary} app-server")
+    issue = %Issue{id: "native-question", identifier: "MT-NATIVE", title: "Native question", description: "", state: "In Progress", url: "https://example.org/issues/MT-NATIVE", labels: []}
+    test_pid = self()
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    assert {:ok, _} =
+             AppServer.run(workspace, "Ask a question", issue,
+               workspace_root: workspace_root,
+               command: "#{codex_binary} app-server",
+               dynamic_tools: false,
+               factory_tools: true,
+               on_question: fn request ->
+                 send(test_pid, {:native_question, request})
+                 {:ok, %{id: "service-question"}}
+               end,
+               on_wait: fn "service-question" -> {:answered, %{body: "JSON", activity_id: "activity-1"}} end
+             )
+
+    assert_received {:native_question, %{prompt: prompt} = request}
+    assert prompt =~ "JSON or TOML?"
+    refute Map.has_key?(request, :request_id)
+    trace = File.read!(trace_file)
+    messages = trace |> String.split("\n", trim: true) |> Enum.map(&String.trim_leading(&1, "JSON:")) |> Enum.map(&Jason.decode!/1)
+    response = Enum.find(messages, &(&1["id"] == 88))
+    assert get_in(response, ["result", "answers", "format", "answers"]) == ["JSON"]
+  end
+
+  test "unanswered native requestUserInput stops with the service id, not the native request id" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-native-wait-#{System.unique_integer([:positive])}")
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "MT-NATIVE-WAIT")
+    codex_binary = Path.join(test_root, "fake-codex")
+    File.mkdir_p!(workspace)
+
+    File.write!(codex_binary, """
+    #!/bin/sh
+    count=0
+    while IFS= read -r _line; do
+      count=$((count + 1))
+      case "$count" in
+        1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+        2) ;;
+        3) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-native-wait"}}}' ;;
+        4)
+          printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-native-wait"}}}'
+          printf '%s\\n' '{"id":"ephemeral-native-request","method":"item/tool/requestUserInput","params":{"isBlocking":true,"itemId":"item-wait","questions":[{"header":"Need a choice","id":"choice","isSecret":false,"options":null,"question":"Which format?"}],"threadId":"thread-native-wait","turnId":"turn-native-wait"}}'
+          ;;
+      esac
+    done
+    """)
+
+    File.chmod!(codex_binary, 0o755)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root, codex_command: "#{codex_binary} app-server")
+    issue = %Issue{id: "native-wait", identifier: "MT-NATIVE-WAIT", title: "Native wait", description: "", state: "In Progress", url: "https://example.org/issues/MT-NATIVE-WAIT", labels: []}
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    assert {:waiting, receipt} =
+             AppServer.run(workspace, "Ask a question", issue,
+               workspace_root: workspace_root,
+               command: "#{codex_binary} app-server",
+               dynamic_tools: false,
+               factory_tools: true,
+               on_question: fn _request -> {:ok, %{id: "durable-question"}} end,
+               on_wait: fn "durable-question" -> :wait end
+             )
+
+    assert receipt == %{
+             wait_id: "durable-question",
+             thread_id: "thread-native-wait",
+             session_id: "thread-native-wait-turn-native-wait"
+           }
+
+    refute inspect(receipt) =~ "ephemeral-native-request"
+  end
+
+  test "factory mode never auto-approves native permission prompts" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-native-approval-#{System.unique_integer([:positive])}")
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "MT-NATIVE-APPROVAL")
+    codex_binary = Path.join(test_root, "fake-codex")
+    File.mkdir_p!(workspace)
+
+    File.write!(codex_binary, """
+    #!/bin/sh
+    count=0
+    while IFS= read -r _line; do
+      count=$((count + 1))
+      case "$count" in
+        1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+        2) ;;
+        3) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-native-approval"}}}' ;;
+        4)
+          printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-native-approval"}}}'
+          printf '%s\\n' '{"id":99,"method":"item/tool/requestUserInput","params":{"isBlocking":true,"itemId":"item-approval","questions":[{"header":"Approve app tool call?","id":"mcp_tool_call_approval_call-1","isSecret":false,"options":[{"description":"Run once","label":"Approve Once"},{"description":"Decline","label":"Deny"}],"question":"Allow this action?"}],"threadId":"thread-native-approval","turnId":"turn-native-approval"}}'
+          ;;
+        5) printf '%s\\n' '{"method":"turn/completed"}' ;;
+      esac
+    done
+    """)
+
+    File.chmod!(codex_binary, 0o755)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root, codex_command: "#{codex_binary} app-server", codex_approval_policy: "never")
+
+    issue = %Issue{
+      id: "native-approval",
+      identifier: "MT-NATIVE-APPROVAL",
+      title: "Native approval",
+      description: "",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-NATIVE-APPROVAL",
+      labels: []
+    }
+
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    assert {:error, :unsupported_native_approval} =
+             AppServer.run(workspace, "Handle a permission prompt", issue,
+               workspace_root: workspace_root,
+               command: "#{codex_binary} app-server",
+               dynamic_tools: false,
+               factory_tools: true,
+               on_question: fn _request -> flunk("permission must not be converted to a question") end,
+               on_wait: fn _id -> flunk("permission must not be converted to a wait") end
+             )
+  end
+
   test "app server rejects unsupported dynamic tool calls without stalling" do
     test_root =
       Path.join(

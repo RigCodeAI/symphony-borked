@@ -1,0 +1,76 @@
+{
+  "unit_active": false,
+  "private_capture_bodies_removed": 7,
+  "retained_metadata_receipts": [
+    {
+      "delivery_id": "dfb5d926-196d-474a-8b19-986c2798bbde",
+      "type": "Issue",
+      "action": "update",
+      "issue_id": "698bb5f5-1d4e-41b5-aa26-f372edb6f59a",
+      "session_id": null,
+      "activity_id": null,
+      "timestamp": 1791660837483,
+      "bytes": 4625
+    },
+    {
+      "delivery_id": "acdd9dde-ca12-44ed-b5ac-9157439c976f",
+      "type": "AppUserNotification",
+      "action": "issueAssignedToYou",
+      "issue_id": "698bb5f5-1d4e-41b5-aa26-f372edb6f59a",
+      "session_id": null,
+      "activity_id": null,
+      "timestamp": 1791660837540,
+      "bytes": 1364
+    },
+    {
+      "delivery_id": "c4da2910-925d-4be8-b244-1d25b12e183e",
+      "type": "AgentSessionEvent",
+      "action": "created",
+      "issue_id": "698bb5f5-1d4e-41b5-aa26-f372edb6f59a",
+      "session_id": "b3fce47a-584d-4364-a138-8e01ea95358e",
+      "activity_id": null,
+      "timestamp": 1791660837555,
+      "bytes": 4724
+    },
+    {
+      "delivery_id": "8f6b568f-22c2-46d4-a0cf-9ff5a318ae90",
+      "type": "AppUserNotification",
+      "action": "issueSubscribed",
+      "issue_id": "698bb5f5-1d4e-41b5-aa26-f372edb6f59a",
+      "session_id": null,
+      "activity_id": null,
+      "timestamp": 1791660837529,
+      "bytes": 1358
+    },
+    {
+      "delivery_id": "1eb27d89-387d-4f4c-9b55-48f2bfb0f08d",
+      "type": "AgentSessionEvent",
+      "action": "prompted",
+      "issue_id": "698bb5f5-1d4e-41b5-aa26-f372edb6f59a",
+      "session_id": "b3fce47a-584d-4364-a138-8e01ea95358e",
+      "activity_id": "dcc1a30f-00fa-4283-a942-d01d602372f3",
+      "timestamp": 1791660993215,
+      "bytes": 3637
+    },
+    {
+      "delivery_id": "8c7c79d1-9e51-4e9c-a43e-6c68883735a1",
+      "type": "Issue",
+      "action": "update",
+      "issue_id": "698bb5f5-1d4e-41b5-aa26-f372edb6f59a",
+      "session_id": null,
+      "activity_id": null,
+      "timestamp": 1791661094668,
+      "bytes": 4352
+    },
+    {
+      "delivery_id": "863b20e9-1731-4f42-8428-b4e6dc1e63a3",
+      "type": "AppUserNotification",
+      "action": "issueUnassignedFromYou",
+      "issue_id": "698bb5f5-1d4e-41b5-aa26-f372edb6f59a",
+      "session_id": null,
+      "activity_id": null,
+      "timestamp": 1791661094807,
+      "bytes": 1372
+    }
+  ]
+}

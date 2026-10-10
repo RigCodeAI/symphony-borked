@@ -75,6 +75,11 @@ metadata boundary. Automatic conversation resume, worker broker restart, signed-
 access, provider token lifecycle, Daybreak, scaled capacity and the wider Factory Setup flow
 remain unqualified. Rig candidate publication and merge were not attempted.
 
+DEV-234 adds durable native questions, replies and artifact-bound approval waits. Agents
+can continue independent work before suspending; suspension releases capacity after confirmed
+termination. Continuation reconstructs saved context in a fresh Codex conversation. See the
+[question/reply contract](docs/linear-questions.md) for commands and verification boundaries.
+
 Coordinator-only client credentials mint app tokens in memory per delegated run; see
 [Linear app setup](docs/linear-delegation.md#linear-app-setup) for scopes, events and secret references.
 

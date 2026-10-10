@@ -944,9 +944,16 @@ defmodule SymphonyElixir.WorkstreamStore do
 
   defp decode_run(payload) when is_binary(payload) do
     case decode_term(payload) do
-      {:ok, run} when is_map(run) -> {:ok, run}
-      {:ok, _run} -> {:error, :invalid_run_payload}
-      {:error, _reason} = error -> error
+      {:ok, run} when is_map(run) ->
+        # Older snapshots predate question/reply state. Preserve every saved value,
+        # including policy pins, and add only fields absent from those snapshots.
+        {:ok, Map.merge(%{questions: %{}, inbox: [], activity_ids: %{}, continuation: nil}, run)}
+
+      {:ok, _run} ->
+        {:error, :invalid_run_payload}
+
+      {:error, _reason} = error ->
+        error
     end
   end
 

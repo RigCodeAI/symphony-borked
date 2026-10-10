@@ -2,7 +2,7 @@ defmodule SymphonyElixir.Linear.Coordinator do
   @moduledoc "Durable native event intake owned by the existing coordinator."
 
   alias SymphonyElixir.Linear.Delegation
-  alias SymphonyElixir.WorkstreamStore
+  alias SymphonyElixir.{WorkstreamRun, WorkstreamStore}
 
   @spec init(map(), keyword()) :: {:ok, map()} | {:error, term()}
   def init(state, opts) do
@@ -67,9 +67,9 @@ defmodule SymphonyElixir.Linear.Coordinator do
   def process(%{linear: %{job: job}} = state, _stop) when not is_nil(job), do: state
 
   def process(state, stop) do
-    state = schedule(state)
+    state = state |> sync_publications() |> schedule()
 
-    pending = Enum.filter(state.linear.events, fn {_id, record} -> record.status == :pending end)
+    pending = state.linear.events |> Enum.filter(fn {_id, record} -> record.status == :pending end) |> Enum.sort_by(fn {id, r} -> {r.event.timestamp, id} end)
     selected = Enum.find(pending, fn {_id, record} -> record.event.kind == :stop end) || List.first(pending)
 
     case selected do
@@ -82,6 +82,11 @@ defmodule SymphonyElixir.Linear.Coordinator do
         cond do
           task && task.status == :stopped ->
             state |> commit(record, nil, :ignored_after_stop) |> process(stop)
+
+          task && task.run_id && record.event.kind == :prompted && is_binary(record.event[:body]) ->
+            if task.session_id == record.event.session_id,
+              do: start_job(state, {:reply, record.id, task[:scope_revision] || 0}, fn -> Delegation.inspect_event(record.event, state.linear.config, state.linear.opts) end),
+              else: state |> commit(record, nil, :wrong_session) |> process(stop)
 
           task && task.run_id && record.event.kind in [:created, :prompted] ->
             state |> commit(record, nil, :duplicate_task) |> process(stop)
@@ -177,7 +182,12 @@ defmodule SymphonyElixir.Linear.Coordinator do
     now = System.system_time(:millisecond)
 
     Enum.find_value(state.linear.tasks, state, fn {issue_id, task} ->
+      activity = task |> Map.get(:publications, %{}) |> Map.values() |> Enum.filter(&(&1.status == :pending and (&1[:retry_at] || 0) <= now)) |> Enum.sort_by(& &1.sequence) |> List.first()
+
       cond do
+        activity ->
+          start_job(state, {:publish, issue_id, activity.id}, fn -> Delegation.publish(task, activity, state.linear.config, state.linear.opts) end)
+
         task.status == :acknowledging and (task[:retry_at] || 0) <= now ->
           start_job(state, {:ack, issue_id}, fn -> Delegation.acknowledge(task, state.linear.config, state.linear.opts) end)
 
@@ -301,6 +311,142 @@ defmodule SymphonyElixir.Linear.Coordinator do
         stop_task(state, issue_id, task.event, stop)
     end
   end
+
+  defp apply_result(state, {:reply, id, revision}, result, _queue, stop) do
+    record = state.linear.events[id]
+    event = record.event
+    task = state.linear.tasks[event.issue_id]
+
+    cond do
+      task.status == :stopped ->
+        commit(state, record, nil, :ignored_after_stop)
+
+      (task[:scope_revision] || 0) != revision ->
+        state
+
+      not match?({:ok, _}, result) ->
+        state |> stop_task(task.issue_id, task.event, stop) |> commit(record, nil, :not_delegated)
+
+      true ->
+        run = state.workstreams.runs[task.run_id]
+        event_id = "linear-activity/" <> event.activity_id
+        receipt = %{kind: :linear_reply, session_id: event.session_id, body_sha256: digest(event.body)}
+
+        case WorkstreamStore.event(state.workstreams.store, event_id) do
+          {:ok, %{run_id: run_id, event: ^receipt}} when run_id == run.id -> commit(state, record, nil, :duplicate_reply)
+          {:ok, _} -> commit(state, record, nil, :reply_identity_conflict)
+          :not_found -> apply_reply(state, record, run, event_id, receipt)
+          other -> exit({:linear_reply_store_failed, other})
+        end
+    end
+  end
+
+  defp apply_result(state, {:publish, issue_id, id}, result, _queue, _stop) do
+    task = state.linear.tasks[issue_id]
+    publication = task.publications[id]
+
+    updated =
+      case result do
+        {:ok, %{id: ^id}} -> Map.put(publication, :status, :published)
+        _ -> Map.put(publication, :retry_at, System.system_time(:millisecond) + 5_000)
+      end
+
+    save_task(state, put_in(task.publications[id], updated))
+  end
+
+  defp apply_reply(state, record, run, event_id, receipt) do
+    case WorkstreamRun.linear_reply(run, record.event.body, record.event.activity_id) do
+      {:ok, updated} ->
+        :ok = WorkstreamStore.commit(state.workstreams.store, updated, event_id, receipt)
+        state = put_in(state.workstreams.runs[run.id], updated)
+        task = state.linear.tasks[record.event.issue_id] |> Map.merge(%{authorized_stage: nil, authorized_until: 0, check_at: 0})
+        send(self(), :advance_workstreams)
+        commit(state, record, task, :reply_delivered)
+
+      {:error, reason} ->
+        task = state.linear.tasks[record.event.issue_id]
+
+        task =
+          add_publication(
+            task,
+            "rejected-reply/" <> record.event.activity_id,
+            "error",
+            "Reply did not resume work: #{inspect(reason)}. Use the current question ID and approval revision when required."
+          )
+
+        commit(state, record, task, :reply_rejected)
+    end
+  end
+
+  defp sync_publications(state) do
+    Enum.reduce(state.linear.tasks, state, fn {_id, task}, acc ->
+      run = acc.workstreams.runs[task.run_id]
+      updated = if run, do: run_publications(task, run), else: task
+      updated = if task.status == :stopped, do: add_publication(updated, "stopped", "response", "Work stopped. Further replies do not restart this task."), else: updated
+      updated = if task.status == :blocked, do: add_publication(updated, "blocked", "error", "Task blocked before execution: #{task.error}"), else: updated
+      if updated == task, do: acc, else: save_task(acc, updated)
+    end)
+  end
+
+  defp run_publications(task, run) do
+    task =
+      Enum.reduce(Map.get(run, :questions, %{}), task, fn {_id, question}, acc ->
+        add_publication(acc, "question/" <> question.id, "elicitation", question.prompt <> "\n\nReply: answer #{question.id}: <your answer>")
+      end)
+
+    key = "phase/#{run.phase}/#{run.stage_id}/#{run.current_attempt_id || length(run.attempts)}"
+
+    case run.phase do
+      :waiting_for_answer ->
+        wait = run.pending_wait
+
+        if wait do
+          command = if wait[:approval_digest], do: "approve #{wait.id} #{wait.approval_digest}", else: "answer #{wait.id}: <your answer>"
+          add_publication(task, key, "elicitation", wait.prompt <> "\n\nReply: #{command}\nExecution capacity is released.")
+        else
+          task
+        end
+
+      :blocked ->
+        add_publication(task, key, "error", "Run #{run.id} failed or requires unsupported input. Inspect the durable stage receipt before retrying.")
+
+      :policy_blocked ->
+        add_publication(task, key, "error", "Run #{run.id} is blocked by a changed service policy; explicit migration is required.")
+
+      :complete ->
+        add_publication(task, key, "response", "Run #{run.id} completed its configured stages. Candidate publication remains disabled.")
+
+      :implementing ->
+        add_publication(task, key, "thought", "Run #{run.id}: working on stage #{run.stage_id}.")
+
+      :validating ->
+        add_publication(task, key, "thought", "Run #{run.id}: checking stage #{run.stage_id}.")
+
+      _ ->
+        task
+    end
+  end
+
+  defp add_publication(task, key, type, body) do
+    publications = Map.get(task, :publications, %{})
+    id = activity_id("#{task.issue_id}/#{task.session_id}/#{key}")
+
+    if Map.has_key?(publications, id) do
+      task
+    else
+      {:ok, body} = SymphonyElixir.Linear.Text.safe(String.slice(body, 0, 4_000))
+      publication = %{id: id, key: key, status: :pending, sequence: map_size(publications), content: %{"type" => type, "body" => body}}
+      Map.put(task, :publications, Map.put(publications, id, publication))
+    end
+  end
+
+  defp activity_id(key) do
+    <<a::32, b::16, c::12, d::14, e::48, _::bitstring>> = :crypto.hash(:sha256, key)
+    Enum.join([hex(a, 8), hex(b, 4), hex(0x4000 + c, 4), hex(0x8000 + d, 4), hex(e, 12)], "-")
+  end
+
+  defp hex(n, size), do: n |> Integer.to_string(16) |> String.downcase() |> String.pad_leading(size, "0")
+  defp digest(body), do: :crypto.hash(:sha256, body) |> Base.encode16(case: :lower)
 
   defp blocked_task(event, reason) do
     %{issue_id: event.issue_id, run_id: nil, status: :blocked, session_id: event.session_id, error: inspect(reason), event: event}

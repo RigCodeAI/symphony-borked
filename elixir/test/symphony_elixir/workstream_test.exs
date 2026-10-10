@@ -246,6 +246,16 @@ defmodule SymphonyElixir.WorkstreamTest do
     assert loaded.stages["question"].next == :complete
   end
 
+  test "human wait approval is an optional boolean setting", context do
+    add_human_wait!(context, "patch", "complete", "success: complete")
+    replace_in_file!(context.workstream_path, "prompt: Please answer.", "prompt: Please answer.\napproval: true")
+    assert {:ok, loaded} = load(context)
+    assert loaded.stages["question"].approval
+
+    replace_in_file!(context.workstream_path, "approval: true", "approval: maybe")
+    assert {:error, {:invalid_human_wait_approval, "question", "maybe"}} = load(context)
+  end
+
   test "human wait definitions accept exactly their declared fields", context do
     add_human_wait!(context, "patch", "complete", "success: complete")
     replace_in_file!(context.workstream_path, "prompt: Please answer.", "prompt: Please answer.\nextra: true")

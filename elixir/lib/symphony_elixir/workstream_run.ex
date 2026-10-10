@@ -6,11 +6,11 @@ defmodule SymphonyElixir.WorkstreamRun do
 
   @policy_digest :crypto.hash(:sha256, File.read!(__ENV__.file)) |> Base.encode16(case: :lower)
 
-  for source <- ~w(workstream_runner.ex worker_operation.ex workstream_cancellation.ex agent_runner.ex ssh.ex codex/app_server.ex) do
+  for source <- ~w(workstream_runner.ex worker_operation.ex workstream_cancellation.ex agent_runner.ex ssh.ex codex/app_server.ex linear/agent_mapping.ex linear/coordinator.ex linear/delegation.ex) do
     @external_resource Path.join(__DIR__, source)
   end
 
-  @executor_digest ~w(workstream_runner.ex worker_operation.ex workstream_cancellation.ex agent_runner.ex ssh.ex codex/app_server.ex)
+  @executor_digest ~w(workstream_runner.ex worker_operation.ex workstream_cancellation.ex agent_runner.ex ssh.ex codex/app_server.ex linear/agent_mapping.ex linear/coordinator.ex linear/delegation.ex)
                    |> Enum.map(&File.read!(Path.join(__DIR__, &1)))
                    |> IO.iodata_to_binary()
                    |> then(&:crypto.hash(:sha256, &1))

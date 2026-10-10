@@ -88,6 +88,10 @@ GCS archive receipts. Durable capture, restart replay and native Linear links ar
 locally tested against merged main; live qualification remains pending. See [private task evidence](docs/private-evidence.md) for configuration,
 retention and the current acceptance boundary.
 
+DEV-235 adds [named cloud-agent routing and safe reassignment](docs/dev-235-agent-mapping.md)
+to the existing coordinator. Additional app installation and native multi-app acceptance
+remain pending; see the [administrator setup plan](docs/dev-235-app-setup.md).
+
 Use live ticket dependencies to schedule work. The local files
 `docs/rig-software-factory-spec.md` and `docs/factory-setup-ticket-drafts.md`, if present,
 are earlier drafts. They predate the workstream additions and published ticket updates;

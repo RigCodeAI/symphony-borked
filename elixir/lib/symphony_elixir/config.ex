@@ -47,9 +47,37 @@ defmodule SymphonyElixir.Config do
     with {:ok, settings} <- settings() do
       if settings.linear_delegation == %{},
         do: :disabled,
-        else: SymphonyElixir.Linear.Delegation.validate(settings.linear_delegation)
+        else: validate_linear_runtime(settings.linear_delegation)
     end
   end
+
+  defp validate_linear_runtime(config) do
+    with {:ok, config} <- SymphonyElixir.Linear.Delegation.validate(config), :ok <- linear_runtime_references(config), do: {:ok, config}
+  end
+
+  defp linear_runtime_references(config) do
+    case System.get_env("FACTORY_LINEAR_SECRET_NAMES_JSON") do
+      nil ->
+        :ok
+
+      marker ->
+        expected = SymphonyElixir.Linear.AgentMapping.credential_environment_names(Map.delete(config, "secret_environment_names")) |> Enum.sort()
+
+        case Jason.decode(marker) do
+          {:ok, names} when is_list(names) ->
+            if names == expected, do: :ok, else: {:error, :linear_runtime_secret_references_changed}
+
+          _ ->
+            {:error, :invalid_linear_runtime_secret_references}
+        end
+    end
+  end
+
+  @spec linear_token(map()) :: String.t() | nil
+  def linear_token(config), do: System.get_env(config["token_env"])
+
+  @spec linear_client_secret(map()) :: String.t() | nil
+  def linear_client_secret(config), do: System.get_env(config["client_secret_env"])
 
   @spec linear_webhook_secret(map()) :: String.t() | nil
   def linear_webhook_secret(config), do: System.get_env(config["webhook_secret_env"])
@@ -62,6 +90,18 @@ defmodule SymphonyElixir.Config do
         config when is_map(config) -> SymphonyElixir.Evidence.validate_config(config)
         _ -> {:error, :invalid_evidence_config}
       end
+    end
+  end
+
+  @doc "Resolves signing secrets for the configured cloud apps without exposing values in routing records."
+  @spec linear_webhook_secrets(map()) :: {:ok, map()} | {:error, atom()}
+  def linear_webhook_secrets(config) do
+    with {:ok, routes} <- SymphonyElixir.Linear.AgentMapping.routes(config) do
+      secrets = Map.new(routes, &{&1["webhook_secret_env"], linear_webhook_secret(&1)})
+
+      if Enum.all?(secrets, fn {_name, value} -> is_binary(value) and value != "" end),
+        do: {:ok, secrets},
+        else: {:error, :signing_secret_unavailable}
     end
   end
 

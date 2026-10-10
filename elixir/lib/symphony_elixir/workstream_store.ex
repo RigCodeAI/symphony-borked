@@ -159,6 +159,27 @@ defmodule SymphonyElixir.WorkstreamStore do
     end
   end
 
+  @doc "Atomically commits a safe Linear agent reassignment across the run, task, and event records."
+  @spec linear_reassign(
+          GenServer.server(),
+          run_map(),
+          run_map(),
+          run_map(),
+          String.t(),
+          map(),
+          map(),
+          map()
+        ) :: :ok | {:error, term()}
+  def linear_reassign(server, expected_run, run_map, expected_task, run_event_id, run_event, event_record, task_record) do
+    case validate_linear_reassignment(expected_run, run_map, expected_task, run_event_id, run_event, event_record, task_record) do
+      :ok ->
+        safe_call(server, {:linear_reassign, expected_run, run_map, expected_task, run_event_id, run_event, event_record, task_record})
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
   @doc "Upserts one Linear task map. Only the store owner may write."
   @spec linear_task(GenServer.server(), map()) :: :ok | {:error, term()}
   def linear_task(server, task_map) do
@@ -289,6 +310,30 @@ defmodule SymphonyElixir.WorkstreamStore do
     reply =
       if caller == owner do
         commit_linear_transaction(db, event_record, task_record_or_nil)
+      else
+        {:error, :not_owner}
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:linear_reassign, expected_run, run_map, expected_task, run_event_id, run_event, event_record, task_record},
+        {caller, _tag},
+        %State{db: db, owner: owner} = state
+      ) do
+    reply =
+      if caller == owner do
+        commit_linear_reassignment(
+          db,
+          expected_run,
+          run_map,
+          expected_task,
+          run_event_id,
+          run_event,
+          event_record,
+          task_record
+        )
       else
         {:error, :not_owner}
       end
@@ -631,6 +676,101 @@ defmodule SymphonyElixir.WorkstreamStore do
     end
   end
 
+  defp commit_linear_reassignment(db, expected_run, run_map, expected_task, run_event_id, run_event, event_record, task_record) do
+    case transaction(db, "BEGIN IMMEDIATE", fn ->
+           with :ok <- ensure_expected_run(db, expected_run),
+                :ok <- ensure_expected_linear_task(db, expected_task),
+                :ok <- ensure_pending_reassignment(db, expected_task, run_map, run_event, event_record, task_record),
+                {:ok, nil} <- existing_event_run(db, run_event_id),
+                :ok <- persist_commit(db, run_map, run_event_id, run_event),
+                :ok <- persist_linear_commit(db, event_record, task_record) do
+             {:commit, :ok}
+           else
+             {:ok, existing_run_id} -> {:error, {:run_event_already_committed, existing_run_id}}
+             {:error, reason} -> {:error, reason}
+           end
+         end) do
+      {:committed, :ok} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp ensure_expected_run(db, expected_run) do
+    run_id = field(expected_run, :id)
+
+    case query(db, "SELECT payload FROM runs WHERE run_id = ?1", [run_id]) do
+      {:ok, [[payload]]} ->
+        case decode_run(payload) do
+          {:ok, ^expected_run} -> :ok
+          {:ok, _run} -> {:error, :run_assignment_conflict}
+          {:error, _reason} = error -> error
+        end
+
+      {:ok, []} ->
+        {:error, :run_not_found}
+
+      {:ok, _rows} ->
+        {:error, :invalid_run_row}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp ensure_expected_linear_task(db, expected_task) do
+    issue_id = field(expected_task, :issue_id)
+
+    case query(db, "SELECT payload FROM linear_tasks WHERE issue_id = ?1", [issue_id]) do
+      {:ok, [[payload]]} ->
+        case decode_linear_task(payload, issue_id) do
+          {:ok, ^expected_task} -> :ok
+          {:ok, _task} -> {:error, :linear_task_assignment_conflict}
+          {:error, _reason} = error -> error
+        end
+
+      {:ok, []} ->
+        {:error, :linear_task_not_found}
+
+      {:ok, _rows} ->
+        {:error, :invalid_linear_task_row}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp ensure_pending_reassignment(db, expected_task, run_map, run_event, event_record, task_record) do
+    delivery_id = field(event_record, :id)
+
+    with {:ok, existing_event} <- fetch_linear_event(db, delivery_id),
+         :ok <- ensure_linear_event_identity(existing_event, event_record),
+         true <- field(existing_event, :status) == :pending,
+         true <- get_in(expected_task, [:pending_reassignment, :id]) == delivery_id,
+         true <- field(expected_task, :status) == :reassigning,
+         true <- field(expected_task, :authorized_stage) == nil,
+         true <- field(expected_task, :authorized_until) in [nil, 0],
+         true <- field(event_record, :status) == :handled,
+         true <- field(field(event_record, :event), :kind) == :created,
+         true <- field(task_record, :issue_id) == field(expected_task, :issue_id),
+         true <- field(task_record, :run_id) == field(expected_task, :run_id),
+         true <- field(task_record, :agent_id) == field(run_event, :agent_id),
+         true <- field(run_event, :transition_id) == delivery_id,
+         true <- reassignment_transition?(run_map, delivery_id, field(task_record, :agent_id)) do
+      :ok
+    else
+      false -> {:error, :invalid_linear_reassignment_state}
+      {:error, _reason} = error -> error
+      _ -> {:error, :invalid_linear_reassignment_state}
+    end
+  end
+
+  defp reassignment_transition?(run, transition_id, agent_id) do
+    Enum.any?(Map.get(run, :agent_transitions, []), fn
+      %{id: ^transition_id, to: %{agent_id: ^agent_id}} -> true
+      _ -> false
+    end)
+  end
+
   defp persist_linear_commit(db, event_record, task_record_or_nil) do
     delivery_id = field(event_record, :id)
 
@@ -710,6 +850,54 @@ defmodule SymphonyElixir.WorkstreamStore do
   end
 
   defp validate_linear_commit(_event_record, _task_record_or_nil), do: {:error, :invalid_linear_commit}
+
+  defp validate_linear_reassignment(expected_run, run_map, expected_task, run_event_id, run_event, event_record, task_record)
+       when is_map(expected_run) and is_map(run_map) and is_map(expected_task) and is_map(run_event) and
+              is_map(event_record) and is_map(task_record) do
+    cond do
+      field(expected_run, :id) != field(run_map, :id) ->
+        {:error, :invalid_run_id}
+
+      field(expected_run, :task_id) != field(run_map, :task_id) ->
+        {:error, :invalid_task_id}
+
+      field(expected_task, :run_id) != field(expected_run, :id) ->
+        {:error, :invalid_linear_reassignment_state}
+
+      not (is_binary(run_event_id) and run_event_id != "") ->
+        {:error, :invalid_event_id}
+
+      field(run_event, :kind) != :agent_reassigned ->
+        {:error, :invalid_run_event}
+
+      field(event_record, :id) != get_in(expected_task, [:pending_reassignment, :id]) ->
+        {:error, :invalid_linear_event_record}
+
+      field(task_record, :run_id) != field(run_map, :id) ->
+        {:error, :invalid_linear_task}
+
+      field(run_map, :status) not in [:ready, :waiting_for_answer] ->
+        {:error, :run_not_reassignable}
+
+      not reassignment_transition?(run_map, field(event_record, :id), field(task_record, :agent_id)) ->
+        {:error, :invalid_agent_transition}
+
+      validate_commit(run_map, run_event_id, run_event) != :ok ->
+        validate_commit(run_map, run_event_id, run_event)
+
+      validate_linear_commit(event_record, task_record) != :ok ->
+        validate_linear_commit(event_record, task_record)
+
+      validate_linear_task(expected_task) != :ok ->
+        validate_linear_task(expected_task)
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_linear_reassignment(_expected_run, _run_map, _expected_task, _run_event_id, _run_event, _event_record, _task_record),
+    do: {:error, :invalid_linear_reassignment}
 
   defp validate_linear_task(task_map) when is_map(task_map) do
     issue_id = field(task_map, :issue_id)

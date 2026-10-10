@@ -1,0 +1,6 @@
+Running ExUnit with seed: 17193, max_cases: 4
+Excluding tags: [:validation_docker]
+
+....................................................................................................................................................................
+Finished in 25.3 seconds (1.7s async, 23.6s sync)
+164 tests, 0 failures

@@ -64,12 +64,16 @@ defmodule SymphonyElixir.WorkstreamRunner do
   def prepare(path, inputs, opts) do
     with :ok <- subscription_environment(),
          {:ok, definition} <- Workstream.load(path, inputs),
+         {:ok, definition} <- bind_cloud_agent(definition, opts[:cloud_agent_id]),
          {:ok, workspace} <- workspace(opts, definition),
          :ok <- dedicated_clone(workspace),
          {:ok, definition} <- pin_definition_validation(opts, workspace, definition) do
       {:ok, definition, workspace}
     end
   end
+
+  defp bind_cloud_agent(definition, nil), do: {:ok, definition}
+  defp bind_cloud_agent(definition, agent_id), do: SymphonyElixir.Linear.AgentMapping.bind(definition, agent_id)
 
   @doc """
   Runs a validated local workstream synchronously until it completes, blocks, or reaches

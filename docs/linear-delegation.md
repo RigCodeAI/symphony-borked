@@ -50,9 +50,9 @@ parent remains unchanged and is not accepted by the contained broker. See the
 Keep the signing secret and OAuth client secret in separate coordinator environment variables.
 `LINEAR_API_TOKEN` above is the webhook signing secret; `LINEAR_API_KEY` is the OAuth client
 secret despite the legacy variable name. Neither value belongs in YAML, logs or evidence.
-For this increment, the two references must be distinct names in `LINEAR_API_KEY`,
-`LINEAR_API_TOKEN`, or `OAUTH_TOKEN`, which the current agent launch strips. Custom references
-block before dispatch until the runtime supports a pinned explicit strip list.
+Each route's credential and signing references must be distinct valid environment names.
+The coordinator pins an explicit exclusion list covering every configured app; older runs
+without the necessary exclusions block before launch. See [named-agent routing](dev-235-agent-mapping.md).
 
 `client_secret_env` enables server-to-server app authentication with fixed scopes
 `read,write,app:assignable`. The coordinator mints a token on the first API lookup for
@@ -240,8 +240,9 @@ and root worker-control source commit `064f892f95847ea2eed0eb684da36c6e1bb5fce6`
 SHA-256 `67267e73e9c587f0b6115398d89cdac462b23dcb8749df34895a34b9d0a0af89`. The worker app
 remains `541279aeb6a5366571e1ee8935e134c728d91c63`. See the
 [restart repair acceptance record](evidence/dev-233/restart-repair-acceptance.md).
-Map exactly `LINEAR_API_KEY` to the OAuth client secret and `LINEAR_API_TOKEN` to the
-separate signing secret using existing `optional_integration_secrets` keys and pinned
+Map `LINEAR_API_KEY` to the Default OAuth client secret and `LINEAR_API_TOKEN` to its
+separate signing secret. Additional cloud apps use the complete optional credential pairs
+in the [DEV-235 setup plan](dev-235-app-setup.md), through `optional_integration_secrets` and pinned
 numeric versions. Pilot mode accepts no credential mapping. No payload goes through Terraform.
 
 Startup fetches selected values as root into per-release files under

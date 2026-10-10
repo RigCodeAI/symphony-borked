@@ -12,7 +12,7 @@ defmodule SymphonyElixir.Evidence do
   alias SymphonyElixir.{Config, EvidenceRedaction, PathSafety, WorkstreamRun, WorkstreamStore}
 
   @limit 10 * 1024 * 1024
-  @identity_keys ~w(task_id definitions pinned_definitions agents policy)
+  @identity_keys ~w(task_id definitions pinned_definitions agents policy agent_selection stage_agents)
   @schema """
   CREATE TABLE IF NOT EXISTS evidence_runs (run_id TEXT PRIMARY KEY, task_key TEXT NOT NULL, snapshot TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS evidence_events (seq INTEGER PRIMARY KEY, run_id TEXT NOT NULL, event_id TEXT NOT NULL, payload TEXT NOT NULL, UNIQUE(run_id,event_id));
@@ -162,9 +162,33 @@ defmodule SymphonyElixir.Evidence do
   defp report(run) do
     report = run |> WorkstreamRun.report() |> Map.drop([:workspace, :operations, :continuation])
     definitions = Map.new(run.definition.definitions, fn {path, resource} -> {path, Map.take(resource, [:sha256, :text])} end)
-    report = Map.merge(report, %{policy: run.policy, pinned_definitions: definitions, parent_run_id: run[:parent_run_id], child_run_ids: run[:child_run_ids] || []})
+    stage_agents = stage_agent_bindings(Map.get(run.definition, :stages, %{}))
+
+    report =
+      Map.merge(report, %{
+        policy: run.policy,
+        pinned_definitions: definitions,
+        agent_selection: Map.get(run.definition, :agent_selection),
+        stage_agents: stage_agents,
+        parent_run_id: run[:parent_run_id],
+        child_run_ids: run[:child_run_ids] || []
+      })
+
     EvidenceRedaction.safe(report)
   end
+
+  defp stage_agent_bindings(stages) when is_map(stages) do
+    Enum.reduce(stages, %{}, fn {id, stage}, bindings ->
+      type = if is_map(stage), do: Map.get(stage, :type, Map.get(stage, "type")), else: nil
+      agent = if is_map(stage), do: Map.get(stage, :agent, Map.get(stage, "agent")), else: nil
+
+      if is_binary(id) and type in [:agent, "agent"] and is_binary(agent),
+        do: Map.put(bindings, id, agent),
+        else: bindings
+    end)
+  end
+
+  defp stage_agent_bindings(_stages), do: %{}
 
   @spec capture(map(), map(), GenServer.server()) :: :ok | {:error, atom()}
   def capture(run, event, server \\ __MODULE__) do

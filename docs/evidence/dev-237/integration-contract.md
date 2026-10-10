@@ -1,8 +1,9 @@
 # DEV-237 integration contract
 
-Implemented against merged main `6f1822c`. DEV-235 released shared-file ownership
-for this increment while its unmerged implementation stays idle. No DEV-235
-source is imported or required by this change.
+The original DEV-237 implementation is preserved at `54f13a5`, based on merged
+main `6f1822c`. The deployment candidate combines it with the actual deployed
+DEV-235 source `366734057481aa2c160319f05205e8e7f582a30e`. This preserves the
+live agent routing while adding retained evidence. DEV-235 remains unmerged.
 
 - `WorkstreamStore.commit/4` writes a redacted evidence journal in the same
   transaction as the run/event. Schema v3 supplies ordered, owner-only pending
@@ -23,7 +24,7 @@ source is imported or required by this change.
   idempotent completion marker. Completed imports survive loss of the original
   validation directory. It does not grant validation eligibility.
 
-## Future DEV-235 reassignment integration
+## DEV-235 reassignment integration
 
 The available durable commit interface accepts an explicit authorized transition:
 
@@ -40,14 +41,16 @@ event = %{
 Commit the updated run and this event atomically through the durable owner, then
 call `Evidence.sync!` before dispatch or acknowledgement. Pins must match the
 index's previous pins and the incoming pins exactly. Task and policy stay fixed.
-The local contract test replays both revisions after restart and proves that
-original definitions remain in immutable snapshot history.
+The identity includes the selected agent and each stage's agent binding. The
+focused test uses `AgentMapping.reassign`, rejects a silent selection change,
+replays both revisions after restart and proves the prior bundle is unchanged.
 
-When integrating DEV-235's separate `WorkstreamStore.linear_reassign` change,
-keep journaling in the common `persist_commit` transaction, add the previous/current
-identity envelope to its reassignment event, and drain after the reassignment
-commit. Its worker fence, route qualification and authorization remain owned by
-DEV-235. The contract test is not proof that its unmerged runtime is integrated.
+`WorkstreamStore.linear_reassign` journals in its common `persist_commit`
+transaction. The coordinator adds the previous/current identity envelope when
+evidence is enabled, then drains before acknowledgement or redispatch. Disabled
+evidence retains the existing route behavior. DEV-235's worker fence, route
+qualification and authorization remain in place. Live reassignment qualification
+still belongs to DEV-235 and is distinct from this integration test.
 
 ## Cleanup seam
 
@@ -58,5 +61,6 @@ merge confirmation and trusted worker termination. That cleanup owner is not
 implemented here. The local deletion test checks retained bytes and this evidence
 predicate with a clearly labeled contract receipt, not live GCS archival.
 
-Live deployment remains pending the separate staging/activation approval. See
+The human approved staging, activation and disposable live testing in the
+coordinating chat on 2026-10-10. Live verification remains pending. See
 [the concrete deployment plan](deployment-plan.md) and [acceptance](acceptance.md).

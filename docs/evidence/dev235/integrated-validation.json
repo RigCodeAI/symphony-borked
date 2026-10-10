@@ -1,0 +1,92 @@
+{
+  "checked_at_utc": "2026-10-10T20:24:45.951813+00:00",
+  "base_commit": "7e34d5228a38ba810818da079ca47f45a93b201c",
+  "runtime": {
+    "container": "dev230-checked:latest",
+    "elixir": "1.19.5",
+    "otp": "28",
+    "cpu_limit": 2,
+    "memory_gib": 4
+  },
+  "commands": {
+    "compile": "MIX_ENV=test mix compile --force --warnings-as-errors",
+    "focused": "MIX_ENV=test mix test test/symphony_elixir/linear_agent_routing_test.exs test/symphony_elixir/workstream_store_reassignment_test.exs test/symphony_elixir/linear_agent_mapping_test.exs test/symphony_elixir/linear_agent_mapping_config_test.exs test/symphony_elixir/workstream_runner_test.exs test/symphony_elixir/linear_delegation_test.exs test/symphony_elixir/linear_http_test.exs test/symphony_elixir/linear_webhook_test.exs test/symphony_elixir/durable_workstream_test.exs test/symphony_elixir/workstream_cancellation_test.exs test/symphony_elixir/linear_store_test.exs test/symphony_elixir/workstream_store_test.exs test/symphony_elixir/agent_readiness_test.exs test/symphony_elixir/software_change_test.exs test/symphony_elixir/app_server_test.exs",
+    "specs": "mix specs.check",
+    "format": "mix format --check-formatted",
+    "build": "mix build",
+    "broad": "make all",
+    "full_tests": "MIX_ENV=test mix test",
+    "python_runtime": "python3 -m unittest discover -s tests -p test_coordinator_runtime.py",
+    "python_cloud_io": "python3 -m unittest discover -s tests -p test_cloud_io.py",
+    "terraform_format": "terraform fmt -check /check/modules/pilot/variables.tf /check/pilot/variables.tf (hashicorp/terraform:1.9.8)"
+  },
+  "results": {
+    "compile": "passed77files",
+    "focused": {
+      "tests": 164,
+      "failures": 0,
+      "seed": 17193
+    },
+    "specs": "passed",
+    "format": "passed",
+    "build": "passed",
+    "broad": "stopped at Credo lint; alpha nonblocking; coverage/dialyzer not reached",
+    "full_tests": {
+      "tests": 553,
+      "failures": 0,
+      "skipped": 6,
+      "excluded": 10,
+      "seed": 321854
+    },
+    "python_runtime": {
+      "tests": 17,
+      "failures": 0
+    },
+    "python_cloud_io": {
+      "tests": 19,
+      "failures": 0,
+      "skipped": 4
+    },
+    "terraform_format": "passed",
+    "terraform_plan_apply": "not run"
+  },
+  "self_review": "Checked exact signer/app routing, duplicate resolved signing-key rejection, credential exclusion on new/recovered runs, stage-lease revocation, termination fencing and atomic CAS handoff. Existing question/reply decoder behavior preserved. Controlled tests and live acceptance remain separate.",
+  "tested_source_sha256": {
+    "elixir/lib/symphony_elixir/config.ex": "2e2838673de1a2c7aa4a97789ce2c39580201643612de5d6bbd0698ad7616e31",
+    "elixir/lib/symphony_elixir/linear/agent_mapping.ex": "09d1e9d3e1a3935c421de41704829e0e7a3812abc33dbe38a254ef7853ce307c",
+    "elixir/lib/symphony_elixir/linear/coordinator.ex": "b879632aba8470057a0aa00a8c24dd223e55035e467854e70859a5a5e1271fca",
+    "elixir/lib/symphony_elixir/linear/delegation.ex": "fc2adf91f67a97aa920ca98979feee70cc3585d8df1278dd6d9858f6ca91522a",
+    "elixir/lib/symphony_elixir/linear/oauth.ex": "63ea614c1da81c1b463f25af6f46728b651a8727c4773d628b35e9f9c827525b",
+    "elixir/lib/symphony_elixir/orchestrator.ex": "eb3eae30e0ccc47c1e9d6539c715fb5d56dbdf1415780a222161f7a7a5947e28",
+    "elixir/lib/symphony_elixir/workstream_run.ex": "1e35cd73170888043e3bede37b6e21fe19707bead15e3a5bae51358d8e3129fd",
+    "elixir/lib/symphony_elixir/workstream_runner.ex": "ec4cc78903e6914d46580cb97d529462cf67cb5f8a6db7c2ac500fb0aaf1051b",
+    "elixir/lib/symphony_elixir/workstream_store.ex": "9e3ce03cc6eab84da67395fae779a1066191180f4a916334e16406519a159667",
+    "elixir/lib/symphony_elixir_web/controllers/linear_webhook_controller.ex": "f1aa4739f5399e9c382f0f27c64c69caa08c0e916276389d43d113a12f4698f3",
+    "elixir/test/symphony_elixir/app_server_test.exs": "973f251eef8e3836260d6279c21550002cd677d5104db4f80dfa0107a1dfc9bc",
+    "elixir/test/symphony_elixir/linear_agent_mapping_config_test.exs": "1b8c1ceafe26a108f8a40fe1b4f76d02ed56dced02e0c743b6383b14cc389b01",
+    "elixir/test/symphony_elixir/linear_agent_mapping_test.exs": "23dfb86422767b1b754ea2974bc08ac6ddc4ccdf66587691c07628675c86eba7",
+    "elixir/test/symphony_elixir/linear_agent_routing_test.exs": "7a321d62827dc63726dabf36b90f8670b1797fd0ed6e5c1079dd7b5d0a8fb9d0",
+    "elixir/test/symphony_elixir/linear_delegation_test.exs": "ffbb1ecfe5109877f0c608df34677d29bf292574619ffa14e631df1c441482b0",
+    "elixir/test/symphony_elixir/linear_http_test.exs": "d4144725d781a626aad9cb58d311bff0aa229b683a69b65b5fe2f8d3f1cfc851",
+    "elixir/test/symphony_elixir/software_change_test.exs": "7ae1634f559bb300b6f6cd981301dd411ef8a47e7f0d4ea7275e9754895ca52a",
+    "elixir/test/symphony_elixir/workstream_store_reassignment_test.exs": "f56f14688f6bd75ea4795f42a0d418fba98dbfdb96bec0e77017f2e2050683f8",
+    "factory/agents/daybreak-cloud-luna.yaml": "b1977b6b55758fe621234293c99ce024f02b70deb52e1d92f413264046f10312",
+    "factory/agents/daybreak-cloud.yaml": "90fb13cf5140a6ca7b23637b5751ae65a47fac0e063ba8b0a4615a2f7b054817",
+    "factory/agents/daybreak-review.yaml": "cd9e126de159217716e823381dc18fe459ef3674177cf1caef97595e7c8a5cfc",
+    "factory/agents/default-cloud.yaml": "78c12b3df8f0631f8c20a4b8dc1679093cd19804e8b376ae2589d5dbe18aef9c",
+    "factory/agents/default-review.yaml": "2f8ce08aba7db44e17731452a33fd0f87c72423c000f59d984350f4e9e3b7652",
+    "factory/agents/high-effort-cloud.yaml": "be46b132c98b28f6a591a4e669fe773cff267c482284a209143035bbbd574e3f",
+    "factory/agents/local-repair.yaml": "003daa7981701076b2d3bc53f54928aaed815552e98cf7fa8c3b5116ea57fee7",
+    "factory/agents/local-worker.yaml": "553d97a0e81f2d1c34471053696a69c618dd3ae34504c90bd5562047a2a5eb0d",
+    "factory/deploy/cloud_io.py": "0e15719bc42db7d196fdd01e1ca336ea184ce225c65d1a827b1d7918a0a3daaa",
+    "factory/deploy/coordinator_entrypoint.py": "0d560af666875edb6ecb1d3f901b019383d215397e5dc8627a7e5e344c7af08b",
+    "factory/deploy/tests/test_coordinator_runtime.py": "3f40059eb005d7abec9ecea821a4a45968d2dfbdfb420a092c731650558c1801",
+    "factory/instructions/cloud-implementation.md": "b75e205dfb751ccf100a9c3d92bbc7f7fadb42f0c778aca1af91b5718cf792c7",
+    "factory/instructions/cloud-review.md": "37ae41d7feaabb6a5c76f551295d94c1cb4334d6440e831b0213521a12401386",
+    "factory/instructions/local-rig.md": "313e4796343efae8ccd8a0990f293db639b48d563319d6d55c8b95ed26cd28eb",
+    "factory/skills/factory-rig/SKILL.md": "7d634d5a9cede4c2eea4d11164e6e6b7897e80d0b04da9dc4a3c24873cc489ff",
+    "factory/workstreams/software-change.yaml": "bed5a8ebf9097bdc9ab84ec68a11d02db39955b93fa0f76fa38c8fb0c4414e7b",
+    "infra/gcp/modules/pilot/variables.tf": "a250c15629bd90b6199bcf608a1366aab29c65242119018c821226860833aa53",
+    "infra/gcp/pilot/variables.tf": "dbd34f5d0d29fc3526c23b1dd35d53d25e3be12d3cd6d6a5dd459dcf5861e943"
+  }
+}

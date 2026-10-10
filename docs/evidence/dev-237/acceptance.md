@@ -3,12 +3,11 @@
 Date: 2026-10-10. Branch: `cycle/dev-237-private-evidence`. Base:
 `6f1822cd7cfe45c6bb2733567c3380d1d7ea01f2`.
 
-Status: durable capture, atomic evidence replay, native Linear URLs and validation
-log retention are integrated against merged main. Ticket acceptance remains
-incomplete. No PR, deployment, IAM change or factory candidate publication has
-been performed. DEV-235 released shared-file ownership and the heavy build slot
-while its stable implementation stays idle and unmerged; no DEV-235 source was
-imported. Live work is read-only pending the separate deployment approval.
+Status: the original implementation is preserved at `54f13a5`. The current
+candidate combines it with deployed DEV-235 source `3667340`, preserving live
+routing and adding explicit selection history. The human approved staging,
+activation and disposable tests on 2026-10-10. No DEV-237 deployment or PR has
+been performed yet; ticket acceptance remains incomplete.
 
 The user selected `factory.rig.ai` and resource-scoped IAP access for
 `domain:rig.ai`. This work consumes the existing project, archive bucket and
@@ -21,7 +20,7 @@ budget; it does not propose another IAM binding or budget.
 | Linear link opens live/completed conversation and test evidence | Stable task URL, synchronous redacted event capture, HTML viewer and artifact downloads implemented; local store tests pass | Signed-in live task demonstration; shared hooks now pass local integration tests |
 | Unauthorized access denied; credentials redacted before persistence | Real ES256 verifier tests cover wrong signature/issuer/audience/domain, expiry, malformed/duplicate headers and unavailable keys. Real SQLite/outbox tests cover fixture credentials and exclusion of reasoning/image data. Real HTTP routes verify signed access, unsigned/unauthorized denial, escaped HTML and old artifact retrieval | Unauthorized GCP pilot request and allowed Google identity demonstration |
 | URL survives workspace deletion; failure cannot qualify | Real store restart and deleted-workspace test retains transcript; exact current root receipt is required for cleanup. Upload retry/corrupt readback/conflict tests pass | Live task archive/readback, workspace deletion through the actual cleanup owner, then retained URL inspection |
-| Retry vs stage, child links and original definitions | Contract run includes failure/retry and approval wait, parent/child navigation, separate later run pins, explicit same-run reassignment history and immutable old snapshot; replay cannot regress current view | Inspect the live sample; DEV-235 runtime reassignment remains a later integration; child links may use contract data |
+| Retry vs stage, child links and original definitions | Contract run includes failure/retry and approval wait, parent/child navigation, separate later run pins, explicit same-run reassignment history and immutable old snapshot; replay cannot regress current view | Inspect the live sample; combined DEV-235 selection history passes local integration; child links may use contract data |
 
 An existing browser session reached the currently deployed observability dashboard
 at the chosen domain. That is a baseline only: it does not prove this viewer,
@@ -114,8 +113,8 @@ steps are in [the deployment plan](deployment-plan.md).
   and blocks advancement. Event/combined serialized size limits align with the
   evidence index so a commit cannot enqueue an oversized unreplayable snapshot.
 - Current shared capture and native URL hooks pass local behavior checks. The
-  future DEV-235 reassignment owner and managed cleanup owner remain separate
-  integration seams; neither is claimed as implemented by this change.
+  combined DEV-235 reassignment owner now adds and drains the identity envelope.
+  The later managed cleanup owner remains separate and is not implemented here.
 
 ## Remaining live acceptance
 
@@ -124,9 +123,33 @@ staging, a protected new per-revision workflow, compatible migration/rollback,
 service activation, allowed/unauthorized IAP requests, one retained native task,
 archive failure/retry/readback and workspace deletion with the actual separate
 cleanup prerequisites. No new app, IAM binding, budget or model credential is
-required. Automatic review previously rejected remote staging in DEV-235; this
-chat does not bypass that boundary. The coordinating chat requests deployment
-approval for the concrete local package.
+required. The human approval covers this concrete deployment plan and disposable live tests.
+Additional DEV-235 app installation remains pending its own passkey step.
 
 No live acceptance step is inferred from local tests or the existing dashboard.
 Only after ticket boundaries pass should a real PR be opened for human merge.
+
+## Combined deployed-source qualification
+
+- Candidate includes actual deployed DEV-235 commit
+  `366734057481aa2c160319f05205e8e7f582a30e` and preserves checkpoint `54f13a5`.
+- Central container compilation with warnings as errors and `mix specs.check` pass.
+- Focused evidence, durable run, cancellation, store, mapping, routing, HTTP,
+  delegation and OAuth tests: **123 tests, zero failures**.
+- Actual `AgentMapping.reassign` changes require a matching prior/current envelope
+  including `agent_selection` and stage bindings. Silent changes reject; earlier
+  bundles retain their exact bytes after restart. Evidence-disabled routing works.
+- Python deployment suite: **97 tests, zero failures, 18 skipped**.
+- Whole-project format and `mix build` pass. `make all` stops at Credo (149
+  refactoring, 131 readability, 17 design findings). The broad coverage/Dialyzer
+  results are below; no gate is represented as clean.
+- Live preflight confirms active coordinator `3667340`, five retained stopped
+  runs with trusted termination recorded, no active worker operation and no
+  pending public config. Protected config remains root-owned 0600; public 0644.
+  The running store uses exclusive SQLite locking, so schema inspection/backup
+  must occur after stopping dispatch. The read-only attempt returned locked and
+  changed no state.
+
+- Combined broad behavior run (`mix test --cover`): **577 tests, zero failures,
+  six skipped, ten excluded**. Command exits 3 at 79.54% coverage against the
+  unchanged 100% threshold.

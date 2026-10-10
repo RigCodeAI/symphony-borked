@@ -2,6 +2,9 @@
 # Optional trusted deployment config: evidence root/base_url/iap_audience and
 # allowed_domains/allowed_emails. Omit for ordinary upstream workflows. See
 # ../docs/private-evidence.md. Do not use this sample unchanged for Factory Setup.
+
+# Factory native delegation cloud_agents options: ../docs/dev-235-agent-mapping.md.
+# This upstream sample is not Rig Factory Setup policy; see ../AGENTS.md.
 tracker:
   kind: linear
   provider:

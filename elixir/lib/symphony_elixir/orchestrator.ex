@@ -2214,6 +2214,8 @@ defmodule SymphonyElixir.Orchestrator do
           Code.ensure_loaded!(SymphonyElixir.Workstream)
           Code.ensure_loaded!(WorkstreamRun)
           Code.ensure_loaded!(WorkstreamRunner)
+          Code.ensure_loaded!(SymphonyElixir.Linear.AgentMapping)
+          Code.ensure_loaded!(SymphonyElixir.AgentReadiness)
           Code.ensure_loaded!(SymphonyElixir.ValidationPolicy)
           Code.ensure_loaded!(SymphonyElixir.Validation)
           Code.ensure_loaded!(SymphonyElixir.ValidationCommand)
@@ -2334,6 +2336,7 @@ defmodule SymphonyElixir.Orchestrator do
                 :branch,
                 :issue_id,
                 :definition_sha256,
+                :cloud_agent_id,
                 :authentication_reference,
                 :validation_policy,
                 :validation_archive,
@@ -2531,8 +2534,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp linear_stopped?(%{linear: nil}, _run), do: false
 
   defp linear_stopped?(state, run) do
-    Enum.any?(state.linear.tasks, fn {_id, task} -> task.run_id == run.id and task.status == :stopped end) or
-      Enum.any?(state.linear.events, fn {_id, record} -> record.event.kind == :stop and record.event.issue_id == run.issue_id end)
+    Enum.any?(state.linear.tasks, fn {_id, task} -> task.run_id == run.id and task.status in [:stopped, :reassigning] end)
   end
 
   defp stop_linear_workstream(state, %{status: :stopped} = run), do: request_workstream_cancellation(state, run, nil)
@@ -2544,7 +2546,9 @@ defmodule SymphonyElixir.Orchestrator do
     outcome = if workstream_operation_unconfirmed?(run, operation), do: :unknown, else: :terminated
     stopped = Map.merge(run, %{status: :stopped, phase: :stopped, cancellation: %{termination: outcome}})
     stopped = if operation && outcome == :terminated, do: WorkstreamRun.confirm_termination(stopped), else: stopped
-    state = commit_workstream(state, stopped, run.id <> "/linear-stop", %{kind: :stopped})
+    generation = length(Map.get(run, :agent_transitions, []))
+    stop_id = "#{run.id}/linear-stop/#{generation}/#{run.current_attempt_id || "ready"}"
+    state = commit_workstream(state, stopped, stop_id, %{kind: :stopped})
     state = request_workstream_cancellation(state, stopped, pid)
 
     if pid do

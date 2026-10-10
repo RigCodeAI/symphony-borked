@@ -20,7 +20,7 @@ defmodule SymphonyElixir.Linear.OAuth do
 
   @spec graphql(map(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, atom()}
   def graphql(config, run_id, payload, opts \\ []) do
-    secret = System.get_env(config["client_secret_env"])
+    secret = SymphonyElixir.Config.linear_client_secret(config)
     server = Keyword.get(opts, :server, __MODULE__)
     request = Keyword.get(opts, :request_fun, &request_graphql/2)
     credentials = %{client_id: config["oauth_client_id"], client_secret: secret, run_id: run_id}

@@ -28,13 +28,18 @@ The numeric audience and policy above were refreshed with `gcloud projects
  describe`, `gcloud compute backend-services list`, and `gcloud iap web
  get-iam-policy`. No JWT, cookie or credential value was printed or retained.
 
-## Operator sequence requiring deployment approval
+## Approved operator sequence
 
 1. Confirm the deployed source revision, current protected workflow, idle/active
    worker operations and the current retained-state schema through the existing
-   operator route. DEV-235 is unmerged and must not be imported as a prerequisite.
-   If its separate deployment is selected later, resolve the documented shared
-   reassignment seam before building a combined release.
+   operator route. The refreshed active source is DEV-235 commit
+   `366734057481aa2c160319f05205e8e7f582a30e`, archive SHA
+   `c09c449144e63b387f4c297a36b390782d12684666d6195a49266d145b032ec2`.
+   Combine that deployed source with preserved DEV-237 checkpoint `54f13a5`
+   and qualify the recorded reassignment seam before building. The worker control
+   source remains `064f892f95847ea2eed0eb684da36c6e1bb5fce6`; worker application
+   source remains `541279aeb6a5366571e1ee8935e134c728d91c63`. Boot metadata still
+   points at the old control source; this activation does not update it.
 2. Stop coordinator dispatch deliberately, reconcile worker liveness, then take
    an online pre-migration backup of the durable run database and private index.
    Retain immutable bundles separately. Record active release/config pins without
@@ -82,11 +87,13 @@ evidence:
 
 ## Approval boundary
 
-Automatic review previously rejected DEV-235's remote source-staging action.
-This local artifact does not bypass that decision. The coordinating chat will
-request approval for the concrete package, protected per-revision configuration,
-activation and disposable live test. No remote source upload, activation, IAM,
-routing, new app or credential write is performed by this increment.
+The human explicitly approved this plan, including disposable live tests, in
+the coordinating chat on 2026-10-10 (message
+`01a127ad-2cea-70f2-a5fa-a4436860442c`). This supplies the destination authorization
+missing from the earlier automatic source-staging rejection. The current work
+owns the released heavy-build and live-test slots. It preserves current routing,
+app references, worker pins, IAM and budget. Additional DEV-235 app setup remains
+pending its separate Google passkey step.
 
 Package revision, digest and local path are recorded in the private packaging
 handoff after committing the reviewed source. Live acceptance remains incomplete;

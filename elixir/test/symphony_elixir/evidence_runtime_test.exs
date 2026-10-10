@@ -127,7 +127,8 @@ defmodule SymphonyElixir.EvidenceRuntimeTest do
     run = fixture_run(c, "linear-url")
     assert {:ok, store} = WorkstreamStore.start_link(path: c.db, owner: self())
     parent = self()
-    task = %{issue_id: "issue-fixture", run_id: run.id, session_id: "session-fixture", status: :acknowledged}
+    route = %{"organization_id" => "organization-fixture", "app_user_id" => "app-fixture", "oauth_client_id" => "client-fixture", "agent_id" => "default-cloud"}
+    task = %{issue_id: "issue-fixture", run_id: run.id, session_id: "session-fixture", status: :acknowledged, route: route, check_at: System.system_time(:millisecond) + 60_000}
 
     publisher = fn _task, activity, _config ->
       send(parent, {:published, activity})
@@ -136,7 +137,14 @@ defmodule SymphonyElixir.EvidenceRuntimeTest do
 
     state = %{
       workstreams: %{store: store, runs: %{run.id => run}},
-      linear: %{tasks: %{task.issue_id => task}, events: %{}, job: nil, timer: nil, config: %{"reconcile_interval_ms" => 1_000}, opts: [linear_publisher: publisher]}
+      linear: %{
+        tasks: %{task.issue_id => task},
+        events: %{},
+        job: nil,
+        timer: nil,
+        config: Map.merge(route, %{"reconcile_interval_ms" => 1_000, "webhook_secret_env" => "EVIDENCE_TEST_SIGNING", "token_env" => "EVIDENCE_TEST_TOKEN"}),
+        opts: [linear_publisher: publisher]
+      }
     }
 
     state = LinearCoordinator.process(state, fn s, _ -> s end)

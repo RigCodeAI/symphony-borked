@@ -8,8 +8,17 @@ import re
 import stat
 import sys
 
-ALLOWED_ENV = {"LINEAR_API_KEY", "LINEAR_API_TOKEN", "OAUTH_TOKEN"}
+COORDINATOR_DEFAULT_SECRET_ENVS = {"LINEAR_API_KEY", "LINEAR_API_TOKEN"}
+COORDINATOR_ADDITIONAL_SECRET_PAIRS = (
+    {"FACTORY_HIGH_CLIENT_SECRET", "FACTORY_HIGH_WEBHOOK_SECRET"},
+    {"FACTORY_DAYBREAK_CLIENT_SECRET", "FACTORY_DAYBREAK_WEBHOOK_SECRET"},
+)
+COORDINATOR_SECRET_ENVS = COORDINATOR_DEFAULT_SECRET_ENVS | set().union(*COORDINATOR_ADDITIONAL_SECRET_PAIRS)
+ALLOWED_ENV = COORDINATOR_SECRET_ENVS | {"OAUTH_TOKEN"}
+LINEAR_SECRET_NAMES_ENV = "FACTORY_LINEAR_SECRET_NAMES_JSON"
 LINEAR_WORKFLOW_ROOT = Path("/etc/factory/workflows")
+PINNED_VERSION = re.compile(r"[1-9][0-9]*")
+FINGERPRINT = re.compile(r"[0-9a-f]{64}")
 
 
 def protected_path(path, mode=None, gid=None):
@@ -24,12 +33,26 @@ def protected_path(path, mode=None, gid=None):
         raise ValueError("unsafe coordinator credential permissions")
 
 
+def _coordinator_environment_names(names):
+    if not isinstance(names, set) or not COORDINATOR_DEFAULT_SECRET_ENVS.issubset(names):
+        raise ValueError("coordinator credentials are incomplete")
+    if not names.issubset(COORDINATOR_SECRET_ENVS):
+        raise ValueError("coordinator credentials are invalid")
+    for pair in COORDINATOR_ADDITIONAL_SECRET_PAIRS:
+        selected = names & pair
+        if selected and selected != pair:
+            raise ValueError("coordinator credential pair is incomplete")
+
+
 def runtime(release, directory=Path("/run/factory/coordinator"), public_path=Path("/etc/factory/public.json")):
     revision = release.name
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise ValueError("invalid coordinator release")
     path = directory / (revision + ".json")
-    environment = {key: value for key, value in os.environ.items() if key not in ALLOWED_ENV}
+    environment = {
+        key: value for key, value in os.environ.items()
+        if key not in ALLOWED_ENV and key != LINEAR_SECRET_NAMES_ENV
+    }
     workflow = "pilot"
     expected_workflow = "pilot"
     expected_env = set()
@@ -45,7 +68,9 @@ def runtime(release, directory=Path("/run/factory/coordinator"), public_path=Pat
     if pending_path.exists() or pending_path.is_symlink():
         protected_path(pending_path)
         pending = json.loads(pending_path.read_text())
-        keys = {"coordinator_workflow": "pilot", "coordinator_secret_versions": {}, "coordinator_secret_fingerprints": {}, "enable_linear_webhook": False}
+        keys = {"coordinator_workflow": "pilot", "coordinator_secret_env": {},
+                "coordinator_secret_versions": {}, "coordinator_secret_fingerprints": {},
+                "enable_linear_webhook": False}
         same_pins = active is not None and all(pending.get(key, default) == active.get(key, default) for key, default in keys.items())
         if pending.get("service_revision") == revision and (active is None or active.get("service_revision") != revision or same_pins):
             public_path = pending_path
@@ -53,13 +78,31 @@ def runtime(release, directory=Path("/run/factory/coordinator"), public_path=Pat
         protected_path(public_path)
         public = json.loads(public_path.read_text())
         expected_workflow = public.get("coordinator_workflow", "pilot")
-        expected_env = set(public.get("coordinator_secret_env", {}))
+        secret_env = public.get("coordinator_secret_env", {})
+        if not isinstance(secret_env, dict) or any(
+                not isinstance(name, str) or not isinstance(key, str) or not key
+                for name, key in secret_env.items()):
+            raise ValueError("coordinator runtime differs from active configuration")
+        expected_env = set(secret_env)
         expected_versions = public.get("coordinator_secret_versions", {})
         expected_fingerprints = public.get("coordinator_secret_fingerprints", {})
         expected_webhook = public.get("enable_linear_webhook", False)
         requires_file = "coordinator_workflow" in public
-        if public.get("service_revision") != revision or expected_workflow not in {"pilot", "linear"} or not expected_env.issubset(ALLOWED_ENV):
+        if public.get("service_revision") != revision or expected_workflow not in {"pilot", "linear"}:
             raise ValueError("coordinator runtime differs from active configuration")
+        if expected_workflow == "linear":
+            _coordinator_environment_names(expected_env)
+            if (len(set(secret_env.values())) != len(secret_env)
+                    or not isinstance(expected_versions, dict)
+                    or not isinstance(expected_fingerprints, dict)
+                    or set(expected_versions) != expected_env or set(expected_fingerprints) != expected_env
+                    or any(not isinstance(version, str) or not PINNED_VERSION.fullmatch(version)
+                           for version in expected_versions.values())
+                    or any(not isinstance(fingerprint, str) or not FINGERPRINT.fullmatch(fingerprint)
+                           for fingerprint in expected_fingerprints.values())):
+                raise ValueError("coordinator runtime differs from active configuration")
+        elif expected_env or expected_versions or expected_fingerprints:
+            raise ValueError("pilot workflow cannot receive integration credentials")
     if path.exists() or path.is_symlink():
         protected_path(path, mode=0o640, gid=pwd.getpwnam("factory-coordinator").pw_gid)
         if path.stat().st_size > 65536:
@@ -80,12 +123,14 @@ def runtime(release, directory=Path("/run/factory/coordinator"), public_path=Pat
     elif requires_file or expected_workflow != "pilot" or expected_env:
         raise ValueError("coordinator runtime configuration is missing")
     if workflow == "linear":
-        if ALLOWED_ENV.intersection(environment) != {"LINEAR_API_KEY", "LINEAR_API_TOKEN"}:
+        if ALLOWED_ENV.intersection(environment) != expected_env:
             raise ValueError("coordinator credentials are incomplete")
         workflow_path = LINEAR_WORKFLOW_ROOT / (revision + ".md")
         protected_path(workflow_path)
+        # The Elixir Config reader checks this trusted pin against workflow references.
+        environment[LINEAR_SECRET_NAMES_ENV] = json.dumps(sorted(expected_env))
     else:
-        if ALLOWED_ENV.intersection(environment):
+        if ALLOWED_ENV.intersection(environment) or LINEAR_SECRET_NAMES_ENV in environment:
             raise ValueError("pilot workflow cannot receive integration credentials")
         workflow_path = release / "factory/deploy/PILOT-WORKFLOW.md"
     return workflow_path, environment

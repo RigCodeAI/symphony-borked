@@ -1,9 +1,9 @@
 # DEV-235 additional app setup plan
 
-This plan is ready for administrator review. Neither additional app nor secret
-container has been created. The ticket leaves their installation permission open;
-code and controlled verification proceed separately. The existing coordinator and
-one qualified worker are sufficient.
+This exact plan was approved in the Factory Orchestrator chat. Both OAuth
+application records are created, with installation and credential storage still
+pending. No secret container or access grant has been created yet. The existing
+coordinator and one qualified worker are sufficient.
 
 ## Exact additions
 
@@ -108,7 +108,8 @@ Candidate publication stays disabled; the existing `.git` sandbox boundary is a
 separate trusted-commit follow-up.
 
 Approval covers these two named app installations and this four-secret/scoped-IAM
-plan. No installation or access changes have been performed under this plan.
+plan. Application records exist; installation, secrets and access grants are still
+pending. See [current evidence](evidence/dev235/deployment-boundary.json).
 
 ## Disposable native task draft
 
@@ -138,6 +139,7 @@ cargo test --locked -p sivere-agent-hooks --lib \
 
 Publish the draft only as a clearly labeled disposable DEV acceptance issue, keep
 Adam as the human assignee, and delegate after its dedicated clone and protected
-workspace mapping exist. This draft has not been published. The known `.git`
+workspace mapping exist. The draft is now published as DEV-250 (Default and reassignment) and DEV-251
+(High Effort), with Adam assigned and no delegates. The known `.git`
 sandbox restriction means a successful coding turn and test are separate from
 candidate commit/publication acceptance.

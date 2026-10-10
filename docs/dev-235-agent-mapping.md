@@ -1,15 +1,15 @@
 # DEV-235 named cloud-agent routing
 
-Status: controlled integration verified; additional app setup and native acceptance pending. Additional apps are
-not installed. No complete acceptance claim or PR is made by this document.
-The tested local source checkpoint is `366734057481aa2c160319f05205e8e7f582a30e`.
-The read-only 2026-10-10 preflight observed coordinator `4ea729c6` still active,
-all five prior pilot tasks stopped, and no worker operations. DEV-234's merged
-upgrade correction is included in the candidate but remains undeployed.
-Automatic approval review rejected remote staging because internal source export
-and persistent deployment files lacked explicit destination authorization in the
-trusted transcript. No deployment occurred. Explicit deployment and additional-app
-setup approval have been requested. See the [deployment boundary](evidence/dev235/deployment-boundary.json).
+Status: tested DEV-235 code is deployed; additional app installation and native
+acceptance remain pending. No complete acceptance claim or PR is made here.
+The active coordinator source is `366734057481aa2c160319f05205e8e7f582a30e`.
+Human approval was verified in the Factory Orchestrator chat; the approved retry
+staged, built and activated that source with root-private rollback snapshots.
+Health is active/running, all five prior tasks remain stopped, and no worker
+operation is running. Both additional OAuth application records are created;
+their credentials, installation and service routes remain pending. Google Cloud
+passkey sign-in is the current browser prerequisite. See the
+[deployment boundary](evidence/dev235/deployment-boundary.json).
 
 ## Settings and boundaries
 
@@ -122,8 +122,13 @@ atomic handoff/reopen/rollback, stale events, unknown termination, question and
 reply preservation, older-run decoding, credential exclusion and unsupported
 Daybreak visibility. Deployment tests pass: 17 protected-runtime cases and 19
 cloud-I/O cases (four existing platform-dependent skips). Terraform 1.9.8
-formatting checks pass for both modified variable files; no Terraform plan/apply
-has run.
+formatting checks pass for both modified variable files. A read-only full plan
+now exists, but includes broader VM metadata and release-reader IAM changes and
+is blocked as an apply artifact. A targeted inspection preview confirms the
+intended four secret containers and four coordinator-only grants; it is not an
+approved apply artifact. No apply has run. The sanitized
+[secret-plan receipt](evidence/dev235/secret-plan-handoff.md) records all changes
+and private artifact hashes.
 
 The preliminary runs exposed and repaired an orphan-run credential exclusion
 case, an initial-delegation boolean crash, duplicate scope invalidation and two
@@ -213,23 +218,45 @@ separate checks above. They do not establish native multi-app acceptance.
 ## Engineer handoff
 
 Source is retained locally on `cycle/dev-235`; no PR was created because native
-multi-app acceptance is incomplete. Approval is the remaining prerequisite for
-coordinator staging/activation and the [reviewable additional app setup](dev-235-app-setup.md).
-The packaged candidate archive SHA-256 is
-`c09c449144e63b387f4c297a36b390782d12684666d6195a49266d145b032ec2`.
-It was created from the clean committed source and has not been uploaded.
+multi-app acceptance is incomplete. Human approval covers the
+[additional app setup](dev-235-app-setup.md), the bounded coordinator deployment,
+and included disposable tests. The active coordinator source/archive pins are:
 
-After explicit approval, recheck the active revision and worker idleness, stage
-with rollback snapshots, activate and verify health. Preserve the existing worker
-control/application pins, database, workspace maps, subscription auth and sandbox.
-Install only the two approved apps and the four exact secret/scoped-access pairs;
-review the Terraform plan before applying. Complete the native task/reassignment/
-Daybreak-visible-block acceptance, then create a real PR. Do not use a placeholder.
+- Source: `366734057481aa2c160319f05205e8e7f582a30e`.
+- Archive SHA-256: `c09c449144e63b387f4c297a36b390782d12684666d6195a49266d145b032ec2`.
+- Workflow: `/etc/factory/workflows/366734057481aa2c160319f05205e8e7f582a30e.md`.
+- Protected configuration: `/etc/factory/config.json`, root-owned mode `0600`.
+- Public references: `/etc/factory/public.json`, root-owned mode `0644`.
+- Default references: `linear-client-secret` and `linear-webhook-signing`, both
+  version `1`, under project `factory-511117`; environment names remain
+  `LINEAR_API_KEY` and `LINEAR_API_TOKEN`.
+- Worker control: source `064f892f95847ea2eed0eb684da36c6e1bb5fce6`, archive
+  `67267e73e9c587f0b6115398d89cdac462b23dcb8749df34895a34b9d0a0af89`.
+- Worker application: `541279aeb6a5366571e1ee8935e134c728d91c63`.
 
-DEV-237 integration must accept recorded agent-selection revisions and retain each
-prior manifest under the same run ID. It remains a coordinated follow-up to this
-source, with no dependency here on its unmerged Evidence module.
+The source archive was staged on the existing coordinator disk. No GCS release
+upload or absent-release-disk disaster-recovery qualification was performed.
+GCP boot metadata still references its prior `064f892f` deployment; do not treat
+that metadata as proof of the manually activated coordinator revision. Preserve
+all existing workspace maps, the database, worker pins, authentication and sandbox.
+The minimum safe code integration base for DEV-237 is the full DEV-235 source
+`3667340`, not a main-only revision. Merge its evidence implementation with this
+code and the recorded-selection transition contract before another activation.
+DEV-237 must preserve each prior manifest under the same run ID. No unmerged
+Evidence module is required by DEV-235.
 
-The local build/test container is removed at handoff and the heavy/live pilot slot
-is released. Read-only preflight is the only live action from this integration
-checkpoint. No candidate coding turn or native multi-app test was performed.
+Disposable issues DEV-250 (Default and safe reassignment) and DEV-251 (High Effort)
+are published with Adam still assigned and no delegate. Separate coordinator and
+worker clones are ready; protected workflow mappings are not active.
+Install only the two approved apps and the four exact secret/scoped-access pairs,
+requiring a clean full Terraform plan before applying. The current full plan
+includes VM metadata updates and release-reader IAM replacements outside this
+bounded secret setup; no secrets or IAM grants were created. Complete native tasks, safe
+reassignment and Daybreak-visible blocking before creating a real PR.
+
+The build is complete and its heavy-build slot is free. The live deployment slot
+is also released while Google Cloud passkey sign-in is pending. Reacquire the
+coordinated live slot and recheck current state before Terraform apply, service
+configuration activation or native dispatch. The remaining Terraform plan
+investigation is read-only. No coding agent or native multi-app
+acceptance test has run under this deployment.

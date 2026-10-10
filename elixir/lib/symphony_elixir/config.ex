@@ -54,6 +54,18 @@ defmodule SymphonyElixir.Config do
   @spec linear_webhook_secret(map()) :: String.t() | nil
   def linear_webhook_secret(config), do: System.get_env(config["webhook_secret_env"])
 
+  @doc "Resolves signing secrets for the configured cloud apps without exposing values in routing records."
+  @spec linear_webhook_secrets(map()) :: {:ok, map()} | {:error, atom()}
+  def linear_webhook_secrets(config) do
+    with {:ok, routes} <- SymphonyElixir.Linear.AgentMapping.routes(config) do
+      secrets = Map.new(routes, &{&1["webhook_secret_env"], linear_webhook_secret(&1)})
+
+      if Enum.all?(secrets, fn {_name, value} -> is_binary(value) and value != "" end),
+        do: {:ok, secrets},
+        else: {:error, :signing_secret_unavailable}
+    end
+  end
+
   @spec max_concurrent_agents_for_state(term()) :: pos_integer()
   def max_concurrent_agents_for_state(state_name) when is_binary(state_name) do
     config = settings!()

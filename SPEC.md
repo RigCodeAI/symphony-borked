@@ -67,6 +67,17 @@ an unknown outcome remains visible and reserves capacity. Local controlled tests
 that a remote process tree stopped or that a Linear app is installed. See
 [configuration and live acceptance limits](docs/linear-delegation.md).
 
+DEV-235 supplies a separate `Linear.AgentMapping` helper contract for additional named
+cloud apps. Optional `cloud_agents` entries select agent references independently of the
+shared workstream; exact organization/app-user/client tuples and per-app signatures are
+required. Binding records requested settings, agent revisions and resource hashes while
+preserving explicit internal reviewers. Reassignment preparation rejects unresolved
+writers, retains task/branch/waits/counters and records an idempotent selection transition.
+The coordinator must commit that run and its owning task atomically before redispatch.
+These helpers are not yet wired into native intake or dispatch. Existing runtime config
+still accepts only the installed Default app. See the
+[integration contract and pending acceptance](docs/dev-235-agent-mapping.md).
+
 A held executor can register its external operation identity through the current worker.
 The coordinator commits that identity before acknowledging release and preserves it across
 restart. The provisional local Linux adapter fences machine, OS boot, process group and

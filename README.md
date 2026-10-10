@@ -78,6 +78,9 @@ remain unqualified. Rig candidate publication and merge were not attempted.
 Coordinator-only client credentials mint app tokens in memory per delegated run; see
 [Linear app setup](docs/linear-delegation.md#linear-app-setup) for scopes, events and secret references.
 
+DEV-235's [named-agent mapping helper and setup card](docs/dev-235-agent-mapping.md)
+are in progress. Multi-app dispatch and reassignment are not integrated or deployed yet.
+
 Use live ticket dependencies to schedule work. The local files
 `docs/rig-software-factory-spec.md` and `docs/factory-setup-ticket-drafts.md`, if present,
 are earlier drafts. They predate the workstream additions and published ticket updates;

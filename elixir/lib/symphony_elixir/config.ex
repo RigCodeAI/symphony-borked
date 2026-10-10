@@ -47,9 +47,37 @@ defmodule SymphonyElixir.Config do
     with {:ok, settings} <- settings() do
       if settings.linear_delegation == %{},
         do: :disabled,
-        else: SymphonyElixir.Linear.Delegation.validate(settings.linear_delegation)
+        else: validate_linear_runtime(settings.linear_delegation)
     end
   end
+
+  defp validate_linear_runtime(config) do
+    with {:ok, config} <- SymphonyElixir.Linear.Delegation.validate(config), :ok <- linear_runtime_references(config), do: {:ok, config}
+  end
+
+  defp linear_runtime_references(config) do
+    case System.get_env("FACTORY_LINEAR_SECRET_NAMES_JSON") do
+      nil ->
+        :ok
+
+      marker ->
+        expected = SymphonyElixir.Linear.AgentMapping.credential_environment_names(Map.delete(config, "secret_environment_names")) |> Enum.sort()
+
+        case Jason.decode(marker) do
+          {:ok, names} when is_list(names) ->
+            if names == expected, do: :ok, else: {:error, :linear_runtime_secret_references_changed}
+
+          _ ->
+            {:error, :invalid_linear_runtime_secret_references}
+        end
+    end
+  end
+
+  @spec linear_token(map()) :: String.t() | nil
+  def linear_token(config), do: System.get_env(config["token_env"])
+
+  @spec linear_client_secret(map()) :: String.t() | nil
+  def linear_client_secret(config), do: System.get_env(config["client_secret_env"])
 
   @spec linear_webhook_secret(map()) :: String.t() | nil
   def linear_webhook_secret(config), do: System.get_env(config["webhook_secret_env"])

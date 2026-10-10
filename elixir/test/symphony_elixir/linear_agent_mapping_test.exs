@@ -180,6 +180,14 @@ defmodule SymphonyElixir.Linear.AgentMappingTest do
     assert {:error, :agent_transition_conflict} = AgentMapping.reassign(updated, "default-cloud", "delivery-1")
   end
 
+  test "stopped agent clarification restores its pinned wait without launching a replacement" do
+    stopped = %{run() | status: :stopped, phase: :stopped, current_attempt_id: "prior-agent-attempt"}
+    assert {:ok, restored} = AgentMapping.reassign(stopped, "high-effort-cloud", "question-handoff")
+    assert restored.status == :waiting_for_answer
+    assert restored.pending_wait == stopped.pending_wait
+    assert restored.current_attempt_id == stopped.current_attempt_id
+  end
+
   test "executing, unreachable and incompletely canceled writers prevent reassignment" do
     run = run()
 
@@ -198,7 +206,7 @@ defmodule SymphonyElixir.Linear.AgentMappingTest do
       assert {:error, :previous_writer_not_reconciled} = AgentMapping.reassign(unsafe, "high-effort-cloud", "delivery")
     end
 
-    stopped = %{run | status: :stopped, operations: %{"prior" => %{status: :canceled, cancellation: %{termination: :terminated}}}}
+    stopped = %{run | status: :stopped, pending_wait: nil, operations: %{"prior" => %{status: :canceled, cancellation: %{termination: :terminated}}}}
     assert {:ok, reassigned} = AgentMapping.reassign(stopped, "high-effort-cloud", "delivery")
     assert reassigned.status == :ready
     assert reassigned.current_attempt_id == nil

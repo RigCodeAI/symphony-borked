@@ -84,16 +84,23 @@ an unknown outcome remains visible and reserves capacity. Local controlled tests
 that a remote process tree stopped or that a Linear app is installed. See
 [configuration and live acceptance limits](docs/linear-delegation.md).
 
-DEV-235 supplies a separate `Linear.AgentMapping` helper contract for additional named
-cloud apps. Optional `cloud_agents` entries select agent references independently of the
-shared workstream; exact organization/app-user/client tuples and per-app signatures are
-required. Binding records requested settings, agent revisions and resource hashes while
-preserving explicit internal reviewers. Reassignment preparation rejects unresolved
-writers, retains task/branch/waits/counters and records an idempotent selection transition.
-The coordinator must commit that run and its owning task atomically before redispatch.
-These helpers are not yet wired into native intake or dispatch. Existing runtime config
-still accepts only the installed Default app. See the
-[integration contract and pending acceptance](docs/dev-235-agent-mapping.md).
+DEV-235 extends native intake with optional `cloud_agents` entries for the two additional
+named cloud apps, sharing the backend, worker pool and workstream. Each identity has an
+exact organization/app-user/client tuple and a distinct signing secret; a valid signature
+for one app cannot authenticate another. Review definitions cannot be configured as apps.
+The selected cloud definition is bound before workspace/policy pinning and its revision,
+requested settings and shared resource hashes remain on the durable run through resume.
+
+A newer authenticated created event for a different configured cloud agent requests a
+recorded reassignment. The coordinator revokes stage authorization, stops the old operation,
+and requires trusted quiescence before it atomically updates the run, Linear task and event.
+Task/run/workspace/branch, artifacts, waits, questions and repair counters remain intact;
+old app/session replies and stops cannot affect the new assignment. Unknown worker liveness
+blocks replacement. Unsupported Daybreak blocks visibly without a fallback. Service secret
+references from every route are excluded from launches; older pinned launches lacking that
+exclusion block. Additional app installation and live acceptance are separate prerequisites.
+See the [integration contract and verification](docs/dev-235-agent-mapping.md) and
+[exact administrator setup plan](docs/dev-235-app-setup.md).
 
 A held executor can register its external operation identity through the current worker.
 The coordinator commits that identity before acknowledging release and preserves it across

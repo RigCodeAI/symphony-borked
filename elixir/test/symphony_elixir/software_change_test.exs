@@ -28,6 +28,12 @@ defmodule SymphonyElixir.SoftwareChangeTest do
     File.write!(Path.join(workspace, "candidate"), "local candidate")
     {_, 0} = System.cmd("git", ["add", "candidate"], cd: workspace)
     {_, 0} = System.cmd("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "candidate"], cd: workspace)
+    assert {:ok, high, ^workspace} = WorkstreamRunner.prepare(path, %{"task" => "same workstream, high effort"}, workspace: workspace, workspace_root: root, cloud_agent_id: "high-effort-cloud")
+    assert high.name == definition.name
+    assert high.stages[high.entry].agent == "high-effort-cloud"
+    assert high.agent_selection.requested.reasoning_effort == "high"
+    assert high.agent_selection.resources == Enum.map(definition.agents["default-cloud"].instructions ++ definition.agents["default-cloud"].skills, &Map.take(&1, [:path, :sha256]))
+    assert {:error, :unknown_cloud_agent_definition} = WorkstreamRunner.prepare(path, %{"task" => "reviewer forbidden"}, workspace: workspace, workspace_root: root, cloud_agent_id: "default-review")
     run = WorkstreamRun.new("linear/pilot", definition, workspace, workspace_root: root)
     File.write!(path, "changed after enqueue")
     run = run |> WorkstreamRun.start_stage() |> WorkstreamRun.finish_stage({:ok, %{commit: "local-candidate"}}) |> WorkstreamRun.start_stage()

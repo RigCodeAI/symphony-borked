@@ -83,8 +83,9 @@ termination. Continuation reconstructs saved context in a fresh Codex conversati
 Coordinator-only client credentials mint app tokens in memory per delegated run; see
 [Linear app setup](docs/linear-delegation.md#linear-app-setup) for scopes, events and secret references.
 
-DEV-235's [named-agent mapping helper and setup card](docs/dev-235-agent-mapping.md)
-are in progress. Multi-app dispatch and reassignment are not integrated or deployed yet.
+DEV-235 adds [named cloud-agent routing and safe reassignment](docs/dev-235-agent-mapping.md)
+to the existing coordinator. Additional app installation and native multi-app acceptance
+remain pending; see the [administrator setup plan](docs/dev-235-app-setup.md).
 
 Use live ticket dependencies to schedule work. The local files
 `docs/rig-software-factory-spec.md` and `docs/factory-setup-ticket-drafts.md`, if present,

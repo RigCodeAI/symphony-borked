@@ -444,11 +444,14 @@ Use `client_secret_env` for coordinator-only app client credentials with fixed
 on expiry or one 401. The legacy `token_env` remains supported; configure exactly one.
 See [app setup and deployment](../docs/linear-delegation.md#linear-app-setup).
 
-`Linear.AgentMapping` supplies helper-level exact identity routing, per-app signature
-checks, pinned cloud selection, explicit internal reviewer lookup and safe reassignment
-preparation. `Config.linear_webhook_secrets/1` resolves its signing references. These
-helpers are not yet connected to native dispatch; see the
-[DEV-235 integration handoff](../docs/dev-235-agent-mapping.md) before configuring additional apps.
+Optional `cloud_agents` entries extend the same coordinator with exact identity and
+per-app signature checks, pinned cloud selection and safe recorded reassignment.
+`Config.linear_webhook_secrets/1` resolves signing references; all configured app
+credentials are excluded from worker launches. A reassignment waits for confirmed
+termination, then commits run/task/event together. Internal reviewers remain explicit
+workstream references. See [DEV-235 configuration and verification](../docs/dev-235-agent-mapping.md)
+and the [additional-app setup plan](../docs/dev-235-app-setup.md). Native acceptance of
+the two additional identities remains pending their installation.
 
 An optional `linear_delegation` front-matter map starts the same coordinator in durable mode
 and enables `POST /hooks/linear` when the HTTP server is enabled. It verifies the original

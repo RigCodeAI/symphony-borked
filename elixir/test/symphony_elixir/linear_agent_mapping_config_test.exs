@@ -1,5 +1,5 @@
 defmodule SymphonyElixir.Linear.AgentMappingConfigTest do
-  use ExUnit.Case, async: false
+  use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.Config
 
@@ -21,6 +21,35 @@ defmodule SymphonyElixir.Linear.AgentMappingConfigTest do
     assert secrets == %{c.signing => "synthetic-default-signing", c.high_signing => "synthetic-high-signing"}
     refute Map.has_key?(c.config, "synthetic-default-signing")
     refute Map.has_key?(secrets, "DEV235_DEFAULT_CLIENT")
+  end
+
+  test "service startup uses the existing Config reader to match protected credential pins", c do
+    marker = "FACTORY_LINEAR_SECRET_NAMES_JSON"
+    previous = System.get_env(marker)
+    on_exit(fn -> restore_env(marker, previous) end)
+
+    config =
+      Map.merge(c.config, %{
+        "team_id" => "dev",
+        "store_path" => "/tmp/dev235/state.sqlite",
+        "workspace_root" => "/tmp/dev235/workspaces",
+        "workstream_path" => "/tmp/dev235/software-change.yaml",
+        "rig_label" => "factory:rig"
+      })
+
+    path = Workflow.workflow_file_path()
+    File.write!(path, "---\n" <> Jason.encode!(%{"tracker" => %{"kind" => "memory"}, "linear_delegation" => config}) <> "\n---\nControlled JSON frontmatter")
+    WorkflowStore.force_reload()
+    refs = SymphonyElixir.Linear.AgentMapping.credential_environment_names(config) |> Enum.sort()
+    System.put_env(marker, Jason.encode!(refs))
+    assert {:ok, loaded} = Config.linear_delegation()
+    assert loaded["cloud_agents"] == config["cloud_agents"]
+    System.put_env(marker, Jason.encode!(Enum.drop(refs, 1)))
+    assert {:error, :linear_runtime_secret_references_changed} = Config.linear_delegation()
+    System.put_env(marker, "invalid-json")
+    assert {:error, :invalid_linear_runtime_secret_references} = Config.linear_delegation()
+    System.delete_env(marker)
+    assert {:ok, _} = Config.linear_delegation()
   end
 
   test "Config blocks when any configured signing reference is missing", c do

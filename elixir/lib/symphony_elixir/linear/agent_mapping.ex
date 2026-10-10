@@ -44,10 +44,21 @@ defmodule SymphonyElixir.Linear.AgentMapping do
   @spec routes(map()) :: {:ok, [map()]} | {:error, atom()}
   def routes(config) do
     with {:ok, config} <- validate(config) do
-      base = Map.drop(config, ["cloud_agents" | @credential_fields])
+      base = config |> Map.drop(["cloud_agents" | @credential_fields]) |> Map.put("secret_environment_names", credential_environment_names(config))
       primary = Map.take(config, @identity_fields ++ @credential_fields)
       {:ok, Enum.map([primary | Map.get(config, "cloud_agents", [])], &Map.merge(base, &1))}
     end
+  end
+
+  @doc "Lists every configured service secret reference for exclusion from agent environments."
+  @spec credential_environment_names(map()) :: [String.t()]
+  def credential_environment_names(config) do
+    identities = [config | Map.get(config, "cloud_agents", [])]
+
+    Enum.uniq(
+      Enum.flat_map(identities, &Enum.filter([&1["webhook_secret_env"], &1["client_secret_env"], &1["token_env"]], fn name -> is_binary(name) end)) ++
+        (Map.get(config, "secret_environment_names") || [])
+    )
   end
 
   @doc "Selects an exact organization/app/client tuple from an already authenticated event."
@@ -176,13 +187,15 @@ defmodule SymphonyElixir.Linear.AgentMapping do
       }
 
       updated = run |> Map.put(:definition, definition) |> Map.put(:agent_transitions, history ++ [transition])
-      updated = Map.put(updated, :execution, Map.put(run.execution, :authentication_reference, definition.agents[agent_id].authentication.reference))
+      authentication = definition.agents[agent_id][:authentication]
+      execution = if is_map(authentication), do: Map.put(run.execution, :authentication_reference, authentication.reference), else: run.execution
+      updated = Map.put(updated, :execution, execution)
       updated = Map.merge(updated, %{retry_operation_id: nil, session_id: nil, thread_id: nil})
 
       # A stopped attempt is retained in history; the next launch gets a new attempt.
       updated =
         if run.status == :stopped do
-          if definition.stages[run.stage_id].type == :human_wait and is_map(run.pending_wait),
+          if is_map(run.pending_wait),
             do: Map.merge(updated, %{status: :waiting_for_answer, phase: :waiting_for_answer, cancellation: nil}),
             else: Map.merge(updated, %{status: :ready, phase: :queued, current_attempt_id: nil, cancellation: nil})
         else

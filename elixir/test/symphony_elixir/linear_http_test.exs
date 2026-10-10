@@ -8,6 +8,9 @@ defmodule SymphonyElixir.LinearHttpTest do
     File.mkdir_p!(root)
     endpoint_config = Application.get_env(:symphony_elixir, Endpoint)
     old_secret = System.get_env("LINEAR_API_TOKEN")
+    old_high_secret = System.get_env("FACTORY_HIGH_WEBHOOK_SECRET")
+    high_secret = "controlled-high-signing"
+    System.put_env("FACTORY_HIGH_WEBHOOK_SECRET", high_secret)
     secret = "controlled-webhook-secret"
     System.put_env("LINEAR_API_TOKEN", secret)
 
@@ -22,7 +25,16 @@ defmodule SymphonyElixir.LinearHttpTest do
       "workspace_root" => Path.join(root, "workspaces"),
       "workstream_path" => Path.join(root, "software-change.yaml"),
       "agent_id" => "default-cloud",
-      "rig_label" => "factory:rig"
+      "rig_label" => "factory:rig",
+      "cloud_agents" => [
+        %{
+          "app_user_id" => "high-app",
+          "oauth_client_id" => "high-oauth",
+          "agent_id" => "high-effort-cloud",
+          "webhook_secret_env" => "FACTORY_HIGH_WEBHOOK_SECRET",
+          "client_secret_env" => "FACTORY_HIGH_CLIENT_SECRET"
+        }
+      ]
     }
 
     path = Path.join(root, "WORKFLOW.md")
@@ -43,6 +55,7 @@ defmodule SymphonyElixir.LinearHttpTest do
 
     on_exit(fn ->
       restore_env("LINEAR_API_TOKEN", old_secret)
+      restore_env("FACTORY_HIGH_WEBHOOK_SECRET", old_high_secret)
       Application.put_env(:symphony_elixir, Endpoint, endpoint_config)
       if Process.alive?(runtime), do: Supervisor.stop(runtime)
       File.rm_rf!(root)
@@ -81,5 +94,20 @@ defmodule SymphonyElixir.LinearHttpTest do
     store = :sys.get_state(__MODULE__.Coordinator).workstreams.store
     assert {:ok, %{events: events}} = SymphonyElixir.WorkstreamStore.linear_load(store)
     assert map_size(events) == 1
+
+    high_raw = payload |> Map.put("appUserId", "high-app") |> Map.put("oauthClientId", "high-oauth") |> put_in(["notification", "issueId"], "high-pilot") |> Jason.encode!()
+    high_headers = List.keyreplace(headers, "linear-delivery", 0, {"linear-delivery", "b8b4a528-6ac9-459d-835d-a591f9ac56e5"})
+    forged = :crypto.mac(:hmac, :sha256, secret, high_raw) |> Base.encode16(case: :lower)
+    assert %{status: 422} = Req.post!(url, body: high_raw, headers: List.keyreplace(high_headers, "linear-signature", 0, {"linear-signature", forged}), retry: false)
+    high_signature = :crypto.mac(:hmac, :sha256, high_secret, high_raw) |> Base.encode16(case: :lower)
+
+    assert %{status: 200, body: %{"status" => "accepted"}} =
+             Req.post!(url, body: high_raw, headers: List.keyreplace(high_headers, "linear-signature", 0, {"linear-signature", high_signature}), retry: false)
+
+    assert {:ok, %{events: routed}} = SymphonyElixir.WorkstreamStore.linear_load(store)
+    assert map_size(routed) == 2
+    assert routed["b8b4a528-6ac9-459d-835d-a591f9ac56e5"].event.verified_app_user_id == "high-app"
+    System.put_env("FACTORY_HIGH_WEBHOOK_SECRET", secret)
+    assert %{status: 503} = Req.post!(url, body: raw, headers: headers, retry: false)
   end
 end

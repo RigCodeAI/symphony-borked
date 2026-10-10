@@ -1,4 +1,6 @@
 ---
+# Factory native delegation cloud_agents options: ../docs/dev-235-agent-mapping.md.
+# This upstream sample is not Rig Factory Setup policy; see ../AGENTS.md.
 tracker:
   kind: linear
   provider:

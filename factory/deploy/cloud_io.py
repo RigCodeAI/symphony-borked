@@ -41,6 +41,12 @@ WORKER_HOST_PUBLIC_KEY = WORKER_HOST_KEY_DIR / "ssh_host_ed25519_key.pub"
 WORKER_HOST_KEY_MARKER = DATA_ROOT / "worker-hostkey.json"
 MAX_MODEL_AUTH_BYTES = 1024 * 1024
 TOKEN_PATTERN = re.compile(r"(?:sk-|gh[pousr]_|github_pat_)[A-Za-z0-9_-]+|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
+COORDINATOR_DEFAULT_SECRET_ENVS = {"LINEAR_API_KEY", "LINEAR_API_TOKEN"}
+COORDINATOR_ADDITIONAL_SECRET_PAIRS = (
+    {"FACTORY_HIGH_CLIENT_SECRET", "FACTORY_HIGH_WEBHOOK_SECRET"},
+    {"FACTORY_DAYBREAK_CLIENT_SECRET", "FACTORY_DAYBREAK_WEBHOOK_SECRET"},
+)
+COORDINATOR_SECRET_ENVS = COORDINATOR_DEFAULT_SECRET_ENVS | set().union(*COORDINATOR_ADDITIONAL_SECRET_PAIRS)
 
 
 def event(name):
@@ -659,16 +665,30 @@ def prepare_coordinator_environment(cloud, directory=Path("/run/factory/coordina
     revision = config.get("service_revision", "")
     workflow = config.get("coordinator_workflow", "pilot")
     mapping = config.get("coordinator_secret_env", {})
-    allowed = {"LINEAR_API_KEY", "LINEAR_API_TOKEN", "OAUTH_TOKEN"}
+    secret_ids = config.get("secret_ids", {})
+    secret_versions = config.get("secret_versions", {})
+    allowed = COORDINATOR_SECRET_ENVS
+    mapped_envs = set(mapping) if isinstance(mapping, dict) else set()
+    optional_pair_refs = [mapped_envs & pair for pair in COORDINATOR_ADDITIONAL_SECRET_PAIRS]
     if (config.get("role") != "coordinator" or not re.fullmatch(r"[0-9a-f]{40}", revision)
             or workflow not in {"pilot", "linear"} or not isinstance(mapping, dict)
             or not set(mapping).issubset(allowed)
             or any(not isinstance(key, str) or key in {"worker_ssh", "model_auth", "git_read"}
-                   or key not in config.get("secret_ids", {}) for key in mapping.values())
+                   or not isinstance(secret_ids, dict) or key not in secret_ids for key in mapping.values())
             or len(set(mapping.values())) != len(mapping)
-            or (workflow == "linear" and set(mapping) != {"LINEAR_API_KEY", "LINEAR_API_TOKEN"})
+            or (workflow == "linear" and not COORDINATOR_DEFAULT_SECRET_ENVS.issubset(mapped_envs))
+            or (workflow == "linear" and any(pair and pair != expected for pair, expected in
+                                               zip(optional_pair_refs, COORDINATOR_ADDITIONAL_SECRET_PAIRS)))
+            or (workflow == "linear" and mapped_envs != (COORDINATOR_DEFAULT_SECRET_ENVS | set().union(*optional_pair_refs)))
             or (workflow == "pilot" and mapping)):
         raise ValueError("invalid coordinator integration configuration")
+
+    mapped_keys = list(mapping.values())
+    references = [secret_ids.get(key) for key in mapped_keys]
+    if (any(not isinstance(reference, str) or not reference for reference in references)
+            or len(set(references)) != len(references)):
+        raise ValueError("coordinator secret references must be distinct")
+
     account = pwd.getpwnam("factory-coordinator")
     _assert_no_symlink_components(directory.parent)
     _check_directory(directory.parent, 0)
@@ -680,7 +700,7 @@ def prepare_coordinator_environment(cloud, directory=Path("/run/factory/coordina
     versions = {}
     fingerprints = {}
     for name, key in mapping.items():
-        version = str(config.get("secret_versions", {}).get(key, ""))
+        version = str(secret_versions.get(key, "")) if isinstance(secret_versions, dict) else ""
         if not re.fullmatch(r"[1-9][0-9]*", version):
             raise ValueError("coordinator credential version must be pinned")
         versions[name] = version

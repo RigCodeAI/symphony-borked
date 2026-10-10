@@ -1611,7 +1611,7 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
-  test "app server does not pass tracker credentials to the local Codex child" do
+  test "app server strips tracker and every configured app credential even after shell profiles" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -1624,8 +1624,11 @@ defmodule SymphonyElixir.AppServerTest do
     previous_custom_secret = System.get_env(custom_secret_env)
     previous_home = System.get_env("HOME")
     previous_trace = System.get_env("SYMP_TEST_CODEx_TRACE")
+    service_names = ~w(FACTORY_HIGH_CLIENT_SECRET FACTORY_HIGH_WEBHOOK_SECRET FACTORY_DAYBREAK_CLIENT_SECRET FACTORY_DAYBREAK_WEBHOOK_SECRET)
+    previous_service = Map.new(service_names, &{&1, System.get_env(&1)})
 
     on_exit(fn ->
+      Enum.each(previous_service, fn {name, value} -> restore_env(name, value) end)
       restore_env("LINEAR_API_KEY", previous_secret)
       restore_env(custom_secret_env, previous_custom_secret)
       restore_env("HOME", previous_home)
@@ -1648,6 +1651,8 @@ defmodule SymphonyElixir.AppServerTest do
       export #{profile_marker_env}=1
       """)
 
+      Enum.each(service_names, &System.put_env(&1, "service-secret-that-must-not-reach-child"))
+      File.write!(Path.join(bash_home, ".bash_profile"), Enum.map_join(service_names, "\n", &"export #{&1}=profile-service-secret-that-must-not-reach-child") <> "\n", [:append])
       System.put_env("LINEAR_API_KEY", "canonical-secret-that-must-not-reach-child")
       System.put_env(custom_secret_env, "custom-secret-that-must-not-reach-child")
       System.put_env("HOME", bash_home)
@@ -1659,6 +1664,7 @@ defmodule SymphonyElixir.AppServerTest do
       printf 'PROFILE_LOADED:%s\n' "$#{profile_marker_env}" >> "$trace_file"
       printf 'CANONICAL_SECRET:%s\n' "$LINEAR_API_KEY" >> "$trace_file"
       printf 'CUSTOM_SECRET:%s\n' "$#{custom_secret_env}" >> "$trace_file"
+      #{Enum.map_join(service_names, "\n", fn name -> "printf '#{name}:%s\\n' \"$#{name}\" >> \"$trace_file\"" end)}
       count=0
 
       while IFS= read -r line; do
@@ -1703,10 +1709,11 @@ defmodule SymphonyElixir.AppServerTest do
         labels: ["security"]
       }
 
-      assert {:ok, _result} = AppServer.run(workspace, "Do not inherit tracker auth", issue)
+      assert {:ok, _result} = AppServer.run(workspace, "Do not inherit tracker auth", issue, secret_environment_names: service_names)
       assert File.read!(trace_file) =~ "PROFILE_LOADED:1\n"
       assert File.read!(trace_file) =~ "CANONICAL_SECRET:\n"
       assert File.read!(trace_file) =~ "CUSTOM_SECRET:\n"
+      Enum.each(service_names, fn name -> assert File.read!(trace_file) =~ "#{name}:\n" end)
       refute File.read!(trace_file) =~ "secret-that-must-not-reach-child"
     after
       File.rm_rf(test_root)

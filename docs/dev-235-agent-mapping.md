@@ -1,12 +1,14 @@
-# DEV-235 named-agent mapping and integration handoff
+# DEV-235 named cloud-agent routing
 
-Status: source work in progress. The mapping helper has not been connected to
-native dispatch or deployed. Additional apps are not installed. No acceptance
-claim or PR is made by this document.
+Status: controlled integration verified; additional app setup and native acceptance pending. Additional apps are
+not installed. No complete acceptance claim or PR is made by this document.
+The read-only 2026-10-10 preflight observed coordinator `4ea729c6` still active;
+DEV-234's merged upgrade correction is included in this branch for its next
+scoped deployment.
 
 ## Settings and boundaries
 
-The merged DEV-231 definitions remain the source of model settings:
+The merged DEV-231 definitions supply the settings:
 
 | Delegatable app | Agent reference | Model | Effort | Daybreak |
 | --- | --- | --- | --- | --- |
@@ -14,171 +16,149 @@ The merged DEV-231 definitions remain the source of model settings:
 | High Effort Cloud Agent | `high-effort-cloud` | `gpt-6-luna` | high | off |
 | Daybreak Cloud Agent | `daybreak-cloud` | `gpt-6-sol` | high | on; dispatch blocked |
 
-Default and High Effort share implementation instructions and
-`factory/skills/factory-rig/SKILL.md`. The mapping records the selected definition
-revision, requested settings and shared resource hashes. Daybreak readiness
-returns `daybreak_execution_unverified`; neither an accepted request nor a saved
-toggle proves effective Daybreak execution. There is no API billing fallback.
-`default-review` resolves `DefaultReview`, `gpt-6.1-sol`/high/Daybreak off. It has
-no delegatable identity. The pilot software-change definition still stops at
-candidate inspection; this change does not introduce the future review pipeline.
+Cloud agents share `factory/instructions/cloud-implementation.md` and
+`factory/skills/factory-rig/SKILL.md`. The selected definition revision, requested
+settings and shared resource paths/hashes are stored as
+`run.definition.agent_selection`. Resource bytes remain pinned on the run.
+Daybreak dispatch returns `daybreak_execution_unverified`; no downgrade or API
+billing fallback is allowed. Default Review is an explicit internal definition,
+`gpt-6.1-sol`/high/Daybreak off. It cannot be installed as a delegation identity.
+The local software-change definition still pauses after candidate inspection;
+the future review/publication pipeline is separate.
 
-## Requested shared-file interface
+## Configuration and launch
 
-DEV-234 owns `linear/coordinator.ex`, `linear/client.ex`, durable waits, AppServer
-and runner integration. No changes to these files are included yet. The following
-small interface needs owner agreement before integration:
+The existing Default app fields remain at the root of `linear_delegation`.
+Optional `cloud_agents` contains at most two additional cloud identities. Each
+entry has only `app_user_id`, `oauth_client_id`, `agent_id`, `webhook_secret_env`
+and exactly one `client_secret_env` or `token_env`. Organization/team/scope,
+worker control, workspace mapping, store and workstream remain shared.
+[The setup plan](dev-235-app-setup.md) provides exact proposed environment and
+secret references; actual app IDs must be verified before enabling routes.
 
-1. **Configuration and credentials** — extend `Linear.Delegation.validate/1`
-   with optional `cloud_agents` and invoke `Linear.AgentMapping.validate/1`.
-   Keep all backend, scope, workspace, worker-control and workstream settings
-   shared. `AgentMapping.routes(config)` returns per-app config overlays;
-   `select(authenticated_event, config)` requires the exact organization, app-user
-   and OAuth-client tuple. Additional entries contain only `app_user_id`,
-   `oauth_client_id`, `agent_id`, `webhook_secret_env` and exactly one
-   `client_secret_env` or `token_env`. Never persist secret values. Read config
-   through `SymphonyElixir.Config`; strip all route credential/signing environment
-   names from workers through the shared runtime's explicit strip list.
-2. **Webhook authentication** — `LinearWebhookController` calls the implemented
-   `Config.linear_webhook_secrets(config)` and
-   `AgentMapping.verify(raw_body, headers, config, secrets, opts \\ [])`. These
-   require the normalized event's exact route to match the verifying app. No
-   direct credential environment reads are needed outside Config. Duplicate
-   resolved signing secrets reject with `ambiguous_signing_secrets`, even when
-   their environment names differ. For issue-update events, which do not carry
-   an app identity, use the task's pinned route after organization verification.
-   One app's valid signature must never authorize another app's session. The
-   existing public `/hooks/linear` endpoint is sufficient; no new ingress.
-3. **Definition binding** — add a validated `:cloud_agent_id` option to
-   `WorkstreamRunner.prepare/3`. Call `AgentMapping.bind(definition, agent_id)`
-   immediately after loading and before workspace validation, policy pinning and
-   fingerprinting. Add this string option to Orchestrator's enqueue allowlist.
-   `Delegation.prepare/3` supplies the selected ID and records the returned
-   `definition.agent_selection`. Both prepare and enqueue must compute the same
-   bound definition digest. Initial routing binds implementation/repair stages;
-   explicit reviewer stages stay unchanged. Normal resume uses the persisted
-   definition rather than resolving files again.
-4. **Reassignment** — the coordinator stops dispatch, revokes its stage lease,
-   reconciles every existing operation and then calls
-   `AgentMapping.reassign(run, target_agent_id, delivery_id)`. Unknown termination
-   must reserve capacity and block replacement. The helper preserves run/task,
-   branch/workspace, artifacts, attempt history, waits and repair counters. It
-   records prior/current selections and prior conversation IDs, clears old
-   transport-retry and conversation pointers, and uses only pinned resources.
-   Commit the updated run, event and owning Linear task together before dispatch.
-   Do not reuse `linear-run/<issue>`'s original enqueue event as a new migration
-   identity. Late stop/prompt events from the prior app/session cannot stop or
-   resume the new selection. Explicit stop tombstones remain authoritative unless
-   a newer verified reassignment/delegation transition is recorded.
-5. **Internal reviewers** — `AgentMapping.reviewer(definition, agent_id)` resolves
-   an explicit internal review definition. The future review-stage owner consumes
-   this mapping without deriving the reviewer from the cloud identity.
+`Config.linear_delegation/0` validates mappings. `Config.linear_webhook_secrets/1`
+resolves every signing reference; the HTTP receiver authenticates the original
+bytes against a distinct key and requires the exact signing app/client tuple.
+Resolved duplicate signing keys fail closed, even when references differ.
+Issue updates without an app tuple retain signer provenance and use the current
+task's pinned route. A prior app's issue update cannot change the new owner.
+The same public `POST /hooks/linear` endpoint handles every installed identity.
 
-Build-slot readiness: this worktree has neither Elixir/mise nor a build/dependency
-cache. Docker Elixir `1.19.5-otp-28` is available. The released interim heavy-build
-slot has now completed compilation and focused checks below and is released again.
-DEV-234 retains the live-worker slot. The checked mapping files are
-`test/symphony_elixir/linear_agent_mapping_test.exs` and
-`test/symphony_elixir/linear_agent_mapping_config_test.exs`, followed by relevant existing
-workstream/delegation tests; integrated behavior still needs its own checks. Broad checks remain required before
-engineer handoff under the alpha guidance.
+`WorkstreamRunner.prepare/3` accepts `cloud_agent_id`, binds the selected cloud
+stages before workspace/policy pinning and definition fingerprinting, and leaves
+explicit reviewer stages unchanged. Enqueue uses the same bound digest. Ordinary
+resume executes the saved definition without rereading files. All configured
+service credential/signing names are pinned in execution context and stripped
+from local and remote agent launches, including shell-profile reintroduction.
+Older pinned launches lacking required exclusions block before reuse. Check
+processes retain their existing environment allowlist.
 
-## Minimum additional-app setup card
+Deployment accepts Default plus complete optional High Effort/Daybreak secret
+pairs with numeric version pins. The protected entrypoint exports a nonsecret
+`FACTORY_LINEAR_SECRET_NAMES_JSON` marker; Config checks that the actual workflow's
+credential references match those pins using its existing YAML reader. Local and
+upstream workflows without that deployment marker retain compatibility. The
+marker itself is excluded from new agent launches.
 
-Recommendation: install exactly two Linear applications in the existing Rig
-workspace, limited to DEV, using the existing backend and worker pool. Do not
-install or mention internal review agents. This requires explicit installation
-permission and a Linear administrator; Default installation alone does not
-authorize the other two.
+## Safe reassignment
 
-For each app:
+Only a newer authenticated created event for a different configured cloud agent
+requests reassignment. Session prompts do not change models. Stop tombstones
+prevent silent same-agent restarts. The coordinator revokes stage authorization,
+records a pending handoff, and uses its existing cancellation/reconciliation path.
+Unreachable, executing or incompletely canceled operations prevent replacement;
+unknown liveness retains execution capacity.
 
-1. Name it **High Effort Cloud Agent** or **Daybreak Cloud Agent**. Enable native
-   agent delegation with the same minimal `read,write,app:assignable` permissions
-   used by Default. Configure native agent-session, undelegation and relevant
-   issue-update events at `https://factory.rig.ai/hooks/linear`.
-2. Install with access limited to Rig/DEV. Record the app-user ID, OAuth client ID,
-   organization/team IDs and granted scopes. Keep client and signing values in
-   coordinator-only secret storage; provide references and version pins only.
-   Distinct app credential/signing environment references are required. Any new
-   secret container or access grant needs a separately reviewed setup plan.
-3. Add the exact tuple and definition reference to the optional `cloud_agents`
-   list after its shared integration is validated. No routing depends on display
-   name, project membership or human assignee. Retain existing Default IDs:
-   app-user `ce9f2ad8-ef28-4253-bdc8-ae208f63a425`, OAuth client
-   `571c3dc755d9e63cfe74748787f6a533` (DEV-233 recorded installation).
-4. Keep Daybreak dispatch blocked while effective execution is unverified. The
-   installed identity can report a blocker; it must never run ordinary settings
-   under the Daybreak name.
+After trusted quiescence, `AgentMapping.reassign/3` uses only the run's pinned
+agent/resource definitions. It preserves task/run IDs, workspace, branch,
+artifacts, outputs, attempt history, pending waits/questions/inbox and repair
+counters. Old transport retry and conversation pointers are cleared. Clarification
+and approval waits retain their existing wait rather than launching immediately.
+A new agent attempt receives a fresh conversation after the preserved answer.
 
-Incremental compute: zero VMs, disks, pools or public endpoints. No cloud IAM or
-budget change is proposed. Model calls use the already approved subscription;
-no new API billing or Daybreak elevation. Linear licensing and any additional
-secret-storage charges remain to be checked before installation.
+`WorkstreamStore.linear_reassign` atomically writes the resolved run, new task
+ownership and processed delivery receipt, checking the previous run/task snapshots
+inside the transaction. A failed/conflicting write advances none of them. Only
+then can the new app acknowledge and receive a dispatch lease. Prior session
+publications remain in assignment history; late old-app/session stops and prompts
+cannot affect the new selection. Stop receipts are scoped to assignment generation
+and attempt so a second safe handoff is independently durable.
 
-## Acceptance still needed
+## Archive integration seam for DEV-237
 
-Run exact identity routing tests, including mismatched signer/app, duplicates,
-restart and late events. Run one real small software-change task through each
-qualified cloud identity, with publication disabled; inspect recorded revisions,
-settings and shared skill hashes. Reassign an active disposable task and verify
-the old exact operation is terminated before replacement, preserving its run,
-branch and wait. Verify unsupported Daybreak blocks visibly in Linear and internal
-review definitions cannot receive delegation. Keep duplicate/restart evidence
-separate from automatic conversation resume, which DEV-233 did not qualify.
+DEV-235 has no dependency on the unmerged Evidence module. A successful atomic
+reassignment is a run commit boundary alongside queue/stage/question/reply/stop
+commits; DEV-237 must snapshot it once using `linear-reassignment/<delivery-id>`
+or the recorded run event ID. Stable archive URLs remain keyed by run/task ID.
 
-Until app permission/access and the shared runtime interface are supplied, live
-criteria are blocked. Preserve the branch and evidence; do not create a partial PR.
+`run.agent_transitions` is append-only. Every element records `id`, `from` and `to`
+selection maps (agent ID/name/revision, requested model/effort/Daybreak/auth ref,
+resource paths/hashes), plus previous conversation IDs and cancellation evidence.
+All definition resource pins remain present on the resolved run. Archive identity
+must preserve the initial pins and each authorized selection revision, rather
+than reject every changed resolved-definition digest under the same run ID.
+An unrecorded definition/policy/resource mutation still rejects. Use the matching
+transition ID and continuous prior/current selection to authorize a revision;
+never treat arbitrary snapshot contents as a transition. Keep each historical
+manifest/readable transcript and the current selection accessible. Publishing and
+validation gates remain separate service decisions.
 
-## Current evidence and manual check
+The pending integration hooks are documented in DEV-237's
+`docs/evidence/dev-237/integration-contract.md`; the root coordinates their shared
+file merge after DEV-235 stabilizes. DEV-237's current first-write-only pin rule
+must change before archive integration can accept a reassigned run.
 
-Lightweight interpreter checks use the existing Docker dependency image without
-running Mix, starting the factory, or touching the active DEV-234 container. The
-current Workstream, AgentReadiness, Webhook, Config and mapping sources are loaded
-explicitly. The image's old Workstream/Config modules produce redefinition and
-stale export-metadata warnings; its missing Delegation module also produces a
-warning in an uncalled existing Config function. All 14 helper/config tests pass.
-This interpreter command provides helper-level verification. The later full
-application compile and focused Mix run are recorded separately below.
+## Verification and pending live acceptance
 
-From this managed checkout, run:
+The integrated application compiles with warnings treated as errors (77 files),
+and **164 focused tests pass**. Specs, formatting and the escript build pass. The
+checks cover authenticated per-app routing, saved settings/shared resources,
+atomic handoff/reopen/rollback, stale events, unknown termination, question and
+reply preservation, older-run decoding, credential exclusion and unsupported
+Daybreak visibility. Deployment tests pass: 17 protected-runtime cases and 19
+cloud-I/O cases (four existing platform-dependent skips). Terraform 1.9.8
+formatting checks pass for both modified variable files; no Terraform plan/apply
+has run.
 
-```bash
-docker run --rm --network none --cpus 1 --memory 1g \
-  -e ERL_FLAGS='+S 1:1' -v "$PWD:/source:ro" dev230-checked:latest \
-  elixir -pa '/workspace/elixir/_build/test/lib/*/ebin' \
-  -r /source/elixir/lib/symphony_elixir/agent_readiness.ex \
-  -r /source/elixir/lib/symphony_elixir/workstream.ex \
-  -r /source/elixir/lib/symphony_elixir/linear/webhook.ex \
-  -r /source/elixir/lib/symphony_elixir/linear/agent_mapping.ex \
-  -r /source/elixir/lib/symphony_elixir/config.ex \
-  -e 'ExUnit.start(); Code.require_file("/source/elixir/test/symphony_elixir/linear_agent_mapping_test.exs"); Code.require_file("/source/elixir/test/symphony_elixir/linear_agent_mapping_config_test.exs")'
-```
+The preliminary runs exposed and repaired an orphan-run credential exclusion
+case, an initial-delegation boolean crash, duplicate scope invalidation and two
+new test-fixture mistakes. The final passing receipt records the tested source
+hashes and exact commands. Broad results and the bounded coordinator deployment
+are recorded separately below. These controlled checks do not prove additional
+apps are installed or live reassignment.
 
-Expected: 14 tests, zero failures. `--rm` removes only the disposable interpreter
-container; no other cleanup is needed. The named cache image is local development
-setup, not a published worker dependency or portable production recipe. The normal
-Mix test command remains required after the shared build slot is released.
+Live acceptance still requires one small real Rig task through each qualified
+identity, saved requested/configured settings and shared skill hashes, an exact
+old-operation termination before reassignment, and visible unsupported Daybreak
+blocking with no worker launch. Preserve the human assignee. Keep actual live
+results separate from contract fixtures and restart/duplicate tests.
 
-| Criterion | Current evidence | Remaining |
-| --- | --- | --- |
-| Each identity records settings | Exact tuple routing and binding tests load the committed software-change/agent YAML, inspect settings and revision/resource hashes | Native coordinator records and real Default/High Effort tasks |
-| Reassignment preserves task/branch and one writer | Helper tests reject unresolved/canceled-without-proof writers; preserve task/branch/history/counters/wait; clear old retry/conversation pointers | Atomic coordinator integration, restart/race tests and live proof |
-| Internal reviews and unsupported Daybreak | Mapping rejects reviewer identities; explicit reviewer lookup stays separate; Daybreak binding records the exact requested program and readiness rejects it | Visible Linear blocked activity and installed-app inventory |
-| Shared workstream/skill and safe transition | Same YAML/shared hashes with different effort; reviewer stage fixture stays explicit; recorded transition is idempotent | Actual review-stage integration belongs to DEV-240; durable safe-transition integration still required here |
+DEV-234's `.git` read-only sandbox diagnosis remains applicable. Do not broaden the
+sandbox or claim candidate publication. A trusted local commit step remains its
+separate follow-up. Until app setup and native multi-app acceptance are complete,
+retain the local branch and evidence; do not create a partial or placeholder PR.
 
-Self-review corrected human-wait restoration after a stopped run and prevented
-reuse of the previous agent's transport side-effect/conversation identity on a
-new selection. Shared files have not been edited beyond the Config accessor;
-no automatic resume, app install or live dispatch is claimed.
+## Integrated check evidence, 2026-10-10
 
-The targeted independent GPT-6 Luna/max review found that different signing
-references could resolve to the same value. The verifier now rejects such a
-configuration before authentication; its regression test signs a Daybreak-app
-body with the reused key and requires `ambiguous_signing_secrets`. The reviewer
-reported no further issue in the inspected reassignment/wait paths.
+The [integrated receipt](evidence/dev235/integrated-validation.json) records exact
+commands and source hashes. [Focused tests](evidence/dev235/integrated-focused-tests.log)
+pass 164/164; the separate [full suite](evidence/dev235/integrated-full-tests.log)
+passes 553 tests with six skips and ten exclusions. Validation-Docker and native
+live cases are not enabled. Compilation, public specs, formatting and escript
+build logs are retained alongside the receipt.
 
-## Interim application checks, 2026-10-10
+`make all` ran in the background and [stopped at Credo](evidence/dev235/integrated-all.log).
+Its saved log has trailing spaces removed; the raw container output is retained
+for this run. It reports existing and new readability/design/complexity findings; coverage and
+dialyzer were not reached. This is an alpha nonblocking broad-CI result, not a
+green CI claim. The separate full test run covers the broad behavior suite.
+
+One concise self-review checked signer routing, resolved-key uniqueness, credential
+exclusion on new/recovered runs, stage leases, old-writer termination and atomic
+CAS handoff. The passing focus includes DEV-234 questions/replies and its additive
+legacy decoder. No additional formal review was required.
+
+## Historical helper checkpoint checks, 2026-10-10
 
 The coordinator released a bounded heavy-build slot for checkpoint
 `e019b409b064c901944426055ff1dcfb6300e549`. An isolated Docker container copied
@@ -221,8 +201,6 @@ pins exact tested source hashes and commands; retained [compile](evidence/dev235
 [focused tests](evidence/dev235/focused-tests.log) and [specs](evidence/dev235/specs.log)
 outputs record the result. Docker used two CPU schedulers/cores and 4 GiB memory.
 
-Both DEV-235 containers and the temporary DEV-235 cache image were removed. The
-heavy slot is released. Broad CI remains queued for final integration as directed;
-this interim run is not engineer handoff or live acceptance. Additional app
-installation, visible Linear blocking, atomic reassignment integration and real
-qualified cloud-identity tasks still remain.
+That checkpoint's containers and temporary image were removed and its slot released.
+Those results cover the helper checkpoint only; the integrated source requires the
+separate checks above. They do not establish native multi-app acceptance.

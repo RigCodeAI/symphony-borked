@@ -2,13 +2,16 @@
 
 Status: tested DEV-235 code is deployed; additional app installation and native
 acceptance remain pending. No complete acceptance claim or PR is made here.
-The active coordinator source is `366734057481aa2c160319f05205e8e7f582a30e`.
+The coordinator source verified during DEV-235 activation was
+`366734057481aa2c160319f05205e8e7f582a30e`. DEV-237 owns the next integration
+and activation; recheck its later deployment before any further live change.
 Human approval was verified in the Factory Orchestrator chat; the approved retry
 staged, built and activated that source with root-private rollback snapshots.
 Health is active/running, all five prior tasks remain stopped, and no worker
 operation is running. Both additional OAuth application records are created;
 their credentials, installation and service routes remain pending. Google Cloud
-passkey sign-in is the current browser prerequisite. See the
+passkey sign-in is blocked at the human's request until they get home; no
+interactive authentication retries will be made meanwhile. See the
 [deployment boundary](evidence/dev235/deployment-boundary.json).
 
 ## Settings and boundaries
@@ -122,11 +125,14 @@ atomic handoff/reopen/rollback, stale events, unknown termination, question and
 reply preservation, older-run decoding, credential exclusion and unsupported
 Daybreak visibility. Deployment tests pass: 17 protected-runtime cases and 19
 cloud-I/O cases (four existing platform-dependent skips). Terraform 1.9.8
-formatting checks pass for both modified variable files. A read-only full plan
-now exists, but includes broader VM metadata and release-reader IAM changes and
-is blocked as an apply artifact. A targeted inspection preview confirms the
-intended four secret containers and four coordinator-only grants; it is not an
-approved apply artifact. No apply has run. The sanitized
+formatting checks pass for both modified variable files. The initial read-only full plan included broader VM metadata and release-reader
+IAM changes and remains blocked. A later refreshed, complete preprovision plan
+preserves the deployed VM metadata and IAM conditions in local snapshot inputs.
+It proposes exactly four automatically replicated secret containers and four
+coordinator-only access grants, with no other apply actions or secret versions.
+Four observed drift entries remain visible and produce no additional actions.
+Main review verified exact secret IDs, project, coordinator principal, replication
+and unchanged VM metadata/release-reader resources. No apply has run. The sanitized
 [secret-plan receipt](evidence/dev235/secret-plan-handoff.md) records all changes
 and private artifact hashes.
 
@@ -220,7 +226,7 @@ separate checks above. They do not establish native multi-app acceptance.
 Source is retained locally on `cycle/dev-235`; no PR was created because native
 multi-app acceptance is incomplete. Human approval covers the
 [additional app setup](dev-235-app-setup.md), the bounded coordinator deployment,
-and included disposable tests. The active coordinator source/archive pins are:
+and included disposable tests. The source/archive pins verified during DEV-235 activation were:
 
 - Source: `366734057481aa2c160319f05205e8e7f582a30e`.
 - Archive SHA-256: `c09c449144e63b387f4c297a36b390782d12684666d6195a49266d145b032ec2`.
@@ -249,9 +255,11 @@ Disposable issues DEV-250 (Default and safe reassignment) and DEV-251 (High Effo
 are published with Adam still assigned and no delegate. Separate coordinator and
 worker clones are ready; protected workflow mappings are not active.
 Install only the two approved apps and the four exact secret/scoped-access pairs,
-requiring a clean full Terraform plan before applying. The current full plan
-includes VM metadata updates and release-reader IAM replacements outside this
-bounded secret setup; no secrets or IAM grants were created. Complete native tasks, safe
+the prepared full preprovision plan now contains only those eight additions.
+Its local snapshot inputs preserve current boot metadata and IAM conditions; it
+does not activate new secret references. No secrets or IAM grants were created.
+Refresh state and rebuild the snapshot plan after DEV-237 integration, under a
+reacquired live slot, before any later apply. Complete native tasks, safe
 reassignment and Daybreak-visible blocking before creating a real PR.
 
 The build is complete and its heavy-build slot is free. The live deployment slot

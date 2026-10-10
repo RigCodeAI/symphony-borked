@@ -209,7 +209,7 @@
       "client_id": "56cdf6931848e6c10e5e6f27192abfb4"
     }
   ],
-  "browser_prerequisite": "Google Cloud passkey sign-in requested; credentials remain private in browser runtime",
+  "browser_prerequisite": "Human requested Google sign-in remain blocked until they get home; no interactive auth retries permitted meanwhile",
   "disposable_issues": [
     {
       "id": "DEV-250",
@@ -325,7 +325,7 @@
       "service config activation",
       "native agent dispatch"
     ],
-    "assigned_to": "DEV-237 by Factory Orchestrator after release"
+    "assigned_to": "DEV-237; no apply, activation, dispatch or heavy builds in this phase"
   },
   "safe_integration_base": "366734057481aa2c160319f05205e8e7f582a30e",
   "boot_metadata_revision": "064f892f95847ea2eed0eb684da36c6e1bb5fce6",
@@ -333,13 +333,38 @@
   "absent_release_disk_recovery_qualified": false,
   "terraform_status": {
     "apply_performed": false,
-    "full_plan": "blocked by broader changes; not approved for apply",
+    "full_plan": "fresh refresh-enabled complete preprovision plan; exactly 8 approved creates, no apply",
     "requested_secret_preview": "4 secret containers and 4 coordinator-only secretAccessor grants",
     "unexpected_planned_changes": [
       "coordinator and worker VM metadata updates",
       "2 release-reader IAM replacements"
     ],
     "unrelated_drift_updates": 4,
-    "resource_targeted_preview": "inspection only; not an apply artifact"
+    "resource_targeted_preview": "inspection only; not an apply artifact",
+    "original_full_plan": "blocked historical plan with broader changes; do not apply",
+    "preprovision_full_plan": {
+      "private_json_path": "/private/tmp/dev235-terraform/final-full-plan.json",
+      "json_sha256": "3cf5c45d79bc62866a7a3a2444c86f42165697846fbc21e72c6da69277486604",
+      "complete": true,
+      "applyable": true,
+      "changes": {
+        "automatically_replicated_secret_containers": 4,
+        "coordinator_only_secret_accessor_grants": 4
+      },
+      "vm_metadata": "exact before/after equality",
+      "release_reader_resources": "no-op",
+      "secret_versions_planned": 0,
+      "observed_drift_entries": 4,
+      "main_review": "verified exact IDs/project/member/role/replication and absence of other actions",
+      "refresh_before_later_apply": true,
+      "apply_authorized_in_current_phase": false,
+      "detailed_exit_status": 2,
+      "terraform_validate": "passed on private staging copy"
+    }
+  },
+  "private_browser_state": {
+    "setup_tabs": "preserved for handoff",
+    "clipboard": "cleared",
+    "raw_credentials_in_saved_task_artifacts": false
   }
 }

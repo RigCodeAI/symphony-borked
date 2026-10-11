@@ -9,9 +9,11 @@ Human approval was verified in the Factory Orchestrator chat; the approved retry
 staged, built and activated that source with root-private rollback snapshots.
 Health is active/running, all five prior tasks remain stopped, and no worker
 operation is running. Both additional OAuth application records are created;
-their credentials, installation and service routes remain pending. Google Cloud
-passkey sign-in is blocked at the human's request until they get home; no
-interactive authentication retries will be made meanwhile. See the
+their credentials, installation and service routes remain pending. Google Secret Manager sign-in succeeded on 2026-10-11; the UI verifies
+`adam@rig.ai` in project `factory-511117`. Both apps' client and signing secrets
+are prepared privately in volatile browser runtime, with the clipboard cleared.
+No values were uploaded or saved in task artifacts. Container creation,
+installation and activation still await the coordinated live slot. See the
 [deployment boundary](evidence/dev235/deployment-boundary.json).
 
 ## Settings and boundaries
@@ -263,7 +265,10 @@ reacquired live slot, before any later apply. Complete native tasks, safe
 reassignment and Daybreak-visible blocking before creating a real PR.
 
 The build is complete and its heavy-build slot is free. The live deployment slot
-is also released while Google Cloud passkey sign-in is pending. Reacquire the
+is retained by DEV-237 for its remaining live checks. Google sign-in is now
+resolved. The Factory Orchestrator reports combined deployment `fb0cad3` with
+schema version 3 and evidence hooks; preserve that integrated source and never
+reactivate the historical `3667340` or an older schema. Reacquire the
 coordinated live slot and recheck current state before Terraform apply, service
 configuration activation or native dispatch. The remaining Terraform plan
 investigation is read-only. No coding agent or native multi-app

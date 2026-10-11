@@ -209,7 +209,7 @@
       "client_id": "56cdf6931848e6c10e5e6f27192abfb4"
     }
   ],
-  "browser_prerequisite": "Human requested Google sign-in remain blocked until they get home; no interactive auth retries permitted meanwhile",
+  "browser_prerequisite": "Resolved: authenticated Google Secret Manager UI verified on 2026-10-11 as adam@rig.ai in factory-511117",
   "disposable_issues": [
     {
       "id": "DEV-250",
@@ -325,7 +325,7 @@
       "service config activation",
       "native agent dispatch"
     ],
-    "assigned_to": "DEV-237; no apply, activation, dispatch or heavy builds in this phase"
+    "assigned_to": "DEV-237 retains slots for live checks; DEV-235 credentials prepared and awaiting coordinated live slot"
   },
   "safe_integration_base": "366734057481aa2c160319f05205e8e7f582a30e",
   "boot_metadata_revision": "064f892f95847ea2eed0eb684da36c6e1bb5fce6",
@@ -365,6 +365,16 @@
   "private_browser_state": {
     "setup_tabs": "preserved for handoff",
     "clipboard": "cleared",
-    "raw_credentials_in_saved_task_artifacts": false
+    "raw_credentials_in_saved_task_artifacts": false,
+    "prepared_credentials": "High Effort and Daybreak client/signing secrets recaptured privately in volatile CUA runtime; all nonempty and corresponding values distinct",
+    "credential_upload_performed": false,
+    "durable_credential_storage": "pending approved container creation and deployment slot"
+  },
+  "coordinator_reported_deployment": {
+    "source": "fb0cad3",
+    "schema_version": 3,
+    "evidence": "Factory Orchestrator coordination message on 2026-10-11",
+    "locally_verified_in_this_phase": false,
+    "preserve_before_any_activation": true
   }
 }

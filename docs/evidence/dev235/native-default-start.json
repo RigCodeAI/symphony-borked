@@ -1,0 +1,167 @@
+{
+  "active_source": "afdba4303b0ed241368d2fb03184a9252639dd6c",
+  "tasks": [
+    {
+      "evidence": [
+        {
+          "agent_selection": {
+            "agent_id": "default-cloud",
+            "name": "DefaultCloud",
+            "requested": {
+              "authentication": {
+                "mode": "subscription",
+                "reference": "projects/factory-511117/secrets/model-auth/versions/1"
+              },
+              "cyber_access_program": "standard",
+              "daybreak": false,
+              "model": "gpt-6-luna",
+              "reasoning_effort": "medium"
+            },
+            "resources": [
+              {
+                "path": "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/instructions/cloud-implementation.md",
+                "sha256": "b75e205dfb751ccf100a9c3d92bbc7f7fadb42f0c778aca1af91b5718cf792c7"
+              },
+              {
+                "path": "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/skills/factory-rig/SKILL.md",
+                "sha256": "7d634d5a9cede4c2eea4d11164e6e6b7897e80d0b04da9dc4a3c24873cc489ff"
+              }
+            ],
+            "revision": "78c12b3df8f0631f8c20a4b8dc1679093cd19804e8b376ae2589d5dbe18aef9c"
+          },
+          "agent_transitions": null,
+          "agents": {
+            "daybreak-cloud": {
+              "daybreak": true,
+              "model": "gpt-6-sol",
+              "reasoning_effort": "high"
+            },
+            "default-cloud": {
+              "daybreak": false,
+              "model": "gpt-6-luna",
+              "reasoning_effort": "medium"
+            },
+            "default-review": {
+              "daybreak": false,
+              "model": "gpt-6.1-sol",
+              "reasoning_effort": "high"
+            },
+            "high-effort-cloud": {
+              "daybreak": false,
+              "model": "gpt-6-luna",
+              "reasoning_effort": "high"
+            }
+          },
+          "attempts": [
+            {
+              "gate": null,
+              "id": "run-7b2a02f094fe385d8e899d12a8612bec/implement/1",
+              "stage": "implement",
+              "status": "executing"
+            }
+          ],
+          "completed_commands": [],
+          "default_pass_marker_in_agent_message": false,
+          "definitions": {
+            "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/agents/daybreak-cloud.yaml": "90fb13cf5140a6ca7b23637b5751ae65a47fac0e063ba8b0a4615a2f7b054817",
+            "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/agents/default-cloud.yaml": "78c12b3df8f0631f8c20a4b8dc1679093cd19804e8b376ae2589d5dbe18aef9c",
+            "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/agents/default-review.yaml": "2f8ce08aba7db44e17731452a33fd0f87c72423c000f59d984350f4e9e3b7652",
+            "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/agents/high-effort-cloud.yaml": "be46b132c98b28f6a591a4e669fe773cff267c482284a209143035bbbd574e3f",
+            "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/instructions/cloud-implementation.md": "b75e205dfb751ccf100a9c3d92bbc7f7fadb42f0c778aca1af91b5718cf792c7",
+            "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/instructions/cloud-review.md": "37ae41d7feaabb6a5c76f551295d94c1cb4334d6440e831b0213521a12401386",
+            "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/skills/factory-rig/SKILL.md": "7d634d5a9cede4c2eea4d11164e6e6b7897e80d0b04da9dc4a3c24873cc489ff",
+            "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/skills/worker-qualification/SKILL.md": "967902e76fd8a8c96489dfc8424bb74251abda5a2e40c87924506b6a7dc81630",
+            "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/workstreams/software-change.yaml": "bed5a8ebf9097bdc9ab84ec68a11d02db39955b93fa0f76fa38c8fb0c4414e7b"
+          },
+          "event_kinds": [
+            "queued",
+            "stage_started",
+            "worker_registered",
+            "external_process_registered",
+            null,
+            "item/completed"
+          ],
+          "events": 10,
+          "observed_settings": [
+            {
+              "agent_id": "default-cloud"
+            },
+            {
+              "cyber_access_program": "standard",
+              "daybreak": false,
+              "model": "gpt-6-luna",
+              "reasoning_effort": "medium"
+            },
+            {
+              "daybreak": true,
+              "model": "gpt-6-sol",
+              "reasoning_effort": "high"
+            },
+            {
+              "daybreak": false,
+              "model": "gpt-6-luna",
+              "reasoning_effort": "medium"
+            },
+            {
+              "daybreak": false,
+              "model": "gpt-6.1-sol",
+              "reasoning_effort": "high"
+            },
+            {
+              "daybreak": false,
+              "model": "gpt-6-luna",
+              "reasoning_effort": "high"
+            }
+          ],
+          "run_id": "run-7b2a02f094fe385d8e899d12a8612bec",
+          "stage_agents": {
+            "implement": "default-cloud"
+          },
+          "stage_id": "implement",
+          "status": "executing",
+          "test_result_lines": [],
+          "url": "https://factory.rig.ai/tasks/96e018cf6cd9607919d2d32b5b3dcb86f2c285f4128e1a42464b447a5e74baaf"
+        }
+      ],
+      "identifier": "DEV-250",
+      "task": [
+        {
+          "agent_id": "default-cloud",
+          "agent_transitions": null,
+          "cancellation": null,
+          "current_attempt_id": "run-7b2a02f094fe385d8e899d12a8612bec/implement/1",
+          "error": null,
+          "issue_id": "19f9279e-00d5-49e2-976e-9cb796d9d1b6",
+          "phase": "implementing",
+          "run_id": "run-7b2a02f094fe385d8e899d12a8612bec",
+          "stage_id": "implement",
+          "status": "acknowledged"
+        }
+      ]
+    },
+    {
+      "evidence": [],
+      "identifier": "DEV-251",
+      "task": []
+    },
+    {
+      "evidence": [],
+      "identifier": "DEV-253",
+      "task": [
+        {
+          "agent_id": "daybreak-cloud",
+          "agent_transitions": null,
+          "cancellation": null,
+          "current_attempt_id": null,
+          "error": ":daybreak_execution_unverified",
+          "issue_id": "b3ce4813-e74a-4eb0-824d-01b8e26a9d4b",
+          "phase": null,
+          "run_id": null,
+          "stage_id": null,
+          "status": "blocked"
+        }
+      ]
+    }
+  ],
+  "capture_phase": "initial Default launch, before its later Cargo exit 127; see native-high-result.json for retained terminal failure"
+}

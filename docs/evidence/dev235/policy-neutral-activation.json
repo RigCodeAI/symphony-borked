@@ -1,0 +1,147 @@
+{
+  "activation": {
+    "active_source": "afdba4303b0ed241368d2fb03184a9252639dd6c",
+    "archive_sha256": "3e6c760563c4288b89acdc6c6d689b9e1076b5e123255c07db593cd814f48c8d",
+    "service": [
+      "ActiveState=active",
+      "SubState=running"
+    ],
+    "public_mode": "0o644",
+    "private_mode": "0o600",
+    "default_route_preserved": true,
+    "additional_routes_configured": true,
+    "coordinator_credential_names": [
+      "FACTORY_DAYBREAK_CLIENT_SECRET",
+      "FACTORY_DAYBREAK_WEBHOOK_SECRET",
+      "FACTORY_HIGH_CLIENT_SECRET",
+      "FACTORY_HIGH_WEBHOOK_SECRET",
+      "LINEAR_API_KEY",
+      "LINEAR_API_TOKEN"
+    ],
+    "versions": {
+      "FACTORY_DAYBREAK_CLIENT_SECRET": "1",
+      "FACTORY_DAYBREAK_WEBHOOK_SECRET": "1",
+      "FACTORY_HIGH_CLIENT_SECRET": "1",
+      "FACTORY_HIGH_WEBHOOK_SECRET": "1",
+      "LINEAR_API_KEY": "1",
+      "LINEAR_API_TOKEN": "1"
+    },
+    "worker_control_pin_preserved": true,
+    "dev252_wait_preserved": true,
+    "dev252_run_id": "run-ea371f6a0e38e4e183c61e418eb0442e",
+    "native_acceptance_pending": true
+  },
+  "maintenance": {
+    "active": "afdba4303b0ed241368d2fb03184a9252639dd6c",
+    "service": [
+      "ActiveState=active",
+      "SubState=running"
+    ],
+    "credential-maintenance-private.log": {
+      "exit_code": 0,
+      "log_exists": true,
+      "known_outcomes": [
+        "Pinned 7 service environment-name exclusions for run-ea371f6a0e38e4e183c61e418eb0442e; durable operator event operator/linear-secret-names/56e089b1199aabc88602d0e55fc7e570484a3a73de56fe3cd85fb0357ed01698."
+      ],
+      "failure_reason": []
+    },
+    "fresh-readback-private.log": {
+      "exit_code": 0,
+      "log_exists": true,
+      "summary": {
+        "event_id": "operator/linear-secret-names/56e089b1199aabc88602d0e55fc7e570484a3a73de56fe3cd85fb0357ed01698",
+        "fresh_vm_readback": true,
+        "helper_module_loaded": false,
+        "names_only_change": true,
+        "policy_unchanged": true,
+        "wait_and_attempts_unchanged": true,
+        "environment_names": [
+          "LINEAR_API_TOKEN",
+          "LINEAR_API_KEY",
+          "FACTORY_LINEAR_SECRET_NAMES_JSON",
+          "FACTORY_DAYBREAK_CLIENT_SECRET",
+          "FACTORY_DAYBREAK_WEBHOOK_SECRET",
+          "FACTORY_HIGH_CLIENT_SECRET",
+          "FACTORY_HIGH_WEBHOOK_SECRET"
+        ],
+        "pending_operator_event": true
+      },
+      "failure_reason": []
+    }
+  },
+  "dev252": {
+    "active_source": "afdba4303b0ed241368d2fb03184a9252639dd6c",
+    "task": [
+      {
+        "issue_id": "cb9eaf7b-9340-43fc-8015-d8d04e126512",
+        "run_id": "run-ea371f6a0e38e4e183c61e418eb0442e",
+        "status": "acknowledged",
+        "phase": "waiting_for_answer",
+        "stage_id": "candidate-ready",
+        "current_attempt_id": "run-ea371f6a0e38e4e183c61e418eb0442e/candidate-ready/3",
+        "agent_id": "default-cloud",
+        "error": null,
+        "cancellation": null
+      }
+    ],
+    "evidence": [
+      {
+        "run_id": "run-ea371f6a0e38e4e183c61e418eb0442e",
+        "status": "waiting_for_answer",
+        "stage_id": "candidate-ready",
+        "attempts": [
+          {
+            "id": "run-ea371f6a0e38e4e183c61e418eb0442e/implement/1",
+            "stage": "implement",
+            "status": "completed",
+            "gate": null
+          },
+          {
+            "id": "run-ea371f6a0e38e4e183c61e418eb0442e/inspect-candidate/2",
+            "stage": "inspect-candidate",
+            "status": "completed",
+            "gate": "passed"
+          },
+          {
+            "id": "run-ea371f6a0e38e4e183c61e418eb0442e/candidate-ready/3",
+            "stage": "candidate-ready",
+            "status": "waiting",
+            "gate": null
+          }
+        ],
+        "events": 15,
+        "native_result_marker_retained": true,
+        "fixture_credential_absent": true,
+        "redaction_marker_present": true,
+        "waiting_gate": "run-ea371f6a0e38e4e183c61e418eb0442e/candidate-ready/3/wait",
+        "selected_agent": {
+          "agent_id": "default-cloud",
+          "name": "DefaultCloud",
+          "requested": {
+            "authentication": {
+              "mode": "subscription",
+              "reference": "projects/factory-511117/secrets/model-auth/versions/1"
+            },
+            "cyber_access_program": "standard",
+            "daybreak": false,
+            "model": "gpt-6-luna",
+            "reasoning_effort": "medium"
+          },
+          "resources": [
+            {
+              "path": "/srv/factory/releases/fb0cad378d79b8b275a4ddb3cf70ac51b0abcdbd/factory/instructions/cloud-implementation.md",
+              "sha256": "b75e205dfb751ccf100a9c3d92bbc7f7fadb42f0c778aca1af91b5718cf792c7"
+            },
+            {
+              "path": "/srv/factory/releases/fb0cad378d79b8b275a4ddb3cf70ac51b0abcdbd/factory/skills/factory-rig/SKILL.md",
+              "sha256": "7d634d5a9cede4c2eea4d11164e6e6b7897e80d0b04da9dc4a3c24873cc489ff"
+            }
+          ],
+          "revision": "78c12b3df8f0631f8c20a4b8dc1679093cd19804e8b376ae2589d5dbe18aef9c"
+        },
+        "url": "https://factory.rig.ai/tasks/d0879b960be1f4f7d75cb5b7e654146bc0314f497832ae2daf0fe4cd5294909e"
+      }
+    ]
+  },
+  "capture_phase": "immediately after activation, before native DEV-235 tests"
+}

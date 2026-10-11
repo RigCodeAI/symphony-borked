@@ -1,0 +1,44 @@
+{
+  "probe_transport": "real Linear native Default session",
+  "default_session_prefix": "d81fd12c",
+  "delivered_reply_marker": "DEV235_STALE_DEFAULT_REPLY",
+  "reply_time_utc": "2026-10-11T14:00:55Z",
+  "old_session_stop_requested": true,
+  "before": {
+    "run_id": "run-33c291e6e20a876eb0cab27a1fce46bf",
+    "snapshot_sha256": "d54290731823ddfaa5733f0660846b1c2ba66ef9192fa3b01bee5eb650358d3c",
+    "events_sha256": "9bbf2cb95f65024c7ccf1d0b106cddc1851252679ef5b1d50895e7a8e89a7677",
+    "event_count": 91,
+    "task": {
+      "issue_id": "78b07a81-dd07-45cd-9e22-75b63588814d",
+      "run_id": "run-33c291e6e20a876eb0cab27a1fce46bf",
+      "agent_id": "high-effort-cloud",
+      "status": "acknowledged",
+      "phase": "waiting_for_answer",
+      "current_attempt_id": "run-33c291e6e20a876eb0cab27a1fce46bf/implement/6",
+      "stage_id": "implement",
+      "error": null,
+      "cancellation": null
+    },
+    "read_only": true
+  },
+  "after": {
+    "run_id": "run-33c291e6e20a876eb0cab27a1fce46bf",
+    "snapshot_sha256": "d54290731823ddfaa5733f0660846b1c2ba66ef9192fa3b01bee5eb650358d3c",
+    "events_sha256": "9bbf2cb95f65024c7ccf1d0b106cddc1851252679ef5b1d50895e7a8e89a7677",
+    "event_count": 91,
+    "task": {
+      "issue_id": "78b07a81-dd07-45cd-9e22-75b63588814d",
+      "run_id": "run-33c291e6e20a876eb0cab27a1fce46bf",
+      "agent_id": "high-effort-cloud",
+      "status": "acknowledged",
+      "phase": "waiting_for_answer",
+      "current_attempt_id": "run-33c291e6e20a876eb0cab27a1fce46bf/implement/6",
+      "stage_id": "implement",
+      "error": null,
+      "cancellation": null
+    },
+    "read_only": true
+  },
+  "snapshot_events_and_task_unchanged": true
+}

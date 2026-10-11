@@ -1,0 +1,30 @@
+{
+  "old_exact_processes": [
+    {
+      "pid": 33344,
+      "expected_start_ticks": "6855196",
+      "exact_process_live": false
+    },
+    {
+      "pid": 33381,
+      "expected_start_ticks": "6855310",
+      "exact_process_live": false
+    },
+    {
+      "pid": 33509,
+      "expected_start_ticks": "6855806",
+      "exact_process_live": false
+    }
+  ],
+  "old_unit": "factory-operation-ff2f5a842c5c1f665a0d2727c67304653330259fa267409cad8790cf5699a006.service",
+  "unit_properties": [
+    "MainPID=0",
+    "ControlPID=0",
+    "ControlGroup=",
+    "LoadState=not-found",
+    "ActiveState=inactive",
+    "SubState=dead",
+    "InactiveEnterTimestampMonotonic=0"
+  ],
+  "unit_show_exit": 0
+}

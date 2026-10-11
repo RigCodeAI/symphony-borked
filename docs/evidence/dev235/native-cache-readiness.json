@@ -1,0 +1,52 @@
+{
+  "public_fetch": {
+    "exit_code": 0,
+    "seed_lock_sha256": "3c4cb8ed402bcaa16ec179852d2cc47b9f76c94abbbe1fa541fe959542b72e14",
+    "selected_lock_versions": {
+      "itoa": "1.0.18",
+      "memchr": "2.8.3",
+      "serde": "1.0.229",
+      "serde_core": "1.0.229",
+      "serde_json": "1.0.151",
+      "zmij": "1.0.23"
+    },
+    "crate_cache_files": 393,
+    "index_roots": [
+      "index.crates.io-1949cf8c6b5b557f"
+    ],
+    "error_lines": [],
+    "source": "trusted immutable seed metadata",
+    "tests_or_build_scripts_executed": false,
+    "credential_values_supplied": false
+  },
+  "offline_fetch": {
+    "exit_code": 0,
+    "seed_lock_sha256": "3c4cb8ed402bcaa16ec179852d2cc47b9f76c94abbbe1fa541fe959542b72e14",
+    "selected_lock_versions": {
+      "itoa": "1.0.18",
+      "memchr": "2.8.3",
+      "serde": "1.0.229",
+      "serde_core": "1.0.229",
+      "serde_json": "1.0.151",
+      "zmij": "1.0.23"
+    },
+    "crate_cache_files": 393,
+    "index_roots": [
+      "index.crates.io-1949cf8c6b5b557f"
+    ],
+    "error_lines": [],
+    "source": "trusted immutable seed metadata",
+    "tests_or_build_scripts_executed": false,
+    "credential_values_supplied": false
+  },
+  "workspace_cache": {
+    "uid": 1000,
+    "cargo_home": "/srv/factory/contained-workspaces/dev233-control-qualification/rig-native-dev251/target/dev235-cargo-home",
+    "crate_cache_files": 393,
+    "offline_fetch_exit": 0,
+    "git_status_unchanged": true,
+    "credential_values_copied": false,
+    "tests_or_build_scripts_executed": false,
+    "error_lines": []
+  }
+}

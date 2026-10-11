@@ -3,8 +3,10 @@
 This exact plan was approved in the Factory Orchestrator chat. Both OAuth apps
 are installed with DEV-only team access. The four secret containers and four
 coordinator-only grants were applied on 2026-10-11, and every secret is pinned
-to enabled version `1`. Activation of the additional routes and native acceptance
-remain pending. The existing coordinator and one qualified worker are sufficient.
+to enabled version `1`. The additional routes are active in coordinator release
+`afdba4303b0ed241368d2fb03184a9252639dd6c`; native mapping acceptance passed.
+The existing coordinator and one qualified worker were sufficient.
+See the [criterion-by-criterion results](dev-235-agent-mapping.md).
 
 | App | Client ID | Verified app-user ID |
 | --- | --- | --- |
@@ -28,7 +30,7 @@ when its wait remains intact. The rejected `09706e8` activation was restored to
 exactly. No new delegation or worker operation occurred, and its native session
 has no new activity from that activation.
 
-Additional routes require a policy-neutral release and a stopped-service,
+The additional routes were enabled with a policy-neutral release and a stopped-service,
 metadata-only exclusion update through the trusted store. Preserve policy,
 status, wait, attempts and definition; never rewrite them to pass recovery.
 See [the failed activation record](evidence/dev235/rejected-policy-activation.json).
@@ -121,19 +123,18 @@ ID against its signed `oauthClientId`. Never send raw values to chat or persist
 access tokens in the workstream database.
 
 After those values exist, add this `cloud_agents` list under the existing
-`linear_delegation` config. Replace the explicit placeholders; do not enable a
-route with placeholder IDs:
+`linear_delegation` config. The following IDs were verified before activation:
 
 ```yaml
 cloud_agents:
   - agent_id: high-effort-cloud
-    app_user_id: <verified-high-app-user-id>
-    oauth_client_id: <verified-high-client-id>
+    app_user_id: a7d15aec-f9a2-4806-9fbf-ca36a141178b
+    oauth_client_id: 456e94735c924ab9b1148ce1a870a133
     client_secret_env: FACTORY_HIGH_CLIENT_SECRET
     webhook_secret_env: FACTORY_HIGH_WEBHOOK_SECRET
   - agent_id: daybreak-cloud
-    app_user_id: <verified-daybreak-app-user-id>
-    oauth_client_id: <verified-daybreak-client-id>
+    app_user_id: 3dc1a02b-4b99-4b73-8135-c0901efe50d9
+    oauth_client_id: 56cdf6931848e6c10e5e6f27192abfb4
     client_secret_env: FACTORY_DAYBREAK_CLIENT_SECRET
     webhook_secret_env: FACTORY_DAYBREAK_WEBHOOK_SECRET
 ```
@@ -156,12 +157,14 @@ Unsupported Daybreak must publish a clear block with no worker launch or downgra
 Candidate publication stays disabled; the existing `.git` sandbox boundary is a
 separate trusted-commit follow-up.
 
-Approval covers these two named app installations and this four-secret/scoped-IAM
-plan. Installation, secret versions and access grants are complete. Route activation
-and native acceptance remain pending. See the installation and preservation
-receipts linked above.
+Approval covered these two named app installations and this four-secret/scoped-IAM
+plan. Installation, versions, scoped grants, route activation and native mapping
+acceptance are complete. The activation receipt proves DEV-252 changed only in
+credential-exclusion names; its existing wait remains intact.
+See [activation](evidence/dev235/policy-neutral-activation.json) and
+[native acceptance](dev-235-agent-mapping.md).
 
-## Disposable native task draft
+## Disposable native task
 
 Title: DEV-235 disposable acceptance — reject a hook configuration file symlink
 
@@ -189,7 +192,9 @@ cargo test --locked -p sivere-agent-hooks --lib \
 
 Publish the draft only as a clearly labeled disposable DEV acceptance issue, keep
 Adam as the human assignee, and delegate after its dedicated clone and protected
-workspace mapping exist. The draft is now published as DEV-250 (Default and reassignment) and DEV-251
-(High Effort), with Adam assigned and no delegates. The known `.git`
+workspace mapping exist. The disposable issues are DEV-250 (first Default prerequisite failure), DEV-251
+(Default → High Effort passing tests and reassignment), and DEV-253 (visible
+unsupported Daybreak block). Adam remains assigned. DEV-251 is waiting on the
+observed commit boundary with High Effort selected. The known `.git`
 sandbox restriction means a successful coding turn and test are separate from
 candidate commit/publication acceptance.

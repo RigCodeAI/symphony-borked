@@ -1,0 +1,33 @@
+{
+  "active_source": "afdba4303b0ed241368d2fb03184a9252639dd6c",
+  "tasks": [
+    {
+      "evidence": [],
+      "identifier": "DEV-250",
+      "task": []
+    },
+    {
+      "evidence": [],
+      "identifier": "DEV-251",
+      "task": []
+    },
+    {
+      "evidence": [],
+      "identifier": "DEV-253",
+      "task": [
+        {
+          "agent_id": "daybreak-cloud",
+          "agent_transitions": null,
+          "cancellation": null,
+          "current_attempt_id": null,
+          "error": ":daybreak_execution_unverified",
+          "issue_id": "b3ce4813-e74a-4eb0-824d-01b8e26a9d4b",
+          "phase": null,
+          "run_id": null,
+          "stage_id": null,
+          "status": "blocked"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,258 @@
+{
+  "status": "DEV-235 mapping acceptance passed",
+  "captured_at_utc": "2026-10-11T14:08:38.978473+00:00",
+  "active_coordinator": "afdba4303b0ed241368d2fb03184a9252639dd6c",
+  "run_id": "run-33c291e6e20a876eb0cab27a1fce46bf",
+  "issue": "DEV-251",
+  "stable_evidence_url": "https://factory.rig.ai/tasks/74379483d6b4faf194a614058876d38c9226e7a40fcb781cbcf0eabdcf2e9bb3",
+  "human_assignee": "Adam Patarino",
+  "initial_agent": {
+    "agent_id": "default-cloud",
+    "name": "DefaultCloud",
+    "requested": {
+      "authentication": {
+        "mode": "subscription",
+        "reference": "projects/factory-511117/secrets/model-auth/versions/1"
+      },
+      "cyber_access_program": "standard",
+      "daybreak": false,
+      "model": "gpt-6-luna",
+      "reasoning_effort": "medium"
+    },
+    "resources": [
+      {
+        "path": "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/instructions/cloud-implementation.md",
+        "sha256": "b75e205dfb751ccf100a9c3d92bbc7f7fadb42f0c778aca1af91b5718cf792c7"
+      },
+      {
+        "path": "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/skills/factory-rig/SKILL.md",
+        "sha256": "7d634d5a9cede4c2eea4d11164e6e6b7897e80d0b04da9dc4a3c24873cc489ff"
+      }
+    ],
+    "revision": "78c12b3df8f0631f8c20a4b8dc1679093cd19804e8b376ae2589d5dbe18aef9c"
+  },
+  "current_agent": {
+    "agent_id": "high-effort-cloud",
+    "name": "HighEffortCloud",
+    "requested": {
+      "authentication": {
+        "mode": "subscription",
+        "reference": "projects/factory-511117/secrets/model-auth/versions/1"
+      },
+      "cyber_access_program": "standard",
+      "daybreak": false,
+      "model": "gpt-6-luna",
+      "reasoning_effort": "high"
+    },
+    "resources": [
+      {
+        "path": "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/instructions/cloud-implementation.md",
+        "sha256": "b75e205dfb751ccf100a9c3d92bbc7f7fadb42f0c778aca1af91b5718cf792c7"
+      },
+      {
+        "path": "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/skills/factory-rig/SKILL.md",
+        "sha256": "7d634d5a9cede4c2eea4d11164e6e6b7897e80d0b04da9dc4a3c24873cc489ff"
+      }
+    ],
+    "revision": "be46b132c98b28f6a591a4e669fe773cff267c482284a209143035bbbd574e3f"
+  },
+  "transition": {
+    "from": {
+      "agent_id": "default-cloud",
+      "name": "DefaultCloud",
+      "requested": {
+        "authentication": {
+          "mode": "subscription",
+          "reference": "projects/factory-511117/secrets/model-auth/versions/1"
+        },
+        "cyber_access_program": "standard",
+        "daybreak": false,
+        "model": "gpt-6-luna",
+        "reasoning_effort": "medium"
+      },
+      "resources": [
+        {
+          "path": "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/instructions/cloud-implementation.md",
+          "sha256": "b75e205dfb751ccf100a9c3d92bbc7f7fadb42f0c778aca1af91b5718cf792c7"
+        },
+        {
+          "path": "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/skills/factory-rig/SKILL.md",
+          "sha256": "7d634d5a9cede4c2eea4d11164e6e6b7897e80d0b04da9dc4a3c24873cc489ff"
+        }
+      ],
+      "revision": "78c12b3df8f0631f8c20a4b8dc1679093cd19804e8b376ae2589d5dbe18aef9c"
+    },
+    "id": "4e01e09f-8f10-4dc7-9eba-b7be62d40338",
+    "previous_cancellation": {
+      "termination": "terminated"
+    },
+    "previous_session_id": "01a12b3f-2c9b-7133-a64a-6fa37a3db579-01a12b3f-2cc5-7e42-959f-cf4f18280d70",
+    "previous_thread_id": "01a12b3f-2c9b-7133-a64a-6fa37a3db579",
+    "to": {
+      "agent_id": "high-effort-cloud",
+      "name": "HighEffortCloud",
+      "requested": {
+        "authentication": {
+          "mode": "subscription",
+          "reference": "projects/factory-511117/secrets/model-auth/versions/1"
+        },
+        "cyber_access_program": "standard",
+        "daybreak": false,
+        "model": "gpt-6-luna",
+        "reasoning_effort": "high"
+      },
+      "resources": [
+        {
+          "path": "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/instructions/cloud-implementation.md",
+          "sha256": "b75e205dfb751ccf100a9c3d92bbc7f7fadb42f0c778aca1af91b5718cf792c7"
+        },
+        {
+          "path": "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/skills/factory-rig/SKILL.md",
+          "sha256": "7d634d5a9cede4c2eea4d11164e6e6b7897e80d0b04da9dc4a3c24873cc489ff"
+        }
+      ],
+      "revision": "be46b132c98b28f6a591a4e669fe773cff267c482284a209143035bbbd574e3f"
+    }
+  },
+  "real_passing_commands": [
+    {
+      "command": "/bin/bash -lc '/usr/bin/env CARGO_HOME=/srv/factory/contained-workspaces/dev233-control-qualification/rig-native-dev251/target/dev235-cargo-home CARGO_NET_OFFLINE=true RUSTUP_HOME=/srv/factory/bootstrap-tools-v1/rustup RUSTUP_TOOLCHAIN=1.91.1 PATH=/srv/factory/bootstrap-tools-v1/cargo/bin:/usr/local/bin:/usr/bin:/bin /srv/factory/bootstrap-tools-v1/cargo/bin/cargo test --locked -p sivere-agent-hooks --lib agent::tests::agent_hook_refuses_a_configuration_file_symlink -- --exact'",
+      "exit_code": 0,
+      "status": "completed",
+      "test_result_lines": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "command": "/bin/bash -lc '/usr/bin/env CARGO_HOME=/srv/factory/contained-workspaces/dev233-control-qualification/rig-native-dev251/target/dev235-cargo-home CARGO_NET_OFFLINE=true RUSTUP_HOME=/srv/factory/bootstrap-tools-v1/rustup RUSTUP_TOOLCHAIN=1.91.1 PATH=/srv/factory/bootstrap-tools-v1/cargo/bin:/usr/local/bin:/usr/bin:/bin /srv/factory/bootstrap-tools-v1/cargo/bin/cargo test --locked -p sivere-agent-hooks --lib agent::tests::agent_hook_refuses_a_configuration_file_symlink -- --exact'",
+      "exit_code": 0,
+      "status": "completed",
+      "test_result_lines": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s"
+      ]
+    }
+  ],
+  "effective_default_contexts": [
+    {
+      "approval_policy": "never",
+      "cwd": "/srv/factory/contained-workspaces/dev233-control-qualification/rig-native-dev251",
+      "effort": "medium",
+      "issue": "DEV-251",
+      "model": "gpt-6-luna",
+      "sandbox": "workspace-write",
+      "session_id": "01a12b36-46c9-74c0-8d05-2b52ee73c57f",
+      "timestamp": "2026-10-11T13:45:40.723Z"
+    },
+    {
+      "approval_policy": "never",
+      "cwd": "/srv/factory/contained-workspaces/dev233-control-qualification/rig-native-dev251",
+      "effort": "medium",
+      "issue": "DEV-251",
+      "model": "gpt-6-luna",
+      "sandbox": "workspace-write",
+      "session_id": "01a12b40-822e-7383-9a58-fea3fb9d0771",
+      "timestamp": "2026-10-11T13:56:51.392Z"
+    },
+    {
+      "approval_policy": "never",
+      "cwd": "/srv/factory/contained-workspaces/dev233-control-qualification/rig-native-dev251",
+      "effort": "medium",
+      "issue": "DEV-251",
+      "model": "gpt-6-luna",
+      "sandbox": "workspace-write",
+      "session_id": "01a12b3a-c5a4-7633-ac6f-f4e1d77bfa16",
+      "timestamp": "2026-10-11T13:50:35.657Z"
+    },
+    {
+      "approval_policy": "never",
+      "cwd": "/srv/factory/contained-workspaces/dev233-control-qualification/rig-native-dev251",
+      "effort": "medium",
+      "issue": "DEV-251",
+      "model": "gpt-6-luna",
+      "sandbox": "workspace-write",
+      "session_id": "01a12b3f-2c9b-7133-a64a-6fa37a3db579",
+      "timestamp": "2026-10-11T13:55:24.067Z"
+    }
+  ],
+  "effective_high_contexts": [
+    {
+      "approval_policy": "never",
+      "cwd": "/srv/factory/contained-workspaces/dev233-control-qualification/rig-native-dev251",
+      "effort": "high",
+      "issue": "DEV-251",
+      "model": "gpt-6-luna",
+      "sandbox": "workspace-write",
+      "session_id": "01a12b41-857c-7092-a208-6ebfc908df15",
+      "timestamp": "2026-10-11T13:57:57.608Z"
+    },
+    {
+      "approval_policy": "never",
+      "cwd": "/srv/factory/contained-workspaces/dev233-control-qualification/rig-native-dev251",
+      "effort": "high",
+      "issue": "DEV-251",
+      "model": "gpt-6-luna",
+      "sandbox": "workspace-write",
+      "session_id": "01a12b42-71bd-75b0-9c52-0ad7394bed2f",
+      "timestamp": "2026-10-11T13:58:58.258Z"
+    }
+  ],
+  "current_clone": {
+    "branch": "cycle/dev-251-disposable",
+    "changed_paths": [
+      "crates/rig-agent-hooks/src/agent.rs"
+    ],
+    "head": "39d6d5d998366bf13af19eb74ae47d598ecf92bd",
+    "issue": "DEV-251",
+    "new_test_present": true,
+    "push_url": "DISABLED",
+    "test_source_sha256": "2e8767eeeeeb937fb093fd069dac81fa120732bf6390acf88307d1a9217925d4"
+  },
+  "no_active_worker_operations": true,
+  "definition_and_shared_resource_pins_unchanged": true,
+  "stale_default_reply_and_stop_ignored": true,
+  "daybreak": {
+    "selected_agent": "daybreak-cloud",
+    "configured_model": "gpt-6-sol",
+    "configured_effort": "high",
+    "configured_daybreak": true,
+    "effective_settings": null,
+    "block": "daybreak_execution_unverified",
+    "native_error_activity": "99d02688-dff7-4dc3-be10-8021f91e599c",
+    "worker_launched": false,
+    "definition_revision": "90fb13cf5140a6ca7b23637b5751ae65a47fac0e063ba8b0a4615a2f7b054817"
+  },
+  "reviewer": {
+    "delegatable": false,
+    "explicit_binding_check": "local linear_agent_mapping_test.exs, binding records exact settings and shared resources while preserving explicit reviewers",
+    "live_review_pipeline": "DEV-240, outside this increment"
+  },
+  "preserved_dev252": "candidate-ready/3/wait intact; original policy and resource pins retained",
+  "candidate_publication": {
+    "committed": false,
+    "pushed": false,
+    "pr_created": false,
+    "merged": false,
+    "current_boundary": "The focused regression passed locally (1 passed, 0 failed), and `git diff --check` passed. The required local commit could not begin: `git add` failed because `.git/index.lock` cannot be created (`Read-only file system`). Please make the assigned checkout's `.git` writable for the authorized local commit or advise the approved next step; publication remains disabled.",
+    "wait_id": "question-b0a41514eeb45d6661c599862cffc107"
+  },
+  "verification_limits": "Mapping acceptance is complete. The Rig candidate commit/publication and live review pipeline are separate follow-ups.",
+  "stale_native_receipts": [
+    {
+      "status": "ignored_old_assignment",
+      "timestamp": 1791727255548,
+      "kind": "prompted",
+      "session_id": "d81fd12c-6098-408a-9e17-915c39fe7343",
+      "delivery_id": "b61a826e-e3c9-4ba7-8b73-3221dccd2d77",
+      "probe_marker": true
+    },
+    {
+      "status": "ignored_old_assignment",
+      "timestamp": 1791727263077,
+      "kind": "stop",
+      "session_id": "d81fd12c-6098-408a-9e17-915c39fe7343",
+      "delivery_id": "93edab16-c637-4857-b29e-f6dd042f9970",
+      "probe_marker": false
+    }
+  ],
+  "same_release_restart_preserved_both_waits": true
+}

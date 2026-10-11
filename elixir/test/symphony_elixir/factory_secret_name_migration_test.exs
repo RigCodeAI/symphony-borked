@@ -51,6 +51,7 @@ defmodule SymphonyElixir.FactorySecretNameMigrationTest do
         "LINEAR_API_TOKEN",
         "FACTORY_LINEAR_SECRET_NAMES_JSON"
       ])
+      |> with_historical_app_server_atom()
 
     store = start_store(context.store_path)
     assert :ok = WorkstreamStore.commit(store, run, "initial-human-wait", %{"kind" => "queued"})
@@ -83,7 +84,15 @@ defmodule SymphonyElixir.FactorySecretNameMigrationTest do
       "DEV-235"
     ]
 
-    assert %{"outcome" => "committed", "run_id" => result_run_id, "environment_names" => names, "event_id" => event_id} =
+    assert %{
+             "outcome" => "committed",
+             "run_id" => result_run_id,
+             "environment_names" => names,
+             "event_id" => event_id,
+             "app_server_was_cold" => true,
+             "app_server_loaded_after_cli" => true,
+             "orchestrator_started" => false
+           } =
              invoke_helper_cli(context, cli_args)
 
     assert result_run_id == run.id
@@ -310,6 +319,42 @@ defmodule SymphonyElixir.FactorySecretNameMigrationTest do
     |> WorkstreamRun.start_stage()
   end
 
+  defp with_historical_app_server_atom(run) do
+    [wait_attempt] = run.attempts
+    previous_attempt_id = run.id <> "/implementation/1"
+    current_attempt_id = run.id <> "/" <> run.stage_id <> "/2"
+
+    previous_attempt = %{
+      id: previous_attempt_id,
+      stage: "implementation",
+      type: :agent,
+      ordinal: 1,
+      status: :completed,
+      result: %{status: :error, reason: :agent_settings_override},
+      gate: nil,
+      gate_detail: nil
+    }
+
+    previous_operation = %{
+      id: previous_attempt_id,
+      attempt_id: previous_attempt_id,
+      stage: "implementation",
+      type: :agent,
+      status: :completed,
+      worker: nil,
+      side_effect_id: previous_attempt_id,
+      transport_retries: 0
+    }
+
+    wait_attempt = %{wait_attempt | id: current_attempt_id, ordinal: 2}
+
+    run
+    |> Map.put(:attempts, [previous_attempt, wait_attempt])
+    |> Map.put(:current_attempt_id, current_attempt_id)
+    |> Map.put(:operations, %{previous_attempt_id => previous_operation})
+    |> put_in([:pending_wait, :id], current_attempt_id <> "/wait")
+  end
+
   defp start_store(path) do
     assert {:ok, store} = WorkstreamStore.start_link(path: path, owner: self())
     on_exit(fn -> if Process.alive?(store), do: GenServer.stop(store) end)
@@ -329,10 +374,19 @@ defmodule SymphonyElixir.FactorySecretNameMigrationTest do
     File.write!(driver, """
     Code.require_file(System.fetch_env!("DEV235_HELPER_PATH"))
     args = System.fetch_env!("DEV235_CLI_ARGS_JSON") |> Jason.decode!()
+    app_server_was_cold = :code.is_loaded(SymphonyElixir.Codex.AppServer) == false
 
     case SymphonyElixir.Factory.PinLinearSecretNames.run_cli(args) do
       {:ok, result} ->
-        IO.puts(Jason.encode!(%{outcome: result.outcome, run_id: result.run_id, event_id: result.event_id, environment_names: result.environment_names}))
+        IO.puts(Jason.encode!(%{
+          outcome: result.outcome,
+          run_id: result.run_id,
+          event_id: result.event_id,
+          environment_names: result.environment_names,
+          app_server_was_cold: app_server_was_cold,
+          app_server_loaded_after_cli: :code.is_loaded(SymphonyElixir.Codex.AppServer) != false,
+          orchestrator_started: not is_nil(Process.whereis(SymphonyElixir.Orchestrator))
+        }))
       {:error, reason} ->
         IO.puts(:stderr, inspect(reason))
         System.halt(1)
@@ -364,7 +418,8 @@ defmodule SymphonyElixir.FactorySecretNameMigrationTest do
 
     File.write!(reader, """
     for app <- [:yaml_elixir, :jason, :exqlite], do: {:ok, _} = Application.ensure_all_started(app)
-    _ = SymphonyElixir.WorkstreamRun.policy()
+    for module <- Application.spec(:symphony_elixir, :modules) || [], do: {:module, ^module} = Code.ensure_loaded(module)
+    true = is_nil(Process.whereis(SymphonyElixir.Orchestrator))
     {:ok, store} = SymphonyElixir.WorkstreamStore.start_link(path: System.fetch_env!("DEV235_STORE_PATH"), owner: self())
     {:ok, run} = SymphonyElixir.WorkstreamStore.fetch(store, System.fetch_env!("DEV235_RUN_ID"))
     {:ok, %{run_id: run_id, event: event}} = SymphonyElixir.WorkstreamStore.event(store, System.fetch_env!("DEV235_EVENT_ID"))

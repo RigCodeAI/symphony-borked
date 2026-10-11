@@ -145,7 +145,8 @@ It proposes exactly four automatically replicated secret containers and four
 coordinator-only access grants, with no other apply actions or secret versions.
 Four observed drift entries remain visible and produce no additional actions.
 Main review verified exact secret IDs, project, coordinator principal, replication
-and unchanged VM metadata/release-reader resources. No apply has run. The sanitized
+and unchanged VM metadata/release-reader resources. The refreshed plan was applied on 2026-10-11 with exactly those eight creates.
+The sanitized
 [secret-plan receipt](evidence/dev235/secret-plan-handoff.md) records all changes
 and private artifact hashes.
 
@@ -153,8 +154,8 @@ The preliminary runs exposed and repaired an orphan-run credential exclusion
 case, an initial-delegation boolean crash, duplicate scope invalidation and two
 new test-fixture mistakes. The final passing receipt records the tested source
 hashes and exact commands. Broad results and the bounded coordinator deployment
-are recorded separately below. These controlled checks do not prove additional
-apps are installed or live reassignment.
+are recorded separately below. These source checks do not prove live reassignment. App installation and
+secret storage have separate receipts above.
 
 Live acceptance still requires one small real Rig task through each qualified
 identity, saved requested/configured settings and shared skill hashes, an exact

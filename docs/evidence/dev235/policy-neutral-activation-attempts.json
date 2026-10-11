@@ -1,0 +1,28 @@
+{
+  "candidate": "56c7b4048ccbf003c1fde1258e844cc5cfe34040",
+  "attempts": [
+    {
+      "number": 1,
+      "outcome": "failed before mutation",
+      "reason": "coordinator_service_not_stopped",
+      "observed_stopped_state": {
+        "ActiveState": "failed",
+        "MainPID": 0,
+        "ControlPID": 0
+      },
+      "recovery": "compatible backup restored; fb0 healthy"
+    },
+    {
+      "number": 2,
+      "outcome": "failed before mutation",
+      "reason": "run_read_failed",
+      "diagnosis": "Fresh old-runtime VM safe decode lacks existing module atoms. Disposable backup copy decodes after application-module warmup without starting Orchestrator.",
+      "recovery": "compatible backup restored; fb0 healthy"
+    }
+  ],
+  "new_delegations": 0,
+  "new_worker_operations": 0,
+  "run_policy_rewritten": false,
+  "metadata_event_committed": false,
+  "immutable_releases_and_attempt_backups_retained": true
+}

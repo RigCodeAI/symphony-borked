@@ -36,11 +36,16 @@ See [the failed activation record](evidence/dev235/rejected-policy-activation.js
 The bounded helper is `factory/deploy/pin_linear_secret_names.exs`. It accepts
 only the supported service policy and exact expected run/wait fields. Run it
 with the compatible old runtime using `mix run --no-start`; it never starts an
-orchestrator. Its operator event contains names and hashes, never values.
+orchestrator. Load the existing application modules before reading safe-encoded
+terms; this initializes their known atoms without starting service processes.
+Its operator event contains names and hashes, never values.
 
 Before invoking it, the root activation wrapper must confirm the worker is idle,
 stop the coordinator, and create integrity-checked schema-3 and evidence-index
-backups. The candidate must have byte-identical runtime source. Pass the protected
+backups. If systemd retains a failed exit marker after stopping the escript,
+verify both MainPID and ControlPID are zero, then reset only that unit’s failed
+marker and require ActiveState=inactive. Never treat a running or stopping unit
+as safe for maintenance. The candidate must have byte-identical runtime source. Pass the protected
 candidate workflow so the helper derives all configured credential names. It
 commits through `WorkstreamStore` as the store owner and verifies exact readback
 plus the durable evidence outbox. Before activation, a fresh runtime that does

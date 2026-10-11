@@ -87,6 +87,7 @@ defmodule SymphonyElixir.Factory.PinLinearSecretNames do
   @doc false
   def run_cli(argv \\ System.argv()) do
     with :ok <- ensure_helper_dependencies(),
+         :ok <- ensure_application_module_atoms(),
          {:ok, options} <- parse_args(argv),
          :ok <- validate_cli_options(options),
          :ok <- service_stopped(options),
@@ -152,6 +153,35 @@ defmodule SymphonyElixir.Factory.PinLinearSecretNames do
       case Application.ensure_all_started(app) do
         {:ok, _started} -> {:cont, :ok}
         {:error, _reason} -> {:halt, {:error, :helper_dependency_unavailable}}
+      end
+    end)
+  end
+
+  defp ensure_application_module_atoms do
+    with :ok <- load_application_spec(),
+         modules when is_list(modules) and modules != [] <- Application.spec(:symphony_elixir, :modules),
+         :ok <- ensure_modules_loaded(modules) do
+      :ok
+    else
+      _ -> {:error, :application_modules_unavailable}
+    end
+  rescue
+    _ -> {:error, :application_modules_unavailable}
+  end
+
+  defp load_application_spec do
+    case Application.load(:symphony_elixir) do
+      :ok -> :ok
+      {:error, {:already_loaded, :symphony_elixir}} -> :ok
+      _ -> {:error, :application_spec_unavailable}
+    end
+  end
+
+  defp ensure_modules_loaded(modules) do
+    Enum.reduce_while(modules, :ok, fn module, :ok ->
+      case Code.ensure_loaded(module) do
+        {:module, ^module} -> {:cont, :ok}
+        _ -> {:halt, {:error, :application_module_unavailable}}
       end
     end)
   end

@@ -97,11 +97,12 @@ and requires trusted quiescence before it atomically updates the run, Linear tas
 Task/run/workspace/branch, artifacts, waits, questions and repair counters remain intact;
 old app/session replies and stops cannot affect the new assignment. Unknown worker liveness
 blocks replacement. Unsupported Daybreak blocks visibly without a fallback. Service secret
-references from every route are excluded from launches. Before checking an existing ready or
-human-wait run with confirmed quiescent operations, the coordinator durably adds newly configured
-credential environment names to its exclusions without changing its wait or definition. Failed
-persistence leaves stage authorization unavailable; active or uncertain runs with missing
-exclusions block. Additional app installation and live acceptance are separate prerequisites.
+references from every route are excluded from launches. Existing runs lacking newly configured
+credential exclusions block before reuse. An operator may add exclusion names through the trusted
+store only while dispatch is stopped and operations are confirmed quiescent, preserving the
+pinned service policy, definition, wait and attempts. Runtime policy changes still block recovery;
+credential maintenance does not authorize rewriting those pins. Additional app installation and
+live acceptance are separate prerequisites.
 See the [integration contract and verification](docs/dev-235-agent-mapping.md) and
 [exact administrator setup plan](docs/dev-235-app-setup.md).
 

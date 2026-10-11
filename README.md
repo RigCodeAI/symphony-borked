@@ -90,8 +90,8 @@ retention and the current acceptance boundary.
 
 DEV-235 adds [named cloud-agent routing and safe reassignment](docs/dev-235-agent-mapping.md)
 to the existing coordinator. Both additional apps are installed with DEV-only access;
-route activation and native multi-app acceptance remain pending. Quiescent runs preserve
-their human waits while durably extending credential exclusions for the new apps.
+route activation and native multi-app acceptance remain pending. Existing human waits
+require policy-compatible credential-exclusion maintenance before activation.
 See the [administrator setup plan](docs/dev-235-app-setup.md).
 
 Use live ticket dependencies to schedule work. The local files

@@ -13,6 +13,11 @@ must remain separate from DEV-235 acceptance. The new configuration needs a
 verified additive credential-exclusion update before activation; the earlier
 `3667340` activation recorded in the deployment boundary is historical.
 
+The `09706e8` candidate changed the executor policy and blocked DEV-252 on
+recovery. It was rejected and the compatible release plus stopped schema-3
+backups were restored. Before/after task and evidence snapshots match exactly;
+no new agent was dispatched. See the [failed activation and recovery](evidence/dev235/rejected-policy-activation.json).
+
 Google Cloud CLI sign-in as `adam@rig.ai` succeeded on 2026-10-11. A refreshed
 full Terraform plan applied only four secret containers and four coordinator
 access grants, preserving current VM metadata and release-reader conditions.
@@ -64,10 +69,10 @@ explicit reviewer stages unchanged. Enqueue uses the same bound digest. Ordinary
 resume executes the saved definition without rereading files. All configured
 service credential/signing names are pinned in execution context and stripped
 from local and remote agent launches, including shell-profile reintroduction.
-Before its next scope check, an existing ready or human-wait run with confirmed
-quiescent operations durably adds newly configured credential names to its
-exclusions. Its wait, workspace and definition stay pinned. A failed write leaves
-authorization unavailable; active or uncertain runs with missing exclusions block.
+Existing runs missing configured credential names block before reuse. Operator
+maintenance must use the trusted store while dispatch is stopped and operations
+are confirmed quiescent, adding only exclusion names. Policy, wait, workspace and
+definition stay pinned. A changed runtime policy remains an explicit blocker.
 Check processes retain their existing environment allowlist.
 
 Deployment accepts Default plus complete optional High Effort/Daybreak secret

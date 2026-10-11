@@ -19,6 +19,36 @@ See [installation evidence](evidence/dev235/app-installation.json),
 [container apply](evidence/dev235/secret-container-apply.json) and
 [version metadata](evidence/dev235/secret-version-metadata.json).
 
+## Existing-run preservation
+
+The active release hashes lifecycle and executor source into each run’s pinned
+policy. Deploying changed runtime code blocks a recovered nonterminal run even
+when its wait remains intact. The rejected `09706e8` activation was restored to
+`fb0cad3` with its stopped schema-3 backups; DEV-252’s task and evidence match
+exactly. No new delegation or worker operation occurred, and its native session
+has no new activity from that activation.
+
+Additional routes require a policy-neutral release and a stopped-service,
+metadata-only exclusion update through the trusted store. Preserve policy,
+status, wait, attempts and definition; never rewrite them to pass recovery.
+See [the failed activation record](evidence/dev235/rejected-policy-activation.json).
+
+The bounded helper is `factory/deploy/pin_linear_secret_names.exs`. It accepts
+only the supported service policy and exact expected run/wait fields. Run it
+with the compatible old runtime using `mix run --no-start`; it never starts an
+orchestrator. Its operator event contains names and hashes, never values.
+
+Before invoking it, the root activation wrapper must confirm the worker is idle,
+stop the coordinator, and create integrity-checked schema-3 and evidence-index
+backups. The candidate must have byte-identical runtime source. Pass the protected
+candidate workflow so the helper derives all configured credential names. It
+commits through `WorkstreamStore` as the store owner and verifies exact readback
+plus the durable evidence outbox. Before activation, a fresh runtime that does
+not load the helper must decode the stored event and prove the whole run differs
+only in the exclusion names. The restarted service drains that journal.
+If maintenance or activation fails, restore the compatible stopped backup before
+restarting; preserve the failed candidate and receipt.
+
 ## Exact additions
 
 Install **High Effort Cloud Agent** and **Daybreak Cloud Agent** in the existing
@@ -122,8 +152,9 @@ Candidate publication stays disabled; the existing `.git` sandbox boundary is a
 separate trusted-commit follow-up.
 
 Approval covers these two named app installations and this four-secret/scoped-IAM
-plan. Application records exist; installation, secrets and access grants are still
-pending. See [current evidence](evidence/dev235/deployment-boundary.json).
+plan. Installation, secret versions and access grants are complete. Route activation
+and native acceptance remain pending. See the installation and preservation
+receipts linked above.
 
 ## Disposable native task draft
 

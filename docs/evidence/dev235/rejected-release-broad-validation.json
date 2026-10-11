@@ -1,0 +1,30 @@
+{
+  "tested_source": "09706e8200da945a8f35c4ad5a59ebafc349dc4c",
+  "result": "broad checks non-green; rejected live release",
+  "make_all": {
+    "exit_code": 2,
+    "stopped_at": "lint",
+    "summary": [
+      "3352 mods/funs, found 150 refactoring opportunities, 132 code readability issues, 17 software design suggestions."
+    ]
+  },
+  "coverage": {
+    "exit_code": 3,
+    "tests": 582,
+    "failures": 0,
+    "skipped": 6,
+    "excluded": 10,
+    "coverage_percent": 79.59,
+    "threshold_percent": 100
+  },
+  "dialyzer": {
+    "exit_code": 2,
+    "warnings_emitted": true
+  },
+  "logs_sha256": {
+    "broad-ci.log": "ae22539870f2cafbf6f769a07018d81cf0414b86e94c0199dff1e06d725c4f89",
+    "broad-coverage.log": "cc30233189591c36e39de5a5542fb9c02932295c640ab40d06e4ba0b19958390",
+    "broad-dialyzer.log": "eef1abf9aed7a5e0e0bab8f486f4024e687f0fc1f2f8522f5a548a9eef01d79f"
+  },
+  "limitation": "Broad checks do not establish native policy-compatible recovery. Changed runtime code was rolled back after that path failed."
+}

@@ -19,16 +19,12 @@ defmodule SymphonyElixir.FactorySecretNameMigrationTest do
     root = Path.join(System.tmp_dir!(), "secret-name-migration-#{System.unique_integer([:positive])}")
     File.mkdir_p!(root)
 
-    previous_workflow_path = Application.get_env(:symphony_elixir, :workflow_file_path)
     previous_secret_names = System.get_env("FACTORY_LINEAR_SECRET_NAMES_JSON")
     previous_path = System.get_env("PATH")
 
     on_exit(fn ->
-      if previous_workflow_path do
-        Workflow.set_workflow_file_path(previous_workflow_path)
-      else
-        Workflow.clear_workflow_file_path()
-      end
+      Workflow.set_workflow_file_path(Path.expand("../fixtures/startup_workflow.md", __DIR__))
+      assert :ok = WorkflowStore.force_reload()
 
       restore_env("FACTORY_LINEAR_SECRET_NAMES_JSON", previous_secret_names)
       restore_env("PATH", previous_path)

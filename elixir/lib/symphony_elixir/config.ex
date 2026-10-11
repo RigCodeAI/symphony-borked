@@ -82,6 +82,17 @@ defmodule SymphonyElixir.Config do
   @spec linear_webhook_secret(map()) :: String.t() | nil
   def linear_webhook_secret(config), do: System.get_env(config["webhook_secret_env"])
 
+  @spec evidence() :: :disabled | {:ok, map()} | {:error, term()}
+  def evidence do
+    with {:ok, workflow} <- Workflow.current() do
+      case Map.get(workflow.config, "evidence", %{}) do
+        config when config == %{} -> :disabled
+        config when is_map(config) -> SymphonyElixir.Evidence.validate_config(config)
+        _ -> {:error, :invalid_evidence_config}
+      end
+    end
+  end
+
   @doc "Resolves signing secrets for the configured cloud apps without exposing values in routing records."
   @spec linear_webhook_secrets(map()) :: {:ok, map()} | {:error, atom()}
   def linear_webhook_secrets(config) do

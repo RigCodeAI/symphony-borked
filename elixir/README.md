@@ -320,6 +320,13 @@ The observability UI now runs on a minimal Phoenix stack:
 - Phoenix dependency static assets for the LiveView client bootstrap
 - Tracker issue identifiers link to the tracker-provided URL when it uses `http` or `https`
 
+Optional `evidence` configuration adds signed-IAP `/tasks` HTML pages and immutable
+artifact downloads. The SQLite index and redacted bundles live outside task
+workspaces; exact root-owned GCS readback receipts gate archival. See
+[private task evidence](../docs/private-evidence.md) for configuration, reassignment,
+backup, integrated durable hooks and pending live checks. Omitting the option preserves
+existing workflow behavior.
+
 ## Project Layout
 
 - `lib/`: application code and Mix tasks

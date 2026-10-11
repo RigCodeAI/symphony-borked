@@ -10,10 +10,14 @@ defmodule SymphonyElixir.WorkstreamStore do
   use GenServer
 
   alias Exqlite.Sqlite3
+  alias SymphonyElixir.{Config, Evidence}
 
   @busy_timeout_ms 100
   @directory_mode 0o700
   @file_mode 0o600
+  @evidence_payload_limit 10 * 1024 * 1024
+  @evidence_entry_limit 32 * 1024 * 1024
+  @evidence_event_id_limit 1_024
 
   @migration_v1 """
   CREATE TABLE runs (
@@ -50,7 +54,16 @@ defmodule SymphonyElixir.WorkstreamStore do
   );
   """
 
-  @migrations [{1, @migration_v1}, {2, @migration_v2}]
+  @migration_v3 """
+  CREATE TABLE evidence_outbox (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL UNIQUE,
+    snapshot BLOB NOT NULL,
+    event BLOB NOT NULL
+  );
+  """
+
+  @migrations [{1, @migration_v1}, {2, @migration_v2}, {3, @migration_v3}]
 
   defmodule State do
     @moduledoc false
@@ -86,6 +99,26 @@ defmodule SymphonyElixir.WorkstreamStore do
   def event(server, event_id) when is_binary(event_id) and event_id != "", do: safe_call(server, {:event, event_id})
 
   def event(_server, _event_id), do: {:error, :invalid_event_id}
+
+  @doc """
+  Returns redacted evidence awaiting durable evidence-index persistence, in commit order.
+  Only the store owner may read it.
+  """
+  @spec pending_evidence(GenServer.server()) ::
+          {:ok, [%{event_id: String.t(), snapshot: map(), event: map()}]} | {:error, term()}
+  def pending_evidence(server), do: safe_call(server, :pending_evidence)
+
+  @doc """
+  Acknowledges one evidence item after the evidence index has durably accepted it.
+  Only the store owner may acknowledge it.
+  """
+  @spec acknowledge_evidence(GenServer.server(), String.t()) :: :ok | {:error, term()}
+  def acknowledge_evidence(server, event_id)
+      when is_binary(event_id) and event_id != "" and byte_size(event_id) <= @evidence_event_id_limit do
+    safe_call(server, {:acknowledge_evidence, event_id})
+  end
+
+  def acknowledge_evidence(_server, _event_id), do: {:error, :invalid_evidence_event_id}
 
   @doc "Atomically records a run snapshot, an input event, stage attempts, and outgoing operations."
   @spec commit(GenServer.server(), run_map(), String.t(), map()) ::
@@ -212,6 +245,36 @@ defmodule SymphonyElixir.WorkstreamStore do
 
         {:error, _reason} = error ->
           error
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(:pending_evidence, {caller, _tag}, %State{db: db, owner: owner} = state) do
+    reply =
+      if caller == owner do
+        with {:ok, rows} <-
+               query(db, "SELECT event_id, snapshot, event FROM evidence_outbox ORDER BY seq"),
+             {:ok, entries} <- decode_evidence_rows(rows, []) do
+          {:ok, entries}
+        end
+      else
+        {:error, :not_owner}
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:acknowledge_evidence, event_id},
+        {caller, _tag},
+        %State{db: db, owner: owner} = state
+      ) do
+    reply =
+      if caller == owner do
+        execute_prepared(db, "DELETE FROM evidence_outbox WHERE event_id = ?1", [event_id])
+      else
+        {:error, :not_owner}
       end
 
     {:reply, reply, state}
@@ -939,15 +1002,93 @@ defmodule SymphonyElixir.WorkstreamStore do
     attempts = field(run_map, :attempts)
     operations = field(run_map, :operations)
 
-    with {:ok, run_blob} <- encode_term(run_map),
+    with {:ok, evidence_payload} <- journal_evidence(run_map, event_map, event_id),
+         {:ok, run_blob} <- encode_term(run_map),
          {:ok, event_blob} <- encode_term(event_map),
          :ok <- upsert_run(db, run_id, task_id, run_blob),
          :ok <- upsert_attempts(db, run_id, attempts),
          :ok <- upsert_operations(db, run_id, operations),
-         :ok <- insert_event(db, event_id, run_id, event_blob) do
+         :ok <- insert_event(db, event_id, run_id, event_blob),
+         :ok <- insert_evidence_outbox(db, event_id, evidence_payload) do
       :ok
     end
   end
+
+  defp journal_evidence(run_map, event_map, event_id) do
+    case Config.evidence() do
+      :disabled ->
+        {:ok, :disabled}
+
+      {:ok, _config} when byte_size(event_id) <= @evidence_event_id_limit ->
+        try do
+          case Evidence.journal(run_map, event_map) do
+            %{snapshot: snapshot, event: event} -> encode_evidence_payload(snapshot, event)
+            _ -> {:error, :invalid_evidence_payload}
+          end
+        rescue
+          _error -> {:error, :evidence_journal_failed}
+        catch
+          _kind, _reason -> {:error, :evidence_journal_failed}
+        end
+
+      {:ok, _config} ->
+        {:error, :invalid_evidence_payload}
+
+      {:error, _reason} ->
+        {:error, :evidence_configuration_unavailable}
+    end
+  rescue
+    _error -> {:error, :evidence_configuration_unavailable}
+  catch
+    _kind, _reason -> {:error, :evidence_configuration_unavailable}
+  end
+
+  defp encode_evidence_payload(snapshot, event) when is_map(snapshot) and is_map(event) do
+    if safe_persistent_term?(snapshot) and safe_persistent_term?(event) do
+      with {:ok, snapshot_blob} <- encode_term(snapshot),
+           {:ok, event_blob} <- encode_term(event),
+           true <- byte_size(snapshot_blob) <= @evidence_payload_limit,
+           true <- byte_size(event_blob) <= @evidence_payload_limit,
+           true <- byte_size(snapshot_blob) + byte_size(event_blob) <= @evidence_entry_limit do
+        {:ok, {:enabled, snapshot_blob, event_blob}}
+      else
+        _ -> {:error, :invalid_evidence_payload}
+      end
+    else
+      {:error, :invalid_evidence_payload}
+    end
+  end
+
+  defp encode_evidence_payload(_snapshot, _event), do: {:error, :invalid_evidence_payload}
+
+  defp insert_evidence_outbox(_db, _event_id, :disabled), do: :ok
+
+  defp insert_evidence_outbox(db, event_id, {:enabled, snapshot_blob, event_blob}) do
+    execute_prepared(
+      db,
+      "INSERT INTO evidence_outbox (event_id, snapshot, event) VALUES (?1, ?2, ?3)",
+      [event_id, {:blob, snapshot_blob}, {:blob, event_blob}]
+    )
+  end
+
+  defp decode_evidence_rows([], acc), do: {:ok, Enum.reverse(acc)}
+
+  defp decode_evidence_rows([[event_id, snapshot_blob, event_blob] | rest], acc)
+       when is_binary(event_id) and byte_size(event_id) in 1..@evidence_event_id_limit and
+              is_binary(snapshot_blob) and is_binary(event_blob) do
+    with true <- byte_size(snapshot_blob) <= @evidence_payload_limit,
+         true <- byte_size(event_blob) <= @evidence_payload_limit,
+         true <- byte_size(snapshot_blob) + byte_size(event_blob) <= @evidence_entry_limit,
+         {:ok, snapshot} when is_map(snapshot) <- decode_term(snapshot_blob),
+         {:ok, event} when is_map(event) <- decode_term(event_blob),
+         true <- safe_persistent_term?(snapshot) and safe_persistent_term?(event) do
+      decode_evidence_rows(rest, [%{event_id: event_id, snapshot: snapshot, event: event} | acc])
+    else
+      _ -> {:error, :invalid_evidence_outbox_row}
+    end
+  end
+
+  defp decode_evidence_rows(_rows, _acc), do: {:error, :invalid_evidence_outbox_row}
 
   defp upsert_run(db, run_id, task_id, payload) do
     execute_prepared(

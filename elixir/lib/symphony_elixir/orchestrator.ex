@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace, WorkstreamRun, WorkstreamRunner, WorkstreamStore}
+  alias SymphonyElixir.{AgentRunner, Config, Evidence, StatusDashboard, Tracker, Workspace, WorkstreamRun, WorkstreamRunner, WorkstreamStore}
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.Linear.Coordinator, as: LinearCoordinator
 
@@ -2222,6 +2222,11 @@ defmodule SymphonyElixir.Orchestrator do
 
           with {:ok, store} <- WorkstreamStore.start_link(path: path, owner: self()),
                {:ok, runs} <- WorkstreamStore.load(store) do
+            Enum.each(runs, fn run ->
+              if evidence_outside_workspace(run.workspace) != :ok, do: exit(:evidence_overlaps_worker_workspace)
+            end)
+
+            :ok = Evidence.recover!(store, runs)
             {:ok, store_path} = SymphonyElixir.PathSafety.canonicalize(path)
             durable = %{store: store, store_path: store_path, runs: Map.new(runs, &{&1.id, &1}), workers: %{}, cancellations: %{}, opts: opts}
             {:ok, %{state | workstreams: durable, polling_enabled: false}}
@@ -2239,9 +2244,15 @@ defmodule SymphonyElixir.Orchestrator do
     event = %{kind: :queued, task_id: task_id, fingerprint: workstream_fingerprint({task_id, path, inputs, opts})}
 
     case check_workstream_event(state, event_id, event) do
-      {:duplicate, id} -> {:ok, id, state}
-      {:error, _} = error -> error
-      :new -> queue_new_workstream_event(state, event_id, task_id, path, inputs, opts, event)
+      {:duplicate, id} ->
+        :ok = Evidence.sync!(state.workstreams.store)
+        {:ok, id, state}
+
+      {:error, _} = error ->
+        error
+
+      :new ->
+        queue_new_workstream_event(state, event_id, task_id, path, inputs, opts, event)
     end
   end
 
@@ -2252,9 +2263,16 @@ defmodule SymphonyElixir.Orchestrator do
          true <- is_binary(task_id) and task_id != "",
          {:ok, run} <- existing_or_new_workstream(state, existing, task_id, path, inputs, opts) do
       case WorkstreamStore.commit(state.workstreams.store, run, event_id, event) do
-        :ok -> {:ok, run.id, put_in(state.workstreams.runs[run.id], run)}
-        {:duplicate, id} -> {:ok, id, state}
-        {:error, reason} -> {:error, reason}
+        :ok ->
+          :ok = Evidence.sync!(state.workstreams.store)
+          {:ok, run.id, put_in(state.workstreams.runs[run.id], run)}
+
+        {:duplicate, id} ->
+          :ok = Evidence.sync!(state.workstreams.store)
+          {:ok, id, state}
+
+        {:error, reason} ->
+          {:error, reason}
       end
     else
       false -> {:error, :invalid_event_or_task_identity}
@@ -2330,6 +2348,7 @@ defmodule SymphonyElixir.Orchestrator do
          {:ok, definition, workspace} <- WorkstreamRunner.prepare(path, inputs, opts),
          :ok <- check_workstream_definition(definition, opts),
          :ok <- database_outside_workspace(state.workstreams.store_path, workspace),
+         :ok <- evidence_outside_workspace(workspace),
          false <- Enum.any?(state.workstreams.runs, fn {_id, run} -> run.workspace == workspace end),
          {:ok, root} <- SymphonyElixir.PathSafety.canonicalize(opts[:workspace_root]),
          execution_opts = Keyword.put(opts, :workspace_root, root),
@@ -2351,17 +2370,39 @@ defmodule SymphonyElixir.Orchestrator do
     if database == workspace or String.starts_with?(database, workspace <> "/"), do: {:error, :database_overlaps_worker_workspace}, else: :ok
   end
 
+  defp evidence_outside_workspace(workspace) do
+    case Config.evidence() do
+      :disabled ->
+        :ok
+
+      {:ok, config} ->
+        with {:ok, root} <- SymphonyElixir.PathSafety.canonicalize(config["root"]) do
+          if root == workspace or String.starts_with?(root, workspace <> "/") or String.starts_with?(workspace, root <> "/"), do: {:error, :evidence_overlaps_worker_workspace}, else: :ok
+        end
+
+      _ ->
+        {:error, :private_evidence_config_unavailable}
+    end
+  end
+
   defp commit_workstream(state, run, event_id, event) do
     send(self(), :linear_process)
 
     case WorkstreamStore.commit(state.workstreams.store, run, event_id, event) do
       :ok ->
+        :ok = Evidence.sync!(state.workstreams.store)
+        :ok = Evidence.retain_validation!(run)
         put_in(state.workstreams.runs[run.id], run)
 
       {:duplicate, id} when id == run.id ->
         case {WorkstreamStore.event(state.workstreams.store, event_id), WorkstreamStore.fetch(state.workstreams.store, id)} do
-          {{:ok, %{event: ^event}}, {:ok, stored}} -> put_in(state.workstreams.runs[id], stored)
-          _ -> exit(:durable_workstream_event_conflict)
+          {{:ok, %{event: ^event}}, {:ok, stored}} ->
+            :ok = Evidence.sync!(state.workstreams.store)
+            :ok = Evidence.retain_validation!(stored)
+            put_in(state.workstreams.runs[id], stored)
+
+          _ ->
+            exit(:durable_workstream_event_conflict)
         end
 
       {:duplicate, _id} ->

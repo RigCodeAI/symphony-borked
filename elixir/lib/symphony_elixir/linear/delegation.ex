@@ -173,6 +173,7 @@ defmodule SymphonyElixir.Linear.Delegation do
 
   defp acknowledge_session(task, config) do
     body = "Received delegated Rig work. Run #{task.run_id || "pending"}; publication is disabled."
+    body = if task[:evidence_url], do: body <> "\n\nPrivate conversation and test evidence: #{task.evidence_url}", else: body
     Client.acknowledge_agent_session(task.session_id, task.activity_id, body, client_opts(config, task.issue_id))
   end
 

@@ -14,6 +14,10 @@ defmodule SymphonyElixirWeb.Router do
     plug(:put_secure_browser_headers)
   end
 
+  pipeline :evidence do
+    plug(SymphonyElixirWeb.EvidenceAccess)
+  end
+
   scope "/", SymphonyElixirWeb do
     get("/dashboard.css", StaticAssetController, :dashboard_css)
     get("/favicon.png", StaticAssetController, :favicon)
@@ -26,6 +30,13 @@ defmodule SymphonyElixirWeb.Router do
     pipe_through(:browser)
 
     live("/", DashboardLive, :index)
+  end
+
+  scope "/tasks", SymphonyElixirWeb do
+    pipe_through([:browser, :evidence])
+    get("/", EvidenceController, :index)
+    get("/:task_key", EvidenceController, :show)
+    get("/:task_key/artifacts/:revision/:name", EvidenceController, :artifact)
   end
 
   scope "/", SymphonyElixirWeb do

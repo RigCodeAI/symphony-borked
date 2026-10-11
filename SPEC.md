@@ -148,6 +148,40 @@ proofs. Conversation resume and worker broker restart remain unqualified. See th
 [contained worker operations](docs/contained-worker-operations.md) and its
 [retained live evidence](docs/evidence/dev-233/README.md#live-contained-worker-qualification-2026-10-10).
 
+### Opt-in private task evidence
+
+`evidence` config adds a coordinator-owned SQLite evidence index and immutable
+archive outbox outside disposable workspaces. Stable task URLs group retained
+runs, stage attempts, retries, questions, parent/child links and validation
+artifacts. Snapshot events retain original redacted state and pinned definition
+content. Pins include the selected agent and stage-to-agent bindings. A
+definition/agent change on the same run requires an explicit durable reassignment
+matching prior/current pins; silent mutation rejects. Task and
+policy identity remain fixed. Old bundles remain immutable.
+
+Observable completed messages/tool events are allowlisted and credentials are
+redacted before persistence. Reasoning/raw protocol fields are omitted. Every
+viewer/artifact request requires a verified signed IAP JWT with the configured
+audience and domain/email allowlist; unsigned identity headers never authorize
+access. A root uploader validates manifests and object bytes after immutable GCS
+upload. Only an exact verified receipt for the current bundle can satisfy the
+evidence part of cleanup; upload failure cannot qualify. GitHub merge and worker
+termination remain separate prerequisites. Disabled config preserves upstream
+workflows. Enabled unavailable storage fails visibly.
+
+Workstream schema v3 journals redacted snapshots in the run commit transaction.
+The coordinator drains the outbox before dispatch/acknowledgement and on restart;
+failed replay blocks advancement. Retained pre-evidence runs receive an explicit
+recovered baseline, while conflicting indexed snapshots fail startup. Durable
+agent callbacks persist observable events and fail visibly on capture failure.
+Managed native Linear activities retain one stable task URL. Authenticated
+validation bytes are copied per attempt, excluding producer keys. These shared
+hooks are locally tested against merged main; live qualification is pending.
+Older schema-v2 releases require a compatible upgrade or stopped pre-migration
+backup restore; no automatic database downgrade is provided. See
+[private evidence](docs/private-evidence.md) and its
+[acceptance record](docs/evidence/dev-237/acceptance.md).
+
 Status: Draft v1 (language-agnostic)
 
 Purpose: Define a service that orchestrates coding agents to get project work done.

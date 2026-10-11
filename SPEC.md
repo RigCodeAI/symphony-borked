@@ -84,6 +84,28 @@ an unknown outcome remains visible and reserves capacity. Local controlled tests
 that a remote process tree stopped or that a Linear app is installed. See
 [configuration and live acceptance limits](docs/linear-delegation.md).
 
+DEV-235 extends native intake with optional `cloud_agents` entries for the two additional
+named cloud apps, sharing the backend, worker pool and workstream. Each identity has an
+exact organization/app-user/client tuple and a distinct signing secret; a valid signature
+for one app cannot authenticate another. Review definitions cannot be configured as apps.
+The selected cloud definition is bound before workspace/policy pinning and its revision,
+requested settings and shared resource hashes remain on the durable run through resume.
+
+A newer authenticated created event for a different configured cloud agent requests a
+recorded reassignment. The coordinator revokes stage authorization, stops the old operation,
+and requires trusted quiescence before it atomically updates the run, Linear task and event.
+Task/run/workspace/branch, artifacts, waits, questions and repair counters remain intact;
+old app/session replies and stops cannot affect the new assignment. Unknown worker liveness
+blocks replacement. Unsupported Daybreak blocks visibly without a fallback. Service secret
+references from every route are excluded from launches. Existing runs lacking newly configured
+credential exclusions block before reuse. An operator may add exclusion names through the trusted
+store only while dispatch is stopped and operations are confirmed quiescent, preserving the
+pinned service policy, definition, wait and attempts. Runtime policy changes still block recovery;
+credential maintenance does not authorize rewriting those pins. Additional app installation and
+live acceptance are separate prerequisites.
+See the [integration contract and verification](docs/dev-235-agent-mapping.md) and
+[exact administrator setup plan](docs/dev-235-app-setup.md).
+
 A held executor can register its external operation identity through the current worker.
 The coordinator commits that identity before acknowledging release and preserves it across
 restart. The provisional local Linux adapter fences machine, OS boot, process group and
@@ -129,6 +151,40 @@ proofs. Conversation resume and worker broker restart remain unqualified. See th
 [restart repair acceptance](docs/evidence/dev-233/restart-repair-acceptance.md),
 [contained worker operations](docs/contained-worker-operations.md) and its
 [retained live evidence](docs/evidence/dev-233/README.md#live-contained-worker-qualification-2026-10-10).
+
+### Opt-in private task evidence
+
+`evidence` config adds a coordinator-owned SQLite evidence index and immutable
+archive outbox outside disposable workspaces. Stable task URLs group retained
+runs, stage attempts, retries, questions, parent/child links and validation
+artifacts. Snapshot events retain original redacted state and pinned definition
+content. Pins include the selected agent and stage-to-agent bindings. A
+definition/agent change on the same run requires an explicit durable reassignment
+matching prior/current pins; silent mutation rejects. Task and
+policy identity remain fixed. Old bundles remain immutable.
+
+Observable completed messages/tool events are allowlisted and credentials are
+redacted before persistence. Reasoning/raw protocol fields are omitted. Every
+viewer/artifact request requires a verified signed IAP JWT with the configured
+audience and domain/email allowlist; unsigned identity headers never authorize
+access. A root uploader validates manifests and object bytes after immutable GCS
+upload. Only an exact verified receipt for the current bundle can satisfy the
+evidence part of cleanup; upload failure cannot qualify. GitHub merge and worker
+termination remain separate prerequisites. Disabled config preserves upstream
+workflows. Enabled unavailable storage fails visibly.
+
+Workstream schema v3 journals redacted snapshots in the run commit transaction.
+The coordinator drains the outbox before dispatch/acknowledgement and on restart;
+failed replay blocks advancement. Retained pre-evidence runs receive an explicit
+recovered baseline, while conflicting indexed snapshots fail startup. Durable
+agent callbacks persist observable events and fail visibly on capture failure.
+Managed native Linear activities retain one stable task URL. Authenticated
+validation bytes are copied per attempt, excluding producer keys. These shared
+hooks are locally tested against merged main; live qualification is pending.
+Older schema-v2 releases require a compatible upgrade or stopped pre-migration
+backup restore; no automatic database downgrade is provided. See
+[private evidence](docs/private-evidence.md) and its
+[acceptance record](docs/evidence/dev-237/acceptance.md).
 
 Status: Draft v1 (language-agnostic)
 

@@ -320,6 +320,13 @@ The observability UI now runs on a minimal Phoenix stack:
 - Phoenix dependency static assets for the LiveView client bootstrap
 - Tracker issue identifiers link to the tracker-provided URL when it uses `http` or `https`
 
+Optional `evidence` configuration adds signed-IAP `/tasks` HTML pages and immutable
+artifact downloads. The SQLite index and redacted bundles live outside task
+workspaces; exact root-owned GCS readback receipts gate archival. See
+[private task evidence](../docs/private-evidence.md) for configuration, reassignment,
+backup, integrated durable hooks and pending live checks. Omitting the option preserves
+existing workflow behavior.
+
 ## Project Layout
 
 - `lib/`: application code and Mix tasks
@@ -443,6 +450,17 @@ Use `client_secret_env` for coordinator-only app client credentials with fixed
 `read,write,app:assignable` scopes. Tokens are kept in memory per issue run and renewed
 on expiry or one 401. The legacy `token_env` remains supported; configure exactly one.
 See [app setup and deployment](../docs/linear-delegation.md#linear-app-setup).
+
+Optional `cloud_agents` entries extend the same coordinator with exact identity and
+per-app signature checks, pinned cloud selection and safe recorded reassignment.
+`Config.linear_webhook_secrets/1` resolves signing references; all configured app
+credentials are excluded from worker launches. Existing runs missing new credential names
+block until policy-compatible operator maintenance adds them through the trusted store,
+with dispatch stopped and operations confirmed quiescent. A reassignment waits for confirmed
+termination, then commits run/task/event together. Internal reviewers remain explicit
+workstream references. See [DEV-235 configuration and verification](../docs/dev-235-agent-mapping.md)
+and the [additional-app setup plan](../docs/dev-235-app-setup.md). Native acceptance of
+the two additional identities remains pending route activation.
 
 An optional `linear_delegation` front-matter map starts the same coordinator in durable mode
 and enables `POST /hooks/linear` when the HTTP server is enabled. It verifies the original

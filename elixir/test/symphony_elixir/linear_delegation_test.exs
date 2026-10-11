@@ -21,7 +21,7 @@ defmodule SymphonyElixir.LinearDelegationTest do
 
     File.write!(Path.join(root, "default-cloud.yaml"), """
     version: 1
-    name: default-cloud
+    name: DefaultCloud
     model: gpt-6-luna
     reasoning_effort: medium
     daybreak: false
@@ -455,30 +455,27 @@ defmodule SymphonyElixir.LinearDelegationTest do
 
   test "an unknown configured agent blocks with its routing diagnostic before dispatch", c do
     parent = self()
-    config = Map.put(c.config, "agent_id", "missing-agent")
+    config = Map.put(c.config, "agent_id", "high-effort-cloud")
     runtime = runtime(c, linear_delegation: config, stage_executor: controlled_executor(parent))
 
     assert :ok = Orchestrator.receive_linear_event(runtime.coordinator, event(c, :created, "invalid-agent"))
     task = wait_linear_task(runtime, c.issue_id, &(&1.status == :blocked))
 
     assert task.run_id == nil
-    assert task.error =~ "unknown_workstream_agent_or_workspace"
+    assert task.error =~ "unknown_cloud_agent_definition"
     assert Task.Supervisor.children(runtime.tasks) == []
     assert map_size(:sys.get_state(runtime.coordinator).workstreams.runs) == 0
     refute_receive {:stage_started, _, _, _}, 100
   end
 
-  test "custom service credential references block before an agent can inherit them", c do
-    parent = self()
+  test "custom service credential references are pinned for environment exclusion", c do
     config = Map.put(c.config, "token_env", "FACTORY_APP_TOKEN")
-    runtime = runtime(c, linear_delegation: config, stage_executor: controlled_executor(parent))
-
-    assert :ok = Orchestrator.receive_linear_event(runtime.coordinator, event(c, :created, "unsafe-credential-name"))
-    task = wait_linear_task(runtime, c.issue_id, &(&1.status == :blocked))
-    assert task.error =~ "credential_environment_isolation_unavailable"
-    assert task.run_id == nil
-    assert Task.Supervisor.children(runtime.tasks) == []
-    refute_receive {:stage_started, _, _, _}, 100
+    issue = issue(c)
+    assert {:ok, prepared} = SymphonyElixir.Linear.Delegation.prepare(issue, config, linear_readiness: fn _, _ -> :ok end, linear_execution_control: fn _, _ -> :ok end)
+    assert prepared.execution[:secret_environment_names] == ["LINEAR_API_TOKEN", "FACTORY_APP_TOKEN", "FACTORY_LINEAR_SECRET_NAMES_JSON"]
+    assert prepared.execution[:cloud_agent_id] == "default-cloud"
+    assert {:ok, definition, _} = WorkstreamRunner.prepare(prepared.path, prepared.inputs, prepared.execution)
+    assert definition.agent_selection.name == "DefaultCloud"
   end
 
   test "unqualified readiness blocks before acknowledgement and stage execution", c do

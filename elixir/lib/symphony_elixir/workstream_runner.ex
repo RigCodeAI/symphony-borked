@@ -9,7 +9,7 @@ defmodule SymphonyElixir.WorkstreamRunner do
   """
 
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{AgentReadiness, CandidateGit, PathSafety, Validation, ValidationPolicy, WorkerOperation, Workstream, WorkstreamCommand}
+  alias SymphonyElixir.{AgentReadiness, CandidateGit, Config, Evidence, PathSafety, Validation, ValidationPolicy, WorkerOperation, Workstream, WorkstreamCommand}
 
   @source_root Path.expand("../../..", __DIR__)
 
@@ -64,12 +64,16 @@ defmodule SymphonyElixir.WorkstreamRunner do
   def prepare(path, inputs, opts) do
     with :ok <- subscription_environment(),
          {:ok, definition} <- Workstream.load(path, inputs),
+         {:ok, definition} <- bind_cloud_agent(definition, opts[:cloud_agent_id]),
          {:ok, workspace} <- workspace(opts, definition),
          :ok <- dedicated_clone(workspace),
          {:ok, definition} <- pin_definition_validation(opts, workspace, definition) do
       {:ok, definition, workspace}
     end
   end
+
+  defp bind_cloud_agent(definition, nil), do: {:ok, definition}
+  defp bind_cloud_agent(definition, agent_id), do: SymphonyElixir.Linear.AgentMapping.bind(definition, agent_id)
 
   @doc """
   Runs a validated local workstream synchronously until it completes, blocks, or reaches
@@ -625,12 +629,24 @@ defmodule SymphonyElixir.WorkstreamRunner do
           "networkAccess" => false
         }
       },
-      on_message: fn _event -> :ok end
+      on_message: evidence_message_handler(state)
     ]
 
     runner = Keyword.get(opts, :agent_executor, &AppServer.run/4)
 
-    case runner.(state.workspace, prompt, issue, app_opts) do
+    result =
+      try do
+        runner.(state.workspace, prompt, issue, app_opts)
+      rescue
+        error in RuntimeError ->
+          if error.message == "private_evidence_capture_failed" do
+            {:error, :evidence_capture_failed}
+          else
+            reraise error, __STACKTRACE__
+          end
+      end
+
+    case result do
       {:ok, evidence} ->
         {:ok, Map.put(Map.take(evidence, [:thread_id, :turn_id, :session_id, :model, :reasoning_effort]), :workspace, state.workspace)}
 
@@ -738,6 +754,8 @@ defmodule SymphonyElixir.WorkstreamRunner do
   defp safe_agent_error({:unsupported_native_approval, method}) when is_binary(method),
     do: {:error, {:unsupported_native_approval, method}}
 
+  defp safe_agent_error(:evidence_capture_failed), do: {:error, :evidence_capture_failed}
+
   defp safe_agent_error({:unsupported_native_input, method}) when is_binary(method),
     do: {:error, {:unsupported_native_input, method}}
 
@@ -753,6 +771,20 @@ defmodule SymphonyElixir.WorkstreamRunner do
        do: {:error, {:wait_callback_failed, reason}}
 
   defp safe_agent_error(_reason), do: {:error, :agent_execution_failed}
+
+  defp evidence_message_handler(state) do
+    if durable_evidence_state?(state) and Config.evidence() != :disabled do
+      fn event -> Evidence.capture!(state, event) end
+    else
+      fn _event -> :ok end
+    end
+  end
+
+  defp durable_evidence_state?(%{id: id, current_attempt_id: attempt_id}) do
+    is_binary(id) and id not in ["", "local"] and is_binary(attempt_id) and attempt_id != ""
+  end
+
+  defp durable_evidence_state?(_state), do: false
 
   defp repair_feedback(%{attempts: attempts}) do
     case List.last(attempts) do

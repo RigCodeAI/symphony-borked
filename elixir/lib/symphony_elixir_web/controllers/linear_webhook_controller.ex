@@ -6,7 +6,7 @@ defmodule SymphonyElixirWeb.LinearWebhookController do
   use Phoenix.Controller, formats: [:json]
 
   alias Plug.Conn
-  alias SymphonyElixir.{Config, Linear.Webhook, Orchestrator}
+  alias SymphonyElixir.{Config, Linear.AgentMapping, Orchestrator}
   alias SymphonyElixirWeb.Endpoint
 
   @spec create(Conn.t(), map()) :: Conn.t()
@@ -19,18 +19,16 @@ defmodule SymphonyElixirWeb.LinearWebhookController do
   end
 
   defp receive_webhook(conn, config) do
-    case Config.linear_webhook_secret(config) do
-      secret when is_binary(secret) and byte_size(secret) > 0 ->
-        case Webhook.verify(conn.assigns[:linear_raw_body], conn.req_headers, secret) do
-          {:ok, event} -> dispatch_event(conn, event)
-          {:error, :invalid_signature} -> error_response(conn, 401, "unauthorized", "Webhook authentication failed")
-          {:error, :invalid_timestamp} -> error_response(conn, 401, "unauthorized", "Webhook authentication failed")
-          {:error, :unrelated_event} -> error_response(conn, 422, "unsupported_event", "Unsupported webhook event")
-          {:error, _reason} -> error_response(conn, 400, "invalid_request", "Invalid webhook request")
-        end
-
-      _secret ->
-        unavailable(conn)
+    with {:ok, secrets} <- Config.linear_webhook_secrets(config) do
+      case AgentMapping.verify(conn.assigns[:linear_raw_body], conn.req_headers, config, secrets) do
+        {:ok, event} -> dispatch_event(conn, event)
+        {:error, reason} when reason in [:invalid_signature, :invalid_timestamp] -> error_response(conn, 401, "unauthorized", "Webhook authentication failed")
+        {:error, reason} when reason in [:unrelated_event, :unknown_cloud_agent_identity] -> error_response(conn, 422, "unsupported_event", "Unsupported webhook event")
+        {:error, reason} when reason in [:signing_secret_unavailable, :ambiguous_signing_secrets] -> unavailable(conn)
+        {:error, _reason} -> error_response(conn, 400, "invalid_request", "Invalid webhook request")
+      end
+    else
+      _ -> unavailable(conn)
     end
   end
 

@@ -1,0 +1,21 @@
+{
+  "tested_source": "afdba4303b0ed241368d2fb03184a9252639dd6c",
+  "same_seed": 891395,
+  "combined_focused": {
+    "tests": 36,
+    "failures": 0,
+    "elapsed_seconds": 21.1
+  },
+  "fresh_full_suite": {
+    "tests": 580,
+    "failures": 0,
+    "skipped": 6,
+    "excluded": 10,
+    "elapsed_seconds": 41.4
+  },
+  "runtime_source_byte_identical_to": "fb0cad378d79b8b275a4ddb3cf70ac51b0abcdbd",
+  "helper_sha256": "4ba8e7f2a031347f03d31a0ac4ef81f903ed6aa7858683569ce89640def8e0a3",
+  "test_sha256": "0f0c45e217e4165fe8a107ceebf38a4f1cb5370ca1b30c264ceedb185845e1d3",
+  "earlier_combined_failures_resolved": "Migration fixture now restores the stable startup workflow before deleting temporary roots. Same seed rerun passes.",
+  "activation_review": "Previous b146 activation rejected before execution because passing rerun evidence was missing; new candidate includes the corrected fixture and passing receipts."
+}

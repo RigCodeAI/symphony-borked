@@ -1,0 +1,120 @@
+{
+  "active_source": "afdba4303b0ed241368d2fb03184a9252639dd6c",
+  "worker_idle_before_stop": true,
+  "database_read_only": true,
+  "service_restarted_same_release": true,
+  "waits_before": [
+    {
+      "issue_id": "78b07a81-dd07-45cd-9e22-75b63588814d",
+      "run_id": "run-33c291e6e20a876eb0cab27a1fce46bf",
+      "agent_id": "high-effort-cloud",
+      "phase": "waiting_for_answer",
+      "stage_id": "implement",
+      "current_attempt_id": "run-33c291e6e20a876eb0cab27a1fce46bf/implement/6",
+      "error": null,
+      "cancellation": null
+    },
+    {
+      "issue_id": "cb9eaf7b-9340-43fc-8015-d8d04e126512",
+      "run_id": "run-ea371f6a0e38e4e183c61e418eb0442e",
+      "agent_id": "default-cloud",
+      "phase": "waiting_for_answer",
+      "stage_id": "candidate-ready",
+      "current_attempt_id": "run-ea371f6a0e38e4e183c61e418eb0442e/candidate-ready/3",
+      "error": null,
+      "cancellation": null
+    }
+  ],
+  "waits_after": [
+    {
+      "issue_id": "78b07a81-dd07-45cd-9e22-75b63588814d",
+      "run_id": "run-33c291e6e20a876eb0cab27a1fce46bf",
+      "agent_id": "high-effort-cloud",
+      "phase": "waiting_for_answer",
+      "stage_id": "implement",
+      "current_attempt_id": "run-33c291e6e20a876eb0cab27a1fce46bf/implement/6",
+      "error": null,
+      "cancellation": null
+    },
+    {
+      "issue_id": "cb9eaf7b-9340-43fc-8015-d8d04e126512",
+      "run_id": "run-ea371f6a0e38e4e183c61e418eb0442e",
+      "agent_id": "default-cloud",
+      "phase": "waiting_for_answer",
+      "stage_id": "candidate-ready",
+      "current_attempt_id": "run-ea371f6a0e38e4e183c61e418eb0442e/candidate-ready/3",
+      "error": null,
+      "cancellation": null
+    }
+  ],
+  "waits_preserved": true,
+  "default_session_receipts": [
+    {
+      "status": "handled",
+      "timestamp": 1791726334230,
+      "kind": "created",
+      "session_id": "d81fd12c-6098-408a-9e17-915c39fe7343",
+      "delivery_id": "0e7b4313-2dc7-4b56-ae67-a71569492e3c",
+      "probe_marker": false
+    },
+    {
+      "status": "reply_delivered",
+      "timestamp": 1791726630271,
+      "kind": "prompted",
+      "session_id": "d81fd12c-6098-408a-9e17-915c39fe7343",
+      "delivery_id": "16ea854a-a01a-445a-9ebe-297e31e6bd7b",
+      "probe_marker": false
+    },
+    {
+      "status": "reply_delivered",
+      "timestamp": 1791726919585,
+      "kind": "prompted",
+      "session_id": "d81fd12c-6098-408a-9e17-915c39fe7343",
+      "delivery_id": "6448d3ab-c106-4d37-b2e6-d4d0ff3abd13",
+      "probe_marker": false
+    },
+    {
+      "status": "reply_delivered",
+      "timestamp": 1791727006043,
+      "kind": "prompted",
+      "session_id": "d81fd12c-6098-408a-9e17-915c39fe7343",
+      "delivery_id": "650480a9-adb6-4e03-8e71-ac9773267011",
+      "probe_marker": false
+    },
+    {
+      "status": "ignored_old_assignment",
+      "timestamp": 1791727255548,
+      "kind": "prompted",
+      "session_id": "d81fd12c-6098-408a-9e17-915c39fe7343",
+      "delivery_id": "b61a826e-e3c9-4ba7-8b73-3221dccd2d77",
+      "probe_marker": true
+    },
+    {
+      "status": "ignored_old_assignment",
+      "timestamp": 1791727263077,
+      "kind": "stop",
+      "session_id": "d81fd12c-6098-408a-9e17-915c39fe7343",
+      "delivery_id": "93edab16-c637-4857-b29e-f6dd042f9970",
+      "probe_marker": false
+    }
+  ],
+  "evidence_unchanged_after_restart": true,
+  "recovered_evidence_identity": {
+    "run_id": "run-33c291e6e20a876eb0cab27a1fce46bf",
+    "snapshot_sha256": "d54290731823ddfaa5733f0660846b1c2ba66ef9192fa3b01bee5eb650358d3c",
+    "events_sha256": "9bbf2cb95f65024c7ccf1d0b106cddc1851252679ef5b1d50895e7a8e89a7677",
+    "event_count": 91,
+    "task": {
+      "issue_id": "78b07a81-dd07-45cd-9e22-75b63588814d",
+      "run_id": "run-33c291e6e20a876eb0cab27a1fce46bf",
+      "agent_id": "high-effort-cloud",
+      "status": "acknowledged",
+      "phase": "waiting_for_answer",
+      "current_attempt_id": "run-33c291e6e20a876eb0cab27a1fce46bf/implement/6",
+      "stage_id": "implement",
+      "error": null,
+      "cancellation": null
+    },
+    "read_only": true
+  }
+}

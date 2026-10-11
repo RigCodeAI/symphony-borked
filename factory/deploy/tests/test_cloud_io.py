@@ -123,7 +123,7 @@ class EvidenceTests(unittest.TestCase):
 class BackupTests(unittest.TestCase):
     def test_sqlite_online_backup_contains_committed_wal_data(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             state = root / "state"
             state.mkdir()
             public = root / "public.json"
@@ -143,6 +143,94 @@ class BackupTests(unittest.TestCase):
             with closing(sqlite3.connect(restored)) as db:
                 self.assertEqual(db.execute("SELECT id FROM runs").fetchone(), ("committed-in-wal",))
                 self.assertEqual(db.execute("PRAGMA integrity_check").fetchone(), ("ok",))
+            manifest_key = next(key for key in cloud.objects if key[1].endswith("/manifest.json"))
+            manifest = json.loads(cloud.objects[manifest_key])
+            self.assertEqual([item["name"] for item in manifest["databases"]], ["runs.sqlite"])
+
+    def test_evidence_index_is_backed_up_with_restore_path_and_wal_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            evidence = root / "evidence"
+            evidence.mkdir()
+            source_path = evidence / "index.sqlite"
+            source = sqlite3.connect(source_path)
+            source.execute("PRAGMA journal_mode=WAL")
+            source.execute("CREATE TABLE artifacts(name TEXT)")
+            source.execute("INSERT INTO artifacts VALUES ('committed-evidence')")
+            source.commit()
+            public = root / "public.json"
+            public.write_text('{"role":"coordinator"}')
+            cloud = FakeCloud()
+
+            with patch.object(cloud_io, "DATA_ROOT", root), patch.object(cloud_io, "PUBLIC_CONFIG", public):
+                cloud_io.backup(cloud)
+            source.close()
+
+            manifest_key = next(key for key in cloud.objects if key[1].endswith("/manifest.json"))
+            manifest = json.loads(cloud.objects[manifest_key])
+            evidence_entry = next(item for item in manifest["databases"]
+                                  if item["name"] == "evidence-index.sqlite")
+            self.assertEqual(evidence_entry["restore_path"], "evidence/index.sqlite")
+            backup_key = ("backups", manifest_key[1].rsplit("/", 1)[0] + "/evidence-index.sqlite")
+            restored = root / "restored-evidence.sqlite"
+            restored.write_bytes(cloud.objects[backup_key])
+            with closing(sqlite3.connect(restored)) as db:
+                self.assertEqual(db.execute("SELECT name FROM artifacts").fetchone(), ("committed-evidence",))
+                self.assertEqual(db.execute("PRAGMA integrity_check").fetchone(), ("ok",))
+
+    def test_unsafe_evidence_index_paths_block_backup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root = base / "root"
+            root.mkdir()
+            public = base / "public.json"
+            public.write_text('{"role":"coordinator"}')
+            outside = base / "outside"
+            outside.mkdir()
+            (outside / "index.sqlite").write_bytes(b"not a database")
+            cloud = FakeCloud()
+
+            evidence = root / "evidence"
+            evidence.symlink_to(outside, target_is_directory=True)
+            with patch.object(cloud_io, "DATA_ROOT", root), patch.object(cloud_io, "PUBLIC_CONFIG", public), \
+                    self.assertRaises(ValueError):
+                cloud_io.backup(cloud)
+            self.assertEqual(cloud.objects, {})
+
+            evidence.unlink()
+            evidence.mkdir()
+            (evidence / "index.sqlite").symlink_to(outside / "index.sqlite")
+            with patch.object(cloud_io, "DATA_ROOT", root), patch.object(cloud_io, "PUBLIC_CONFIG", public), \
+                    self.assertRaises(ValueError):
+                cloud_io.backup(cloud)
+            self.assertEqual(cloud.objects, {})
+
+            root_alias = base / "root-alias"
+            root_alias.symlink_to(root, target_is_directory=True)
+            with patch.object(cloud_io, "DATA_ROOT", root_alias), patch.object(cloud_io, "PUBLIC_CONFIG", public), \
+                    self.assertRaises(ValueError):
+                cloud_io.backup(cloud)
+            self.assertEqual(cloud.objects, {})
+
+    def test_evidence_index_backup_enforces_size_bound(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            evidence = root / "evidence"
+            evidence.mkdir()
+            index = evidence / "index.sqlite"
+            index.touch()
+            index.write_bytes(b"x")
+            with index.open("r+b") as handle:
+                handle.truncate(cloud_io.MAX_EVIDENCE_INDEX_BYTES + 1)
+            public = root / "public.json"
+            public.write_text('{"role":"coordinator"}')
+            cloud = FakeCloud()
+
+            with patch.object(cloud_io, "DATA_ROOT", root), patch.object(cloud_io, "PUBLIC_CONFIG", public), \
+                    self.assertRaises(ValueError):
+                cloud_io.backup(cloud)
+
+            self.assertEqual(cloud.objects, {})
 
 
 class TransportTests(unittest.TestCase):

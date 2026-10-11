@@ -83,6 +83,17 @@ termination. Continuation reconstructs saved context in a fresh Codex conversati
 Coordinator-only client credentials mint app tokens in memory per delegated run; see
 [Linear app setup](docs/linear-delegation.md#linear-app-setup) for scopes, events and secret references.
 
+DEV-237 adds an opt-in private evidence index, signed-IAP HTML viewer and verified
+GCS archive receipts. Durable capture, restart replay and native Linear links are
+locally tested against merged main; live qualification remains pending. See [private task evidence](docs/private-evidence.md) for configuration,
+retention and the current acceptance boundary.
+
+DEV-235 adds [named cloud-agent routing and safe reassignment](docs/dev-235-agent-mapping.md)
+to the existing coordinator. Both additional apps are installed with DEV-only access;
+route activation and native multi-app acceptance remain pending. Existing human waits
+require policy-compatible credential-exclusion maintenance before activation.
+See the [administrator setup plan](docs/dev-235-app-setup.md).
+
 Use live ticket dependencies to schedule work. The local files
 `docs/rig-software-factory-spec.md` and `docs/factory-setup-ticket-drafts.md`, if present,
 are earlier drafts. They predate the workstream additions and published ticket updates;

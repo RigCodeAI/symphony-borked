@@ -3,6 +3,9 @@ name: software-change
 inputs: [task]
 agents:
   default-cloud: ../agents/default-cloud.yaml
+  high-effort-cloud: ../agents/high-effort-cloud.yaml
+  daybreak-cloud: ../agents/daybreak-cloud.yaml
+  default-review: ../agents/default-review.yaml
 entry: implement
 stages:
   - id: implement

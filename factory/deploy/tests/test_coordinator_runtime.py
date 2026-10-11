@@ -44,11 +44,35 @@ class CoordinatorRuntimeTests(unittest.TestCase):
         self.fetched = []
         self.cloud = SimpleNamespace(config=self.config, secret=self.secret)
         self.workflow = self.root / (self.revision + ".md")
-        self.workflow.write_text("---\ntracker:\n  kind: memory\n---\nControlled")
+        self.workflow.write_text("protected workflow")
 
     def secret(self, key):
         self.fetched.append(key)
-        return {"linear_api": b"oauth-$()-literal", "linear_signing": b'quote-"-backslash-\\'}[key]
+        return {
+            "linear_api": b"oauth-$()-literal", "linear_signing": b'quote-"-backslash-\\',
+            "linear_high_client": b"high-client-literal", "linear_high_signing": b"high-signing-literal",
+            "linear_daybreak_client": b"daybreak-client-literal", "linear_daybreak_signing": b"daybreak-signing-literal",
+        }[key]
+
+    def add_agent_secrets(self, agent_id):
+        values = {
+            "high-effort-cloud": (
+                "FACTORY_HIGH_CLIENT_SECRET", "FACTORY_HIGH_WEBHOOK_SECRET",
+                "linear_high_client", "linear_high_signing", "linear-high-client", "linear-high-signing",
+            ),
+            "daybreak-cloud": (
+                "FACTORY_DAYBREAK_CLIENT_SECRET", "FACTORY_DAYBREAK_WEBHOOK_SECRET",
+                "linear_daybreak_client", "linear_daybreak_signing", "linear-daybreak-client", "linear-daybreak-signing",
+            ),
+        }[agent_id]
+        client_env, webhook_env, client_key, signing_key, client_ref, signing_ref = values
+        self.config["coordinator_secret_env"].update({client_env: client_key, webhook_env: signing_key})
+        self.config["secret_ids"].update({
+            client_key: "projects/test/secrets/" + client_ref,
+            signing_key: "projects/test/secrets/" + signing_ref,
+        })
+        self.config["secret_versions"].update({client_key: "3", signing_key: "4"})
+        return {client_env, webhook_env}
 
     def prepare(self):
         with patch.object(cloud_io.pwd, "getpwnam", return_value=self.account):
@@ -69,14 +93,77 @@ class CoordinatorRuntimeTests(unittest.TestCase):
         path = self.directory / (self.revision + ".json")
         self.assertEqual(path.stat().st_mode & 0o777, 0o640)
         self.assertEqual(path.stat().st_uid, 0)
-        with patch.dict(os.environ, {"OAUTH_TOKEN": "inherited-unapproved", "SAFE": "keep"}):
+        with patch.dict(os.environ, {
+                "OAUTH_TOKEN": "inherited-unapproved",
+                "FACTORY_HIGH_CLIENT_SECRET": "inherited-high-client",
+                "FACTORY_DAYBREAK_WEBHOOK_SECRET": "inherited-daybreak-signing",
+                entrypoint.LINEAR_SECRET_NAMES_ENV: '["FORGED"]',
+                "SAFE": "keep"}):
             workflow, env = self.runtime()
         self.assertEqual(workflow, self.workflow)
         self.assertEqual(env["LINEAR_API_KEY"], "oauth-$()-literal")
         self.assertEqual(env["LINEAR_API_TOKEN"], 'quote-"-backslash-\\')
         self.assertNotIn("OAUTH_TOKEN", env)
+        self.assertNotIn("FACTORY_HIGH_CLIENT_SECRET", env)
+        self.assertNotIn("FACTORY_DAYBREAK_WEBHOOK_SECRET", env)
+        self.assertEqual(env[entrypoint.LINEAR_SECRET_NAMES_ENV], '["LINEAR_API_KEY", "LINEAR_API_TOKEN"]')
         self.assertEqual(env["SAFE"], "keep")
         self.assertEqual(self.fetched, ["linear_api", "linear_signing"])
+
+    def test_high_effort_pair_is_optional_and_pinned_for_config_validation(self):
+        self.add_agent_secrets("high-effort-cloud")
+        self.prepare()
+        workflow, env = self.runtime()
+        self.assertEqual(workflow, self.workflow)
+        self.assertEqual(env["FACTORY_HIGH_CLIENT_SECRET"], "high-client-literal")
+        self.assertEqual(env["FACTORY_HIGH_WEBHOOK_SECRET"], "high-signing-literal")
+        self.assertEqual(env[entrypoint.LINEAR_SECRET_NAMES_ENV], json.dumps(sorted(self.config["coordinator_secret_env"])))
+        self.assertEqual(self.fetched, ["linear_api", "linear_signing", "linear_high_client", "linear_high_signing"])
+
+    def test_daybreak_pair_is_optional_and_pinned_for_config_validation(self):
+        self.add_agent_secrets("daybreak-cloud")
+        self.prepare()
+        workflow, env = self.runtime()
+        self.assertEqual(workflow, self.workflow)
+        self.assertEqual(env["FACTORY_DAYBREAK_CLIENT_SECRET"], "daybreak-client-literal")
+        self.assertEqual(env["FACTORY_DAYBREAK_WEBHOOK_SECRET"], "daybreak-signing-literal")
+        self.assertEqual(env[entrypoint.LINEAR_SECRET_NAMES_ENV], json.dumps(sorted(self.config["coordinator_secret_env"])))
+        self.assertEqual(self.fetched, ["linear_api", "linear_signing", "linear_daybreak_client", "linear_daybreak_signing"])
+
+    def test_high_and_daybreak_pairs_keep_versions_fingerprints_and_rollback_pins(self):
+        self.add_agent_secrets("high-effort-cloud")
+        self.add_agent_secrets("daybreak-cloud")
+        self.prepare()
+        path = self.directory / (self.revision + ".json")
+        value = json.loads(path.read_text())
+        self.assertEqual(set(value["environment"]), set(self.config["coordinator_secret_env"]))
+        self.assertEqual(set(value["secret_versions"]), set(self.config["coordinator_secret_env"]))
+        self.assertTrue(all(version.isdigit() and int(version) > 0 for version in value["secret_versions"].values()))
+        self.assertTrue(all(len(fingerprint) == 64 for fingerprint in value["secret_fingerprints"].values()))
+        workflow, env = self.runtime()
+        self.assertEqual(workflow, self.workflow)
+        self.assertEqual(env[entrypoint.LINEAR_SECRET_NAMES_ENV], json.dumps(sorted(self.config["coordinator_secret_env"])))
+
+        snapshots = self.root / "snapshots"
+        public_bytes = self.public.read_bytes()
+        self.public.unlink()
+        with patch.object(cloud_io.pwd, "getpwnam", return_value=self.account):
+            cloud_io.prepare_coordinator_environments(self.cloud, self.directory, self.public, snapshots)
+        self.public.write_bytes(public_bytes)
+        path.unlink()
+        restored = []
+
+        def old_cloud(config):
+            self.assertEqual(config["service_revision"], self.revision)
+            return SimpleNamespace(config=config, secret=lambda key: restored.append(key) or self.secret(key))
+
+        candidate_config = dict(self.config, service_revision="c" * 40)
+        candidate = SimpleNamespace(config=candidate_config, secret=self.secret)
+        with patch.object(cloud_io.pwd, "getpwnam", return_value=self.account), patch.object(cloud_io, "Cloud", side_effect=old_cloud):
+            cloud_io.prepare_coordinator_environments(candidate, self.directory, self.public, snapshots)
+        self.assertEqual(restored, ["linear_api", "linear_signing", "linear_high_client", "linear_high_signing",
+                                    "linear_daybreak_client", "linear_daybreak_signing"])
+        self.assertEqual(set(json.loads(path.read_text())["environment"]), set(self.config["coordinator_secret_env"]))
 
     def test_worker_role_and_arbitrary_environment_names_cannot_fetch_integrations(self):
         for change in ({"role": "worker"}, {"coordinator_secret_env": {"PATH": "linear_api"}},
@@ -89,6 +176,57 @@ class CoordinatorRuntimeTests(unittest.TestCase):
                 self.config.clear()
                 self.config.update(original)
         self.assertEqual(self.fetched, [])
+
+    def test_malformed_or_duplicate_named_app_references_fail_before_secret_fetch(self):
+        high = {
+            "FACTORY_HIGH_CLIENT_SECRET": "linear_high_client",
+            "FACTORY_HIGH_WEBHOOK_SECRET": "linear_high_signing",
+        }
+        cases = (
+            {**self.config["coordinator_secret_env"], "FACTORY_HIGH_CLIENT_SECRET": "linear_high_client"},
+            {**self.config["coordinator_secret_env"], "FACTORY_DAYBREAK_WEBHOOK_SECRET": "linear_daybreak_signing"},
+            {**self.config["coordinator_secret_env"], **high, "OAUTH_TOKEN": "oauth"},
+            {**self.config["coordinator_secret_env"], **high, "FACTORY_HIGH_CLIENT_SECRET": "linear_api"},
+        )
+        original_mapping = self.config["coordinator_secret_env"]
+        original_ids = self.config["secret_ids"]
+        original_versions = self.config["secret_versions"]
+        for mapping in cases:
+            with self.subTest(mapping=mapping):
+                self.config["coordinator_secret_env"] = mapping
+                self.config["secret_ids"] = {
+                    **original_ids,
+                    "linear_high_client": "projects/test/secrets/high-client",
+                    "linear_high_signing": "projects/test/secrets/high-signing",
+                    "linear_daybreak_signing": "projects/test/secrets/daybreak-signing",
+                    "oauth": "projects/test/secrets/oauth",
+                }
+                self.config["secret_versions"] = {
+                    **original_versions, "linear_high_client": "3", "linear_high_signing": "4",
+                    "linear_daybreak_signing": "5", "oauth": "6",
+                }
+                with self.assertRaises(ValueError):
+                    self.prepare()
+                self.assertEqual(self.fetched, [])
+        self.config["coordinator_secret_env"] = original_mapping
+        self.config["secret_ids"] = original_ids
+        self.config["secret_versions"] = original_versions
+
+        self.config["coordinator_secret_env"] = {**original_mapping, **high}
+        self.config["secret_ids"] = {
+            **original_ids,
+            "linear_high_client": original_ids["linear_api"],
+            "linear_high_signing": "projects/test/secrets/high-signing",
+        }
+        self.config["secret_versions"] = {
+            **original_versions, "linear_high_client": "3", "linear_high_signing": "4",
+        }
+        with self.assertRaisesRegex(ValueError, "references must be distinct"):
+            self.prepare()
+        self.assertEqual(self.fetched, [])
+        self.config["coordinator_secret_env"] = original_mapping
+        self.config["secret_ids"] = original_ids
+        self.config["secret_versions"] = original_versions
 
     def test_missing_stale_or_writable_credentials_block_startup(self):
         self.prepare()
@@ -178,6 +316,16 @@ class CoordinatorRuntimeTests(unittest.TestCase):
             workflow, env = entrypoint.runtime(old_release, self.directory, self.public)
         self.assertEqual(workflow, old_release / 'factory/deploy/PILOT-WORKFLOW.md')
         self.assertFalse(entrypoint.ALLOWED_ENV.intersection(env))
+        self.assertNotIn(entrypoint.LINEAR_SECRET_NAMES_ENV, env)
+
+    def test_pilot_strips_inherited_linear_secret_name_marker(self):
+        self.config["coordinator_workflow"] = "pilot"
+        self.config["coordinator_secret_env"] = {}
+        self.prepare()
+        with patch.dict(os.environ, {entrypoint.LINEAR_SECRET_NAMES_ENV: '["FORGED"]'}):
+            workflow, env = self.runtime()
+        self.assertEqual(workflow, self.release / "factory/deploy/PILOT-WORKFLOW.md")
+        self.assertNotIn(entrypoint.LINEAR_SECRET_NAMES_ENV, env)
 
     def test_cold_boot_invalid_same_revision_candidate_restores_active_runtime_before_rejection(self):
         self.prepare()

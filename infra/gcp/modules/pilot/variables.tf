@@ -76,8 +76,24 @@ variable "coordinator_secret_env" {
   type    = map(string)
   default = {}
   validation {
-    condition     = alltrue([for env, key in var.coordinator_secret_env : contains(["LINEAR_API_KEY", "LINEAR_API_TOKEN", "OAUTH_TOKEN"], env) && contains(keys(var.optional_integration_secrets), key)]) && length(distinct(values(var.coordinator_secret_env))) == length(var.coordinator_secret_env) && (var.coordinator_workflow == "linear" ? toset(keys(var.coordinator_secret_env)) == toset(["LINEAR_API_KEY", "LINEAR_API_TOKEN"]) : length(var.coordinator_secret_env) == 0)
-    error_message = "Coordinator credentials must map distinct optional secrets to allowed Linear environment names."
+    condition = alltrue([
+      for env, key in var.coordinator_secret_env :
+      contains([
+        "LINEAR_API_KEY",
+        "LINEAR_API_TOKEN",
+        "FACTORY_HIGH_CLIENT_SECRET",
+        "FACTORY_HIGH_WEBHOOK_SECRET",
+        "FACTORY_DAYBREAK_CLIENT_SECRET",
+        "FACTORY_DAYBREAK_WEBHOOK_SECRET",
+      ], env) && contains(keys(var.optional_integration_secrets), key)
+      ]) && length(distinct(values(var.coordinator_secret_env))) == length(var.coordinator_secret_env) && (
+      var.coordinator_workflow == "linear" ? (
+        alltrue([for env in ["LINEAR_API_KEY", "LINEAR_API_TOKEN"] : contains(keys(var.coordinator_secret_env), env)]) &&
+        (contains(keys(var.coordinator_secret_env), "FACTORY_HIGH_CLIENT_SECRET") == contains(keys(var.coordinator_secret_env), "FACTORY_HIGH_WEBHOOK_SECRET")) &&
+        (contains(keys(var.coordinator_secret_env), "FACTORY_DAYBREAK_CLIENT_SECRET") == contains(keys(var.coordinator_secret_env), "FACTORY_DAYBREAK_WEBHOOK_SECRET"))
+      ) : length(var.coordinator_secret_env) == 0
+    )
+    error_message = "Linear requires the default API key and webhook secret plus zero or both references for each named app; pilot must have no credential mapping."
   }
 }
 variable "enable_linear_webhook" {

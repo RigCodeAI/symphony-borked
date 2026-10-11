@@ -1,0 +1,21 @@
+{
+  "active_source": "afdba4303b0ed241368d2fb03184a9252639dd6c",
+  "current_native_receipt": {
+    "run_id": "run-ea371f6a0e38e4e183c61e418eb0442e",
+    "current_revision": "22f0ff613c9f690df8e4270b35c0b640de4e9ad1f99f1c8443aae086a22b5d2f",
+    "status": "verified",
+    "receipt_owner_uid": 0,
+    "receipt_mode": "0o640",
+    "exact_current_snapshot_and_events": true,
+    "event_count": 15,
+    "snapshot_status": "waiting_for_answer",
+    "artifact_names": [
+      "snapshot.json",
+      "events.jsonl",
+      "transcript.txt"
+    ],
+    "archive_prefix": null,
+    "cleanup_ready": false
+  },
+  "workspace_deleted": false
+}

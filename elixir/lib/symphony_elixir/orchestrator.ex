@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace, WorkstreamRun, WorkstreamRunner, WorkstreamStore}
+  alias SymphonyElixir.{AgentRunner, Config, Evidence, StatusDashboard, Tracker, Workspace, WorkstreamRun, WorkstreamRunner, WorkstreamStore}
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.Linear.Coordinator, as: LinearCoordinator
 
@@ -2214,12 +2214,19 @@ defmodule SymphonyElixir.Orchestrator do
           Code.ensure_loaded!(SymphonyElixir.Workstream)
           Code.ensure_loaded!(WorkstreamRun)
           Code.ensure_loaded!(WorkstreamRunner)
+          Code.ensure_loaded!(SymphonyElixir.Linear.AgentMapping)
+          Code.ensure_loaded!(SymphonyElixir.AgentReadiness)
           Code.ensure_loaded!(SymphonyElixir.ValidationPolicy)
           Code.ensure_loaded!(SymphonyElixir.Validation)
           Code.ensure_loaded!(SymphonyElixir.ValidationCommand)
 
           with {:ok, store} <- WorkstreamStore.start_link(path: path, owner: self()),
                {:ok, runs} <- WorkstreamStore.load(store) do
+            Enum.each(runs, fn run ->
+              if evidence_outside_workspace(run.workspace) != :ok, do: exit(:evidence_overlaps_worker_workspace)
+            end)
+
+            :ok = Evidence.recover!(store, runs)
             {:ok, store_path} = SymphonyElixir.PathSafety.canonicalize(path)
             durable = %{store: store, store_path: store_path, runs: Map.new(runs, &{&1.id, &1}), workers: %{}, cancellations: %{}, opts: opts}
             {:ok, %{state | workstreams: durable, polling_enabled: false}}
@@ -2237,9 +2244,15 @@ defmodule SymphonyElixir.Orchestrator do
     event = %{kind: :queued, task_id: task_id, fingerprint: workstream_fingerprint({task_id, path, inputs, opts})}
 
     case check_workstream_event(state, event_id, event) do
-      {:duplicate, id} -> {:ok, id, state}
-      {:error, _} = error -> error
-      :new -> queue_new_workstream_event(state, event_id, task_id, path, inputs, opts, event)
+      {:duplicate, id} ->
+        :ok = Evidence.sync!(state.workstreams.store)
+        {:ok, id, state}
+
+      {:error, _} = error ->
+        error
+
+      :new ->
+        queue_new_workstream_event(state, event_id, task_id, path, inputs, opts, event)
     end
   end
 
@@ -2250,9 +2263,16 @@ defmodule SymphonyElixir.Orchestrator do
          true <- is_binary(task_id) and task_id != "",
          {:ok, run} <- existing_or_new_workstream(state, existing, task_id, path, inputs, opts) do
       case WorkstreamStore.commit(state.workstreams.store, run, event_id, event) do
-        :ok -> {:ok, run.id, put_in(state.workstreams.runs[run.id], run)}
-        {:duplicate, id} -> {:ok, id, state}
-        {:error, reason} -> {:error, reason}
+        :ok ->
+          :ok = Evidence.sync!(state.workstreams.store)
+          {:ok, run.id, put_in(state.workstreams.runs[run.id], run)}
+
+        {:duplicate, id} ->
+          :ok = Evidence.sync!(state.workstreams.store)
+          {:ok, id, state}
+
+        {:error, reason} ->
+          {:error, reason}
       end
     else
       false -> {:error, :invalid_event_or_task_identity}
@@ -2316,6 +2336,7 @@ defmodule SymphonyElixir.Orchestrator do
                 :branch,
                 :issue_id,
                 :definition_sha256,
+                :cloud_agent_id,
                 :authentication_reference,
                 :validation_policy,
                 :validation_archive,
@@ -2327,6 +2348,7 @@ defmodule SymphonyElixir.Orchestrator do
          {:ok, definition, workspace} <- WorkstreamRunner.prepare(path, inputs, opts),
          :ok <- check_workstream_definition(definition, opts),
          :ok <- database_outside_workspace(state.workstreams.store_path, workspace),
+         :ok <- evidence_outside_workspace(workspace),
          false <- Enum.any?(state.workstreams.runs, fn {_id, run} -> run.workspace == workspace end),
          {:ok, root} <- SymphonyElixir.PathSafety.canonicalize(opts[:workspace_root]),
          execution_opts = Keyword.put(opts, :workspace_root, root),
@@ -2348,17 +2370,39 @@ defmodule SymphonyElixir.Orchestrator do
     if database == workspace or String.starts_with?(database, workspace <> "/"), do: {:error, :database_overlaps_worker_workspace}, else: :ok
   end
 
+  defp evidence_outside_workspace(workspace) do
+    case Config.evidence() do
+      :disabled ->
+        :ok
+
+      {:ok, config} ->
+        with {:ok, root} <- SymphonyElixir.PathSafety.canonicalize(config["root"]) do
+          if root == workspace or String.starts_with?(root, workspace <> "/") or String.starts_with?(workspace, root <> "/"), do: {:error, :evidence_overlaps_worker_workspace}, else: :ok
+        end
+
+      _ ->
+        {:error, :private_evidence_config_unavailable}
+    end
+  end
+
   defp commit_workstream(state, run, event_id, event) do
     send(self(), :linear_process)
 
     case WorkstreamStore.commit(state.workstreams.store, run, event_id, event) do
       :ok ->
+        :ok = Evidence.sync!(state.workstreams.store)
+        :ok = Evidence.retain_validation!(run)
         put_in(state.workstreams.runs[run.id], run)
 
       {:duplicate, id} when id == run.id ->
         case {WorkstreamStore.event(state.workstreams.store, event_id), WorkstreamStore.fetch(state.workstreams.store, id)} do
-          {{:ok, %{event: ^event}}, {:ok, stored}} -> put_in(state.workstreams.runs[id], stored)
-          _ -> exit(:durable_workstream_event_conflict)
+          {{:ok, %{event: ^event}}, {:ok, stored}} ->
+            :ok = Evidence.sync!(state.workstreams.store)
+            :ok = Evidence.retain_validation!(stored)
+            put_in(state.workstreams.runs[id], stored)
+
+          _ ->
+            exit(:durable_workstream_event_conflict)
         end
 
       {:duplicate, _id} ->
@@ -2490,8 +2534,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp linear_stopped?(%{linear: nil}, _run), do: false
 
   defp linear_stopped?(state, run) do
-    Enum.any?(state.linear.tasks, fn {_id, task} -> task.run_id == run.id and task.status == :stopped end) or
-      Enum.any?(state.linear.events, fn {_id, record} -> record.event.kind == :stop and record.event.issue_id == run.issue_id end)
+    Enum.any?(state.linear.tasks, fn {_id, task} -> task.run_id == run.id and task.status in [:stopped, :reassigning] end)
   end
 
   defp stop_linear_workstream(state, %{status: :stopped} = run), do: request_workstream_cancellation(state, run, nil)
@@ -2503,7 +2546,9 @@ defmodule SymphonyElixir.Orchestrator do
     outcome = if workstream_operation_unconfirmed?(run, operation), do: :unknown, else: :terminated
     stopped = Map.merge(run, %{status: :stopped, phase: :stopped, cancellation: %{termination: outcome}})
     stopped = if operation && outcome == :terminated, do: WorkstreamRun.confirm_termination(stopped), else: stopped
-    state = commit_workstream(state, stopped, run.id <> "/linear-stop", %{kind: :stopped})
+    generation = length(Map.get(run, :agent_transitions, []))
+    stop_id = "#{run.id}/linear-stop/#{generation}/#{run.current_attempt_id || "ready"}"
+    state = commit_workstream(state, stopped, stop_id, %{kind: :stopped})
     state = request_workstream_cancellation(state, stopped, pid)
 
     if pid do

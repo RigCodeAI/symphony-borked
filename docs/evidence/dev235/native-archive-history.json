@@ -1,0 +1,167 @@
+{
+  "active_source": "afdba4303b0ed241368d2fb03184a9252639dd6c",
+  "current_native_receipt": {
+    "run_id": "run-33c291e6e20a876eb0cab27a1fce46bf",
+    "current_revision": "5422f12e3bd18e0a2d1a6792143c3a84396eb4ce7f30b6ff4cbc2ccfb370f0ab",
+    "status": "verified",
+    "receipt_owner_uid": 0,
+    "receipt_mode": "0o640",
+    "exact_current_snapshot_and_events": true,
+    "event_count": 91,
+    "snapshot_status": "waiting_for_answer",
+    "artifact_names": [
+      "snapshot.json",
+      "events.jsonl",
+      "transcript.txt"
+    ],
+    "archive_prefix": null,
+    "cleanup_ready": false
+  },
+  "verified_manifest_count": 50,
+  "verified_default_manifests": 33,
+  "verified_high_manifests": 17,
+  "manifest_revisions": [
+    "72da0cdcc8a5502b2a3b30554428f3bc76d374672220d30c99b98d964d462be3",
+    "d534c8cd647eeea0c48004ce80bc5e180819f8cd8302cdd12acf57bf37270e20",
+    "36d249c8cbe6a1cdbb3d62a5e54081054047b5e148f3768c9eb303888ce189ce",
+    "7d167c99dd8092efbd7fa5b674911a327afae9f67f8d50e93d362eaea50e549d",
+    "9c8f9ac4d89c7452f0c723fd896c1a35666415011c764dac3db9c9b7bdfe53f2",
+    "2ec88d473d29563d6c1f5bb17c62a317ca4bc294b7dad8e2e4919980213faa63",
+    "3c7ce7c6ff7058b4a0b9a7eb564691df8d97ef9774d2879b32f83126642d1b44",
+    "fd63dd057237a8a75788a253d7d467d5f122a8dc4e7c029fd45924e09defd424",
+    "f22a16710a9765fa7f0e3710bac9e10b18f73220f6f2b0f67c14edbb47effee4",
+    "286eaf2e30d1d8ed29dcba1617920205bf42eae953c504e59f572795f78a9880",
+    "9c1878ad297a506095093898139cf028fd2075b93880d304caaea6936bfe0640",
+    "8675a2c84754620518629b72c00d21487968b5193c5b8c33adeb4a9a56889cf0",
+    "2be922c268d2ad456305f66d4195ad847fda9d7f6e277f6b1bf51c01e11de8e8",
+    "05e8e7f051d8a6b60e03ae1b21b066d8708ca38786857d8501e90e1bd54016df",
+    "d9230f5b0bfe42688a638085fb2b7d5897104d4912537b9b041d7abe5b144705",
+    "5e6cf07d762b36d34412e8831538eff4304e87ba5910e10bad3948c2911a3a61",
+    "0bfac3b91b305c58136adf6b415a8d89786077e425f3b56449452d50010f51ee",
+    "714e7786ee7a908431c482c9d3efc43aadcc04f24082e55c060558ae8823a9c8",
+    "79cbfb11b4f7d0ca333dfc2721595d3d9ddf6f92f7ce3db96ac42b3920bf3738",
+    "24d68422d50bc0f2c561d23c2aa318398bf6f17c13c7f978cefe8c94a273b4a4",
+    "8a95f5b84dc9687d737ebcff426ffa564e8951f763afca25d31d878f2e008b7c",
+    "a0cb0745abfdac99500ed2fb66043f45cf974e4ee892559d78a5279a44ba4b12",
+    "2d4d0585575cddcca9d55ae727ff63e9553a0afa85fb5d70febc07551a082128",
+    "8e16724a928290de6118d581852aa05d7eb82fb69ad13d803e0f623186e51e68",
+    "e9c22ddb76d49e613d660adc6022edee6e9438468361ef339e1abcd00acfa91d",
+    "5422f12e3bd18e0a2d1a6792143c3a84396eb4ce7f30b6ff4cbc2ccfb370f0ab",
+    "ac9cca4da0faf49987015669f1bec9380cf4eb7cc756aa42b89c5ee3fd259399",
+    "def2ee2fc4cf0298938d43f13423f35ab766c94e9a070de099f8dd907b9b8827",
+    "44bb105b2503ddd1f44710cb3fdc506ac6bd633d5eb5b08041cb314a55cac35d",
+    "acba8f7b2e2435976db36857a018994a3992896daf9b1f7c95c9363b0115963d",
+    "2e18f4aeb772637a572be31ff7ec2a12f1199ff8c56be4baecf565aae3f0ffaa",
+    "0baa58759546c37c314a0b4d2153535b5c171098f64993cd4aedbca652439114",
+    "a7ac524f916b79edc1b0a3cdabed961b88bd6fed092314d7e7f395e7fc89eaca",
+    "51c774374bd9d1eb718371bc3ef4286db9a933eb48b1ba4701f3e2bb988633d6",
+    "3c16414d4b5cde33f889564db00d5eb51f7e7f12d1408a1d347da1876294dab6",
+    "3908dcec7599828f880507461e32f46c4c90549c1166b17e29590576ea80835d",
+    "2d4b1736654ec690fae3ca8bf074a783d5fe9047f38605b9e3c4beefc2cf3832",
+    "bfdc93b6d9fc82edb8f18d207deec38a3dfa9bb82e609492b832c311617b2091",
+    "ef5bb51ce0c6c80bbaba6f61a06b09dfb9f5c6de235f9a7a65a65ecb894f1bd7",
+    "966a7e5cbf32d44a76f17b37dd1815c87eab3a52479b7419cc72538006d7d7c2",
+    "49cdf36419289d2b3604d5ca79313ba9e2a31e6d1a863150a95d44f42f36188e",
+    "c64c031f97edb0a502e3c2e56ce256e6e8c06d819ef6045243b11cf1c9c7cfa5",
+    "2bad6c4c2364759c6b0a1bae559d7712bd1a758202129bfd9d0ab7ac798367ef",
+    "afd25757c855a94cbf947b0d88796ff310c6fc9b78cd2a6c357319b14b1d1a31",
+    "3234f70047522c1f6d6b1cc0f1fcd2d369da38e332994e672df849a4e4f30655",
+    "950313b7a048bf03bc12a4be34a1485faed05c16b01b16a274d4116f655fc52d",
+    "d3122e84a6e136a3e9353f7ce53f6c58bd99587704755ddd17a4a5023a8664bf",
+    "5f6469266827197084bb2d811db2a02063f057a0b1cec851ae7eb8adb84a7490",
+    "dc708df34b4a0e9a59ad28520bc9ac527411b44a3757610033418b98f6436338",
+    "49f14abf8722081abcebd220f7c1eb5e8988514bcee16b9d84f3814974918b94"
+  ],
+  "default_example": {
+    "revision": "afd25757c855a94cbf947b0d88796ff310c6fc9b78cd2a6c357319b14b1d1a31",
+    "status": "verified",
+    "selection": {
+      "agent_id": "default-cloud",
+      "name": "DefaultCloud",
+      "requested": {
+        "authentication": {
+          "mode": "subscription",
+          "reference": "projects/factory-511117/secrets/model-auth/versions/1"
+        },
+        "cyber_access_program": "standard",
+        "daybreak": false,
+        "model": "gpt-6-luna",
+        "reasoning_effort": "medium"
+      },
+      "resources": [
+        {
+          "path": "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/instructions/cloud-implementation.md",
+          "sha256": "b75e205dfb751ccf100a9c3d92bbc7f7fadb42f0c778aca1af91b5718cf792c7"
+        },
+        {
+          "path": "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/skills/factory-rig/SKILL.md",
+          "sha256": "7d634d5a9cede4c2eea4d11164e6e6b7897e80d0b04da9dc4a3c24873cc489ff"
+        }
+      ],
+      "revision": "78c12b3df8f0631f8c20a4b8dc1679093cd19804e8b376ae2589d5dbe18aef9c"
+    },
+    "stage_agents": {
+      "implement": "default-cloud"
+    },
+    "definitions": {
+      "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/agents/daybreak-cloud.yaml": "90fb13cf5140a6ca7b23637b5751ae65a47fac0e063ba8b0a4615a2f7b054817",
+      "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/agents/default-cloud.yaml": "78c12b3df8f0631f8c20a4b8dc1679093cd19804e8b376ae2589d5dbe18aef9c",
+      "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/agents/default-review.yaml": "2f8ce08aba7db44e17731452a33fd0f87c72423c000f59d984350f4e9e3b7652",
+      "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/agents/high-effort-cloud.yaml": "be46b132c98b28f6a591a4e669fe773cff267c482284a209143035bbbd574e3f",
+      "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/instructions/cloud-implementation.md": "b75e205dfb751ccf100a9c3d92bbc7f7fadb42f0c778aca1af91b5718cf792c7",
+      "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/instructions/cloud-review.md": "37ae41d7feaabb6a5c76f551295d94c1cb4334d6440e831b0213521a12401386",
+      "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/skills/factory-rig/SKILL.md": "7d634d5a9cede4c2eea4d11164e6e6b7897e80d0b04da9dc4a3c24873cc489ff",
+      "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/skills/worker-qualification/SKILL.md": "967902e76fd8a8c96489dfc8424bb74251abda5a2e40c87924506b6a7dc81630",
+      "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/workstreams/software-change.yaml": "bed5a8ebf9097bdc9ab84ec68a11d02db39955b93fa0f76fa38c8fb0c4414e7b"
+    },
+    "event_count": 59,
+    "readable_transcript_present": true
+  },
+  "high_current": {
+    "revision": "5422f12e3bd18e0a2d1a6792143c3a84396eb4ce7f30b6ff4cbc2ccfb370f0ab",
+    "status": "verified",
+    "selection": {
+      "agent_id": "high-effort-cloud",
+      "name": "HighEffortCloud",
+      "requested": {
+        "authentication": {
+          "mode": "subscription",
+          "reference": "projects/factory-511117/secrets/model-auth/versions/1"
+        },
+        "cyber_access_program": "standard",
+        "daybreak": false,
+        "model": "gpt-6-luna",
+        "reasoning_effort": "high"
+      },
+      "resources": [
+        {
+          "path": "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/instructions/cloud-implementation.md",
+          "sha256": "b75e205dfb751ccf100a9c3d92bbc7f7fadb42f0c778aca1af91b5718cf792c7"
+        },
+        {
+          "path": "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/skills/factory-rig/SKILL.md",
+          "sha256": "7d634d5a9cede4c2eea4d11164e6e6b7897e80d0b04da9dc4a3c24873cc489ff"
+        }
+      ],
+      "revision": "be46b132c98b28f6a591a4e669fe773cff267c482284a209143035bbbd574e3f"
+    },
+    "stage_agents": {
+      "implement": "high-effort-cloud"
+    },
+    "definitions": {
+      "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/agents/daybreak-cloud.yaml": "90fb13cf5140a6ca7b23637b5751ae65a47fac0e063ba8b0a4615a2f7b054817",
+      "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/agents/default-cloud.yaml": "78c12b3df8f0631f8c20a4b8dc1679093cd19804e8b376ae2589d5dbe18aef9c",
+      "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/agents/default-review.yaml": "2f8ce08aba7db44e17731452a33fd0f87c72423c000f59d984350f4e9e3b7652",
+      "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/agents/high-effort-cloud.yaml": "be46b132c98b28f6a591a4e669fe773cff267c482284a209143035bbbd574e3f",
+      "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/instructions/cloud-implementation.md": "b75e205dfb751ccf100a9c3d92bbc7f7fadb42f0c778aca1af91b5718cf792c7",
+      "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/instructions/cloud-review.md": "37ae41d7feaabb6a5c76f551295d94c1cb4334d6440e831b0213521a12401386",
+      "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/skills/factory-rig/SKILL.md": "7d634d5a9cede4c2eea4d11164e6e6b7897e80d0b04da9dc4a3c24873cc489ff",
+      "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/skills/worker-qualification/SKILL.md": "967902e76fd8a8c96489dfc8424bb74251abda5a2e40c87924506b6a7dc81630",
+      "/srv/factory/releases/afdba4303b0ed241368d2fb03184a9252639dd6c/factory/workstreams/software-change.yaml": "bed5a8ebf9097bdc9ab84ec68a11d02db39955b93fa0f76fa38c8fb0c4414e7b"
+    },
+    "event_count": 91,
+    "readable_transcript_present": true
+  },
+  "definition_and_shared_resource_pins_unchanged": true,
+  "workspace_deleted": false
+}

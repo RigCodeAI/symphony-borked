@@ -1,19 +1,20 @@
 defmodule SymphonyElixir.Linear.Delegation do
   @moduledoc "Native delegation policy and service-owned Linear operations."
 
-  alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.Linear.{AgentMapping, Client}
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.{WorkerOperation, WorkstreamRunner}
 
   @required ~w(organization_id team_id app_user_id oauth_client_id webhook_secret_env store_path workspace_root workstream_path agent_id rig_label)
-  @optional ~w(workspaces codex_command reconcile_interval_ms worker_control token_env client_secret_env)
+  @optional ~w(workspaces codex_command reconcile_interval_ms worker_control token_env client_secret_env cloud_agents secret_environment_names)
 
   @spec validate(map()) :: {:ok, map()} | {:error, atom()}
   def validate(config) when is_map(config) do
     workspaces = config["workspaces"] || %{}
 
     if valid_fields?(config) and valid_paths?(config) and valid_environment?(config) and
-         valid_workspaces?(workspaces) and valid_optional?(config) do
+         valid_workspaces?(workspaces) and valid_optional?(config) and
+         match?({:ok, _}, AgentMapping.validate(config)) do
       {:ok, Map.put(config, "workspaces", workspaces)}
     else
       {:error, :invalid_linear_delegation_config}
@@ -24,9 +25,17 @@ defmodule SymphonyElixir.Linear.Delegation do
 
   @spec accepts?(map(), map()) :: boolean()
   def accepts?(event, config) do
-    event.organization_id == config["organization_id"] and
-      (event.kind == :issue_updated or
-         (event.app_user_id == config["app_user_id"] and event.oauth_client_id == config["oauth_client_id"]))
+    case AgentMapping.routes(config) do
+      {:ok, routes} ->
+        Enum.any?(routes, fn route ->
+          event.organization_id == route["organization_id"] and
+            ((event.kind == :issue_updated and (is_nil(event[:verified_app_user_id]) or event[:verified_app_user_id] == route["app_user_id"])) or
+               (event.app_user_id == route["app_user_id"] and event.oauth_client_id == route["oauth_client_id"]))
+        end)
+
+      _ ->
+        false
+    end
   end
 
   @spec eligible?(Issue.t(), map()) :: boolean()
@@ -58,7 +67,15 @@ defmodule SymphonyElixir.Linear.Delegation do
   def prepare(issue, config, opts) do
     inputs = %{"task" => "Repository: RigCodeAI/rig\n#{issue.identifier}: #{issue.title}\n#{issue.description || ""}\nDo not publish, push, or merge this candidate."}
     workspace = config["workspaces"][issue.id]
-    execution = [workspace: workspace, workspace_root: config["workspace_root"], issue_id: issue.id]
+
+    execution = [
+      workspace: workspace,
+      workspace_root: config["workspace_root"],
+      issue_id: issue.id,
+      cloud_agent_id: config["agent_id"],
+      secret_environment_names: AgentMapping.credential_environment_names(config) ++ ["FACTORY_LINEAR_SECRET_NAMES_JSON"]
+    ]
+
     execution = if config["codex_command"], do: Keyword.put(execution, :codex_command, config["codex_command"]), else: execution
     execution = if config["worker_control"], do: Keyword.put(execution, :worker_control, config["worker_control"]), else: execution
 
@@ -95,6 +112,16 @@ defmodule SymphonyElixir.Linear.Delegation do
     do: Keyword.put(execution, :authentication_reference, reference)
 
   defp pin_agent_authentication(execution, _agent), do: execution
+
+  @doc "Rejects an existing run whose pinned launch can inherit newly configured service secrets."
+  @spec execution_isolated(map(), map()) :: :ok | {:error, atom()}
+  def execution_isolated(run, config) do
+    excluded = ~w(LINEAR_API_KEY LINEAR_API_TOKEN OAUTH_TOKEN) ++ Map.get(run.execution, :secret_environment_names, [])
+
+    if Enum.all?(AgentMapping.credential_environment_names(config), &(&1 in excluded)),
+      do: :ok,
+      else: {:error, :credential_environment_isolation_unavailable}
+  end
 
   @spec acknowledge(map(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def acknowledge(task, config, opts) do
@@ -138,7 +165,7 @@ defmodule SymphonyElixir.Linear.Delegation do
   defp client_opts(config, run_id) do
     if config["client_secret_env"],
       do: SymphonyElixir.Linear.OAuth.client_opts(config, run_id),
-      else: [tracker_settings: %{endpoint: "https://api.linear.app/graphql", api_key: System.get_env(config["token_env"])}]
+      else: [tracker_settings: %{endpoint: "https://api.linear.app/graphql", api_key: SymphonyElixir.Config.linear_token(config)}]
   end
 
   defp fetch_issue(id, config), do: Client.fetch_delegated_issue(id, client_opts(config, id))
@@ -146,6 +173,7 @@ defmodule SymphonyElixir.Linear.Delegation do
 
   defp acknowledge_session(task, config) do
     body = "Received delegated Rig work. Run #{task.run_id || "pending"}; publication is disabled."
+    body = if task[:evidence_url], do: body <> "\n\nPrivate conversation and test evidence: #{task.evidence_url}", else: body
     Client.acknowledge_agent_session(task.session_id, task.activity_id, body, client_opts(config, task.issue_id))
   end
 
@@ -173,17 +201,12 @@ defmodule SymphonyElixir.Linear.Delegation do
     interval = config["reconcile_interval_ms"] || 5_000
 
     is_integer(interval) and interval >= 1_000 and (is_nil(config["codex_command"]) or is_binary(config["codex_command"])) and
-      (is_nil(config["worker_control"]) or (is_nil(config["codex_command"]) and WorkerOperation.validate_config(config["worker_control"]) == :ok))
+      (is_nil(config["worker_control"]) or (is_nil(config["codex_command"]) and WorkerOperation.validate_config(config["worker_control"]) == :ok)) and
+      (is_nil(config["secret_environment_names"]) or (is_list(config["secret_environment_names"]) and Enum.all?(config["secret_environment_names"], &environment_name?/1)))
   end
 
   defp credential_environment(config) do
-    # Until the shared runtime supports an explicit strip list, only names already
-    # removed by its dynamic-tools-disabled launch are allowed.
-    names = ~w(LINEAR_API_KEY LINEAR_API_TOKEN OAUTH_TOKEN)
-
-    secret_env = config["client_secret_env"] || config["token_env"]
-
-    if secret_env in names and config["webhook_secret_env"] in names and secret_env != config["webhook_secret_env"],
+    if Enum.all?(AgentMapping.credential_environment_names(config), &environment_name?/1),
       do: :ok,
       else: {:error, :credential_environment_isolation_unavailable}
   end

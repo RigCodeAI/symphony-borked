@@ -1,0 +1,52 @@
+{
+  "source_checkpoint": "e019b409b064c901944426055ff1dcfb6300e549",
+  "additional_change": "software_change_test fixture copies every shipped agent and shared resource",
+  "environment": {
+    "image": "dev230-checked:latest",
+    "elixir": "1.19.5",
+    "otp": "28",
+    "schedulers": 2,
+    "cpus": 2,
+    "memory": "4g"
+  },
+  "source_sha256": {
+    "elixir/lib/symphony_elixir/config.ex": "7efc5d8e9f5c37902eddf64526c98d49941320dedc77ae1fe0db22b65615582a",
+    "elixir/lib/symphony_elixir/linear/agent_mapping.ex": "5d0efaaeb894f8ffc5b8873f239fc6339249f598ab0f00e59a7f87a56f7d7b35",
+    "elixir/test/symphony_elixir/linear_agent_mapping_test.exs": "28ca8305a61ef4f1ca60a0fc7c9000e4f64436d15d048e1e1cd40e83df217fa4",
+    "elixir/test/symphony_elixir/linear_agent_mapping_config_test.exs": "a160577b37161760c1593d599362fc172cf4c2f8ab5354be29e9c1e71b091681",
+    "elixir/test/symphony_elixir/software_change_test.exs": "bee9d457ed32574570fa9da90eb38a152bcd679a992b536c1f3ceb6c3eadfc1b",
+    "factory/workstreams/software-change.yaml": "bed5a8ebf9097bdc9ab84ec68a11d02db39955b93fa0f76fa38c8fb0c4414e7b"
+  },
+  "compile": {
+    "command": "MIX_ENV=test mix compile --force --warnings-as-errors",
+    "exit_status": 0,
+    "files": 76
+  },
+  "focused": {
+    "command": "MIX_ENV=test mix test test/symphony_elixir/linear_agent_mapping_test.exs test/symphony_elixir/linear_agent_mapping_config_test.exs test/symphony_elixir/workstream_test.exs test/symphony_elixir/workstream_runner_test.exs test/symphony_elixir/linear_delegation_test.exs test/symphony_elixir/linear_webhook_test.exs test/symphony_elixir/linear_http_test.exs test/symphony_elixir/agent_readiness_test.exs test/symphony_elixir/software_change_test.exs",
+    "exit_status": 0,
+    "tests": 112,
+    "failures": 0,
+    "seed": 281305
+  },
+  "specs": {
+    "command": "mix specs.check",
+    "exit_status": 0
+  },
+  "format": {
+    "command": "mix format --check-formatted lib/symphony_elixir/config.ex lib/symphony_elixir/linear/agent_mapping.ex test/symphony_elixir/linear_agent_mapping_test.exs test/symphony_elixir/linear_agent_mapping_config_test.exs test/symphony_elixir/software_change_test.exs",
+    "exit_status": 0
+  },
+  "initial_focused_result": {
+    "tests": 112,
+    "failures": 1,
+    "reason": "old fixture omitted newly referenced definitions; repaired and rerun"
+  },
+  "boundary": "Full application compile and local focused behavior only. No shared runtime integration, live worker probe, deployment, app installation, PR, or broad CI.",
+  "heavy_build_slot": "released; only own containers and temporary image removed",
+  "artifact_sha256": {
+    "compile.log": "ec50c4c7b20b0d0e189d7baf3308d63a8bcb68a89214fd848de27edc06e22bc2",
+    "focused-tests.log": "d70bb9ca74e8643fae9e317f822aba1634e0f068591064a9a7d921c6ab5808d3",
+    "specs.log": "de1d89d6da0bbf38339fcf687b1eaf9e30d4c677bafeb0ee97c639918b330199"
+  }
+}

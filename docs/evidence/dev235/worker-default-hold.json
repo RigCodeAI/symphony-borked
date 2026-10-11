@@ -1,0 +1,114 @@
+{
+  "active_worker_release": "541279aeb6a5366571e1ee8935e134c728d91c63",
+  "clones": [
+    {
+      "branch": "cycle/dev-250-disposable",
+      "changed_paths": [
+        "crates/rig-agent-hooks/src/agent.rs"
+      ],
+      "head": "39d6d5d998366bf13af19eb74ae47d598ecf92bd",
+      "issue": "DEV-250",
+      "new_test_present": true,
+      "push_url": "DISABLED",
+      "test_source_sha256": "4eda95685fa7ca11570bb23d0fc57b9558223e75da8ac07844a2ebf4ecf8d3d8"
+    },
+    {
+      "branch": "cycle/dev-251-disposable",
+      "changed_paths": [
+        "crates/rig-agent-hooks/src/agent.rs"
+      ],
+      "head": "39d6d5d998366bf13af19eb74ae47d598ecf92bd",
+      "issue": "DEV-251",
+      "new_test_present": true,
+      "push_url": "DISABLED",
+      "test_source_sha256": "2e8767eeeeeb937fb093fd069dac81fa120732bf6390acf88307d1a9217925d4"
+    },
+    {
+      "branch": "cycle/dev-253-disposable",
+      "changed_paths": [],
+      "head": "39d6d5d998366bf13af19eb74ae47d598ecf92bd",
+      "issue": "DEV-253",
+      "new_test_present": false,
+      "push_url": "DISABLED",
+      "test_source_sha256": "270b3231cdee3603aa3ac5ac981c8c825b6ad935ae37bd022ae8f1fbcbbe9eea"
+    }
+  ],
+  "native_session_settings": [
+    {
+      "approval_policy": "never",
+      "cwd": "/srv/factory/contained-workspaces/dev233-control-qualification/rig-native-dev251",
+      "effort": "medium",
+      "issue": "DEV-251",
+      "model": "gpt-6-luna",
+      "sandbox": "workspace-write",
+      "session_id": "01a12b36-46c9-74c0-8d05-2b52ee73c57f",
+      "timestamp": "2026-10-11T13:45:40.723Z"
+    },
+    {
+      "approval_policy": "never",
+      "cwd": "/srv/factory/contained-workspaces/dev233-control-qualification/rig-native-dev251",
+      "effort": "medium",
+      "issue": "DEV-251",
+      "model": "gpt-6-luna",
+      "sandbox": "workspace-write",
+      "session_id": "01a12b40-822e-7383-9a58-fea3fb9d0771",
+      "timestamp": "2026-10-11T13:56:51.392Z"
+    },
+    {
+      "approval_policy": "never",
+      "cwd": "/srv/factory/contained-workspaces/dev233-control-qualification/rig-native-dev250",
+      "effort": "medium",
+      "issue": "DEV-250",
+      "model": "gpt-6-luna",
+      "sandbox": "workspace-write",
+      "session_id": "01a12b31-f891-71f3-aa8c-d124f17fa1b3",
+      "timestamp": "2026-10-11T13:40:58.378Z"
+    },
+    {
+      "approval_policy": "never",
+      "cwd": "/srv/factory/contained-workspaces/dev233-control-qualification/rig-native-dev251",
+      "effort": "medium",
+      "issue": "DEV-251",
+      "model": "gpt-6-luna",
+      "sandbox": "workspace-write",
+      "session_id": "01a12b3a-c5a4-7633-ac6f-f4e1d77bfa16",
+      "timestamp": "2026-10-11T13:50:35.657Z"
+    },
+    {
+      "approval_policy": "never",
+      "cwd": "/srv/factory/contained-workspaces/dev233-control-qualification/rig-native-dev251",
+      "effort": "medium",
+      "issue": "DEV-251",
+      "model": "gpt-6-luna",
+      "sandbox": "workspace-write",
+      "session_id": "01a12b3f-2c9b-7133-a64a-6fa37a3db579",
+      "timestamp": "2026-10-11T13:55:24.067Z"
+    }
+  ],
+  "operations": [
+    {
+      "cgroup": "0::/system.slice/factory-operation-ff2f5a842c5c1f665a0d2727c67304653330259fa267409cad8790cf5699a006.service",
+      "forbidden_environment_absent": true,
+      "pid": 33344,
+      "program": "node",
+      "sleep_180": false,
+      "start_ticks": "6855196"
+    },
+    {
+      "cgroup": "0::/system.slice/factory-operation-ff2f5a842c5c1f665a0d2727c67304653330259fa267409cad8790cf5699a006.service",
+      "forbidden_environment_absent": true,
+      "pid": 33381,
+      "program": "codex",
+      "sleep_180": false,
+      "start_ticks": "6855310"
+    },
+    {
+      "cgroup": "0::/system.slice/factory-operation-ff2f5a842c5c1f665a0d2727c67304653330259fa267409cad8790cf5699a006.service",
+      "forbidden_environment_absent": true,
+      "pid": 33509,
+      "program": "codex-code-mode-host",
+      "sleep_180": false,
+      "start_ticks": "6855806"
+    }
+  ]
+}

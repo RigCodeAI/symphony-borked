@@ -1,0 +1,34 @@
+{
+  "active_worker_release": "541279aeb6a5366571e1ee8935e134c728d91c63",
+  "clones": [
+    {
+      "branch": "cycle/dev-250-disposable",
+      "changed_paths": [],
+      "head": "39d6d5d998366bf13af19eb74ae47d598ecf92bd",
+      "issue": "DEV-250",
+      "new_test_present": false,
+      "push_url": "DISABLED",
+      "test_source_sha256": "270b3231cdee3603aa3ac5ac981c8c825b6ad935ae37bd022ae8f1fbcbbe9eea"
+    },
+    {
+      "branch": "cycle/dev-251-disposable",
+      "changed_paths": [],
+      "head": "39d6d5d998366bf13af19eb74ae47d598ecf92bd",
+      "issue": "DEV-251",
+      "new_test_present": false,
+      "push_url": "DISABLED",
+      "test_source_sha256": "270b3231cdee3603aa3ac5ac981c8c825b6ad935ae37bd022ae8f1fbcbbe9eea"
+    },
+    {
+      "branch": "cycle/dev-253-disposable",
+      "changed_paths": [],
+      "head": "39d6d5d998366bf13af19eb74ae47d598ecf92bd",
+      "issue": "DEV-253",
+      "new_test_present": false,
+      "push_url": "DISABLED",
+      "test_source_sha256": "270b3231cdee3603aa3ac5ac981c8c825b6ad935ae37bd022ae8f1fbcbbe9eea"
+    }
+  ],
+  "native_session_settings": [],
+  "operations": []
+}

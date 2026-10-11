@@ -294,6 +294,7 @@ defmodule SymphonyElixir.Config.Schema do
 
   embedded_schema do
     field(:linear_delegation, :map, default: %{})
+    field(:evidence, :map, default: %{})
     embeds_one(:tracker, Tracker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:polling, Polling, on_replace: :update, defaults_to_struct: true)
     embeds_one(:workspace, Workspace, on_replace: :update, defaults_to_struct: true)
@@ -387,7 +388,7 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp changeset(attrs) do
     %__MODULE__{}
-    |> cast(attrs, [:linear_delegation])
+    |> cast(attrs, [:linear_delegation, :evidence])
     |> cast_embed(:tracker, with: &Tracker.changeset/2)
     |> cast_embed(:polling, with: &Polling.changeset/2)
     |> cast_embed(:workspace, with: &Workspace.changeset/2)

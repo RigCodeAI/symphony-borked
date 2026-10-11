@@ -145,3 +145,42 @@ factory_atomic_json() {
   (umask 077; printf '%s\n' "$factory_local_content" >"$factory_local_temp") || return 1
   mv -f -- "$factory_local_temp" "$factory_local_target"
 }
+
+# Startup is standalone before a release exists; release entrypoints share this guard.
+factory_assert_root_tree() {
+  local factory_tree_path="$1" factory_tree_root factory_tree_entry
+  local factory_tree_owner factory_tree_mode factory_tree_target
+  [[ -d "$factory_tree_path" && ! -L "$factory_tree_path" ]] || {
+    echo 'Protected runtime path must be a real directory' >&2
+    return 1
+  }
+  factory_tree_root="$(realpath -e -- "$factory_tree_path")" || return 1
+  while IFS= read -r -d '' factory_tree_entry; do
+    factory_tree_owner="$(stat -c %u -- "$factory_tree_entry")" || return 1
+    [[ "$factory_tree_owner" = 0 ]] || {
+      echo 'Protected runtime tree contains a non-root-owned path' >&2
+      return 1
+    }
+    if [[ -L "$factory_tree_entry" ]]; then
+      factory_tree_target="$(realpath -e -- "$factory_tree_entry")" || {
+        echo 'Protected runtime tree contains a broken symlink' >&2
+        return 1
+      }
+      case "$factory_tree_target" in
+        "$factory_tree_root"|"$factory_tree_root"/*|/usr/local/bin/mise) ;;
+        *) echo 'Protected runtime tree contains an escaping symlink' >&2; return 1 ;;
+      esac
+      continue
+    fi
+    [[ -d "$factory_tree_entry" || -f "$factory_tree_entry" ]] || {
+      echo 'Protected runtime tree contains a special file' >&2
+      return 1
+    }
+    factory_tree_mode="$(stat -c %a -- "$factory_tree_entry")" || return 1
+    [[ "$factory_tree_mode" =~ ^[0-7]{3,4}$ ]] && \
+      (( (8#$factory_tree_mode & 0022) == 0 )) || {
+        echo 'Protected runtime tree is group- or world-writable' >&2
+        return 1
+      }
+  done < <(find -P "$factory_tree_root" -print0)
+}

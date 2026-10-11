@@ -10,10 +10,14 @@ defmodule SymphonyElixir.WorkstreamStore do
   use GenServer
 
   alias Exqlite.Sqlite3
+  alias SymphonyElixir.{Config, Evidence}
 
   @busy_timeout_ms 100
   @directory_mode 0o700
   @file_mode 0o600
+  @evidence_payload_limit 10 * 1024 * 1024
+  @evidence_entry_limit 32 * 1024 * 1024
+  @evidence_event_id_limit 1_024
 
   @migration_v1 """
   CREATE TABLE runs (
@@ -50,7 +54,16 @@ defmodule SymphonyElixir.WorkstreamStore do
   );
   """
 
-  @migrations [{1, @migration_v1}, {2, @migration_v2}]
+  @migration_v3 """
+  CREATE TABLE evidence_outbox (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL UNIQUE,
+    snapshot BLOB NOT NULL,
+    event BLOB NOT NULL
+  );
+  """
+
+  @migrations [{1, @migration_v1}, {2, @migration_v2}, {3, @migration_v3}]
 
   defmodule State do
     @moduledoc false
@@ -86,6 +99,26 @@ defmodule SymphonyElixir.WorkstreamStore do
   def event(server, event_id) when is_binary(event_id) and event_id != "", do: safe_call(server, {:event, event_id})
 
   def event(_server, _event_id), do: {:error, :invalid_event_id}
+
+  @doc """
+  Returns redacted evidence awaiting durable evidence-index persistence, in commit order.
+  Only the store owner may read it.
+  """
+  @spec pending_evidence(GenServer.server()) ::
+          {:ok, [%{event_id: String.t(), snapshot: map(), event: map()}]} | {:error, term()}
+  def pending_evidence(server), do: safe_call(server, :pending_evidence)
+
+  @doc """
+  Acknowledges one evidence item after the evidence index has durably accepted it.
+  Only the store owner may acknowledge it.
+  """
+  @spec acknowledge_evidence(GenServer.server(), String.t()) :: :ok | {:error, term()}
+  def acknowledge_evidence(server, event_id)
+      when is_binary(event_id) and event_id != "" and byte_size(event_id) <= @evidence_event_id_limit do
+    safe_call(server, {:acknowledge_evidence, event_id})
+  end
+
+  def acknowledge_evidence(_server, _event_id), do: {:error, :invalid_evidence_event_id}
 
   @doc "Atomically records a run snapshot, an input event, stage attempts, and outgoing operations."
   @spec commit(GenServer.server(), run_map(), String.t(), map()) ::
@@ -123,6 +156,27 @@ defmodule SymphonyElixir.WorkstreamStore do
     case validate_linear_commit(event_record, task_record_or_nil) do
       :ok -> safe_call(server, {:linear_commit, event_record, task_record_or_nil})
       {:error, _reason} = error -> error
+    end
+  end
+
+  @doc "Atomically commits a safe Linear agent reassignment across the run, task, and event records."
+  @spec linear_reassign(
+          GenServer.server(),
+          run_map(),
+          run_map(),
+          run_map(),
+          String.t(),
+          map(),
+          map(),
+          map()
+        ) :: :ok | {:error, term()}
+  def linear_reassign(server, expected_run, run_map, expected_task, run_event_id, run_event, event_record, task_record) do
+    case validate_linear_reassignment(expected_run, run_map, expected_task, run_event_id, run_event, event_record, task_record) do
+      :ok ->
+        safe_call(server, {:linear_reassign, expected_run, run_map, expected_task, run_event_id, run_event, event_record, task_record})
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -196,6 +250,36 @@ defmodule SymphonyElixir.WorkstreamStore do
     {:reply, reply, state}
   end
 
+  def handle_call(:pending_evidence, {caller, _tag}, %State{db: db, owner: owner} = state) do
+    reply =
+      if caller == owner do
+        with {:ok, rows} <-
+               query(db, "SELECT event_id, snapshot, event FROM evidence_outbox ORDER BY seq"),
+             {:ok, entries} <- decode_evidence_rows(rows, []) do
+          {:ok, entries}
+        end
+      else
+        {:error, :not_owner}
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:acknowledge_evidence, event_id},
+        {caller, _tag},
+        %State{db: db, owner: owner} = state
+      ) do
+    reply =
+      if caller == owner do
+        execute_prepared(db, "DELETE FROM evidence_outbox WHERE event_id = ?1", [event_id])
+      else
+        {:error, :not_owner}
+      end
+
+    {:reply, reply, state}
+  end
+
   def handle_call(:linear_load, _from, %State{db: db} = state) do
     reply =
       with {:ok, event_rows} <- query(db, "SELECT delivery_id, payload FROM linear_events ORDER BY delivery_id"),
@@ -226,6 +310,30 @@ defmodule SymphonyElixir.WorkstreamStore do
     reply =
       if caller == owner do
         commit_linear_transaction(db, event_record, task_record_or_nil)
+      else
+        {:error, :not_owner}
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:linear_reassign, expected_run, run_map, expected_task, run_event_id, run_event, event_record, task_record},
+        {caller, _tag},
+        %State{db: db, owner: owner} = state
+      ) do
+    reply =
+      if caller == owner do
+        commit_linear_reassignment(
+          db,
+          expected_run,
+          run_map,
+          expected_task,
+          run_event_id,
+          run_event,
+          event_record,
+          task_record
+        )
       else
         {:error, :not_owner}
       end
@@ -568,6 +676,101 @@ defmodule SymphonyElixir.WorkstreamStore do
     end
   end
 
+  defp commit_linear_reassignment(db, expected_run, run_map, expected_task, run_event_id, run_event, event_record, task_record) do
+    case transaction(db, "BEGIN IMMEDIATE", fn ->
+           with :ok <- ensure_expected_run(db, expected_run),
+                :ok <- ensure_expected_linear_task(db, expected_task),
+                :ok <- ensure_pending_reassignment(db, expected_task, run_map, run_event, event_record, task_record),
+                {:ok, nil} <- existing_event_run(db, run_event_id),
+                :ok <- persist_commit(db, run_map, run_event_id, run_event),
+                :ok <- persist_linear_commit(db, event_record, task_record) do
+             {:commit, :ok}
+           else
+             {:ok, existing_run_id} -> {:error, {:run_event_already_committed, existing_run_id}}
+             {:error, reason} -> {:error, reason}
+           end
+         end) do
+      {:committed, :ok} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp ensure_expected_run(db, expected_run) do
+    run_id = field(expected_run, :id)
+
+    case query(db, "SELECT payload FROM runs WHERE run_id = ?1", [run_id]) do
+      {:ok, [[payload]]} ->
+        case decode_run(payload) do
+          {:ok, ^expected_run} -> :ok
+          {:ok, _run} -> {:error, :run_assignment_conflict}
+          {:error, _reason} = error -> error
+        end
+
+      {:ok, []} ->
+        {:error, :run_not_found}
+
+      {:ok, _rows} ->
+        {:error, :invalid_run_row}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp ensure_expected_linear_task(db, expected_task) do
+    issue_id = field(expected_task, :issue_id)
+
+    case query(db, "SELECT payload FROM linear_tasks WHERE issue_id = ?1", [issue_id]) do
+      {:ok, [[payload]]} ->
+        case decode_linear_task(payload, issue_id) do
+          {:ok, ^expected_task} -> :ok
+          {:ok, _task} -> {:error, :linear_task_assignment_conflict}
+          {:error, _reason} = error -> error
+        end
+
+      {:ok, []} ->
+        {:error, :linear_task_not_found}
+
+      {:ok, _rows} ->
+        {:error, :invalid_linear_task_row}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp ensure_pending_reassignment(db, expected_task, run_map, run_event, event_record, task_record) do
+    delivery_id = field(event_record, :id)
+
+    with {:ok, existing_event} <- fetch_linear_event(db, delivery_id),
+         :ok <- ensure_linear_event_identity(existing_event, event_record),
+         true <- field(existing_event, :status) == :pending,
+         true <- get_in(expected_task, [:pending_reassignment, :id]) == delivery_id,
+         true <- field(expected_task, :status) == :reassigning,
+         true <- field(expected_task, :authorized_stage) == nil,
+         true <- field(expected_task, :authorized_until) in [nil, 0],
+         true <- field(event_record, :status) == :handled,
+         true <- field(field(event_record, :event), :kind) == :created,
+         true <- field(task_record, :issue_id) == field(expected_task, :issue_id),
+         true <- field(task_record, :run_id) == field(expected_task, :run_id),
+         true <- field(task_record, :agent_id) == field(run_event, :agent_id),
+         true <- field(run_event, :transition_id) == delivery_id,
+         true <- reassignment_transition?(run_map, delivery_id, field(task_record, :agent_id)) do
+      :ok
+    else
+      false -> {:error, :invalid_linear_reassignment_state}
+      {:error, _reason} = error -> error
+      _ -> {:error, :invalid_linear_reassignment_state}
+    end
+  end
+
+  defp reassignment_transition?(run, transition_id, agent_id) do
+    Enum.any?(Map.get(run, :agent_transitions, []), fn
+      %{id: ^transition_id, to: %{agent_id: ^agent_id}} -> true
+      _ -> false
+    end)
+  end
+
   defp persist_linear_commit(db, event_record, task_record_or_nil) do
     delivery_id = field(event_record, :id)
 
@@ -647,6 +850,54 @@ defmodule SymphonyElixir.WorkstreamStore do
   end
 
   defp validate_linear_commit(_event_record, _task_record_or_nil), do: {:error, :invalid_linear_commit}
+
+  defp validate_linear_reassignment(expected_run, run_map, expected_task, run_event_id, run_event, event_record, task_record)
+       when is_map(expected_run) and is_map(run_map) and is_map(expected_task) and is_map(run_event) and
+              is_map(event_record) and is_map(task_record) do
+    cond do
+      field(expected_run, :id) != field(run_map, :id) ->
+        {:error, :invalid_run_id}
+
+      field(expected_run, :task_id) != field(run_map, :task_id) ->
+        {:error, :invalid_task_id}
+
+      field(expected_task, :run_id) != field(expected_run, :id) ->
+        {:error, :invalid_linear_reassignment_state}
+
+      not (is_binary(run_event_id) and run_event_id != "") ->
+        {:error, :invalid_event_id}
+
+      field(run_event, :kind) != :agent_reassigned ->
+        {:error, :invalid_run_event}
+
+      field(event_record, :id) != get_in(expected_task, [:pending_reassignment, :id]) ->
+        {:error, :invalid_linear_event_record}
+
+      field(task_record, :run_id) != field(run_map, :id) ->
+        {:error, :invalid_linear_task}
+
+      field(run_map, :status) not in [:ready, :waiting_for_answer] ->
+        {:error, :run_not_reassignable}
+
+      not reassignment_transition?(run_map, field(event_record, :id), field(task_record, :agent_id)) ->
+        {:error, :invalid_agent_transition}
+
+      validate_commit(run_map, run_event_id, run_event) != :ok ->
+        validate_commit(run_map, run_event_id, run_event)
+
+      validate_linear_commit(event_record, task_record) != :ok ->
+        validate_linear_commit(event_record, task_record)
+
+      validate_linear_task(expected_task) != :ok ->
+        validate_linear_task(expected_task)
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_linear_reassignment(_expected_run, _run_map, _expected_task, _run_event_id, _run_event, _event_record, _task_record),
+    do: {:error, :invalid_linear_reassignment}
 
   defp validate_linear_task(task_map) when is_map(task_map) do
     issue_id = field(task_map, :issue_id)
@@ -751,15 +1002,93 @@ defmodule SymphonyElixir.WorkstreamStore do
     attempts = field(run_map, :attempts)
     operations = field(run_map, :operations)
 
-    with {:ok, run_blob} <- encode_term(run_map),
+    with {:ok, evidence_payload} <- journal_evidence(run_map, event_map, event_id),
+         {:ok, run_blob} <- encode_term(run_map),
          {:ok, event_blob} <- encode_term(event_map),
          :ok <- upsert_run(db, run_id, task_id, run_blob),
          :ok <- upsert_attempts(db, run_id, attempts),
          :ok <- upsert_operations(db, run_id, operations),
-         :ok <- insert_event(db, event_id, run_id, event_blob) do
+         :ok <- insert_event(db, event_id, run_id, event_blob),
+         :ok <- insert_evidence_outbox(db, event_id, evidence_payload) do
       :ok
     end
   end
+
+  defp journal_evidence(run_map, event_map, event_id) do
+    case Config.evidence() do
+      :disabled ->
+        {:ok, :disabled}
+
+      {:ok, _config} when byte_size(event_id) <= @evidence_event_id_limit ->
+        try do
+          case Evidence.journal(run_map, event_map) do
+            %{snapshot: snapshot, event: event} -> encode_evidence_payload(snapshot, event)
+            _ -> {:error, :invalid_evidence_payload}
+          end
+        rescue
+          _error -> {:error, :evidence_journal_failed}
+        catch
+          _kind, _reason -> {:error, :evidence_journal_failed}
+        end
+
+      {:ok, _config} ->
+        {:error, :invalid_evidence_payload}
+
+      {:error, _reason} ->
+        {:error, :evidence_configuration_unavailable}
+    end
+  rescue
+    _error -> {:error, :evidence_configuration_unavailable}
+  catch
+    _kind, _reason -> {:error, :evidence_configuration_unavailable}
+  end
+
+  defp encode_evidence_payload(snapshot, event) when is_map(snapshot) and is_map(event) do
+    if safe_persistent_term?(snapshot) and safe_persistent_term?(event) do
+      with {:ok, snapshot_blob} <- encode_term(snapshot),
+           {:ok, event_blob} <- encode_term(event),
+           true <- byte_size(snapshot_blob) <= @evidence_payload_limit,
+           true <- byte_size(event_blob) <= @evidence_payload_limit,
+           true <- byte_size(snapshot_blob) + byte_size(event_blob) <= @evidence_entry_limit do
+        {:ok, {:enabled, snapshot_blob, event_blob}}
+      else
+        _ -> {:error, :invalid_evidence_payload}
+      end
+    else
+      {:error, :invalid_evidence_payload}
+    end
+  end
+
+  defp encode_evidence_payload(_snapshot, _event), do: {:error, :invalid_evidence_payload}
+
+  defp insert_evidence_outbox(_db, _event_id, :disabled), do: :ok
+
+  defp insert_evidence_outbox(db, event_id, {:enabled, snapshot_blob, event_blob}) do
+    execute_prepared(
+      db,
+      "INSERT INTO evidence_outbox (event_id, snapshot, event) VALUES (?1, ?2, ?3)",
+      [event_id, {:blob, snapshot_blob}, {:blob, event_blob}]
+    )
+  end
+
+  defp decode_evidence_rows([], acc), do: {:ok, Enum.reverse(acc)}
+
+  defp decode_evidence_rows([[event_id, snapshot_blob, event_blob] | rest], acc)
+       when is_binary(event_id) and byte_size(event_id) in 1..@evidence_event_id_limit and
+              is_binary(snapshot_blob) and is_binary(event_blob) do
+    with true <- byte_size(snapshot_blob) <= @evidence_payload_limit,
+         true <- byte_size(event_blob) <= @evidence_payload_limit,
+         true <- byte_size(snapshot_blob) + byte_size(event_blob) <= @evidence_entry_limit,
+         {:ok, snapshot} when is_map(snapshot) <- decode_term(snapshot_blob),
+         {:ok, event} when is_map(event) <- decode_term(event_blob),
+         true <- safe_persistent_term?(snapshot) and safe_persistent_term?(event) do
+      decode_evidence_rows(rest, [%{event_id: event_id, snapshot: snapshot, event: event} | acc])
+    else
+      _ -> {:error, :invalid_evidence_outbox_row}
+    end
+  end
+
+  defp decode_evidence_rows(_rows, _acc), do: {:error, :invalid_evidence_outbox_row}
 
   defp upsert_run(db, run_id, task_id, payload) do
     execute_prepared(

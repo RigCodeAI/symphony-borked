@@ -1,0 +1,15 @@
+{
+  "issue": "DEV-253",
+  "session_id": "23a5e68e-09e0-4d4e-8f65-4dee88f8e8f4",
+  "visible_block_activities": [
+    {
+      "id": "99d02688-dff7-4dc3-be10-8021f91e599c",
+      "created_at": "2026-10-11T13:40:12.750Z",
+      "content_type": "AgentActivityErrorContent",
+      "body": "Task blocked before execution: :daybreak_execution_unverified"
+    }
+  ],
+  "activity_count": 1,
+  "token_saved": false,
+  "no_fallback": true
+}

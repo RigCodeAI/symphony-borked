@@ -454,7 +454,9 @@ See [app setup and deployment](../docs/linear-delegation.md#linear-app-setup).
 Optional `cloud_agents` entries extend the same coordinator with exact identity and
 per-app signature checks, pinned cloud selection and safe recorded reassignment.
 `Config.linear_webhook_secrets/1` resolves signing references; all configured app
-credentials are excluded from worker launches. A reassignment waits for confirmed
+credentials are excluded from worker launches. Existing ready or human-wait runs with
+confirmed quiescent operations durably add new credential names before their next scope
+check; persistence failure leaves authorization unavailable. A reassignment waits for confirmed
 termination, then commits run/task/event together. Internal reviewers remain explicit
 workstream references. See [DEV-235 configuration and verification](../docs/dev-235-agent-mapping.md)
 and the [additional-app setup plan](../docs/dev-235-app-setup.md). Native acceptance of

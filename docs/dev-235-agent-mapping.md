@@ -1,20 +1,24 @@
 # DEV-235 named cloud-agent routing
 
-Status: tested DEV-235 code is deployed; additional app installation and native
-acceptance remain pending. No complete acceptance claim or PR is made here.
-The coordinator source verified during DEV-235 activation was
-`366734057481aa2c160319f05205e8e7f582a30e`. DEV-237 owns the next integration
-and activation; recheck its later deployment before any further live change.
-Human approval was verified in the Factory Orchestrator chat; the approved retry
-staged, built and activated that source with root-private rollback snapshots.
-Health is active/running, all five prior tasks remain stopped, and no worker
-operation is running. Both additional OAuth application records are created;
-their credentials, installation and service routes remain pending. Google Secret Manager sign-in succeeded on 2026-10-11; the UI verifies
-`adam@rig.ai` in project `factory-511117`. Both apps' client and signing secrets
-are prepared privately in volatile browser runtime, with the clipboard cleared.
-No values were uploaded or saved in task artifacts. Container creation,
-installation and activation still await the coordinated live slot. See the
-[deployment boundary](evidence/dev235/deployment-boundary.json).
+Status: both additional apps are installed with DEV-only access, and all four
+coordinator-only secret versions are stored at numeric version `1`. Native
+acceptance and activation of the additional service routes remain pending; no
+complete acceptance claim or PR is made here.
+
+The active combined coordinator is
+`fb0cad378d79b8b275a4ddb3cf70ac51b0abcdbd`, archive
+`bce43046aa21c08f77a423c2c8749565b00431d88858718a90e54508bbedda62`.
+Its evidence schema is version 3. DEV-252's existing human wait and workspace
+must remain separate from DEV-235 acceptance. The new configuration needs a
+verified additive credential-exclusion update before activation; the earlier
+`3667340` activation recorded in the deployment boundary is historical.
+
+Google Cloud CLI sign-in as `adam@rig.ai` succeeded on 2026-10-11. A refreshed
+full Terraform plan applied only four secret containers and four coordinator
+access grants, preserving current VM metadata and release-reader conditions.
+No values entered Terraform, logs or task artifacts; temporary browser copies
+and the clipboard were cleared after storage. See the
+[approved setup and receipts](dev-235-app-setup.md).
 
 ## Settings and boundaries
 
@@ -60,8 +64,11 @@ explicit reviewer stages unchanged. Enqueue uses the same bound digest. Ordinary
 resume executes the saved definition without rereading files. All configured
 service credential/signing names are pinned in execution context and stripped
 from local and remote agent launches, including shell-profile reintroduction.
-Older pinned launches lacking required exclusions block before reuse. Check
-processes retain their existing environment allowlist.
+Before its next scope check, an existing ready or human-wait run with confirmed
+quiescent operations durably adds newly configured credential names to its
+exclusions. Its wait, workspace and definition stay pinned. A failed write leaves
+authorization unavailable; active or uncertain runs with missing exclusions block.
+Check processes retain their existing environment allowlist.
 
 Deployment accepts Default plus complete optional High Effort/Daybreak secret
 pairs with numeric version pins. The protected entrypoint exports a nonsecret
@@ -94,9 +101,9 @@ publications remain in assignment history; late old-app/session stops and prompt
 cannot affect the new selection. Stop receipts are scoped to assignment generation
 and attempt so a second safe handoff is independently durable.
 
-## Archive integration seam for DEV-237
+## Archive integration with DEV-237
 
-DEV-235 has no dependency on the unmerged Evidence module. A successful atomic
+The combined coordinator includes DEV-237’s Evidence module. A successful atomic
 reassignment is a run commit boundary alongside queue/stage/question/reply/stop
 commits; DEV-237 must snapshot it once using `linear-reassignment/<delivery-id>`
 or the recorded run event ID. Stable archive URLs remain keyed by run/task ID.
@@ -113,10 +120,9 @@ never treat arbitrary snapshot contents as a transition. Keep each historical
 manifest/readable transcript and the current selection accessible. Publishing and
 validation gates remain separate service decisions.
 
-The pending integration hooks are documented in DEV-237's
-`docs/evidence/dev-237/integration-contract.md`; the root coordinates their shared
-file merge after DEV-235 stabilizes. DEV-237's current first-write-only pin rule
-must change before archive integration can accept a reassigned run.
+The combined evidence implementation preserves recorded reassignment revisions.
+Native acceptance must still verify the same archive URL and readable historical
+selection after a real reassignment; local tests alone do not prove that path.
 
 ## Verification and pending live acceptance
 

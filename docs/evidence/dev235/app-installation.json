@@ -1,0 +1,73 @@
+{
+  "applications": [
+    {
+      "app": "high-effort",
+      "oauth_client_id": "456e94735c924ab9b1148ce1a870a133",
+      "viewer": {
+        "id": "a7d15aec-f9a2-4806-9fbf-ca36a141178b",
+        "name": "High Effort Cloud Agent"
+      },
+      "organization": {
+        "id": "9b259b98-cb6c-4256-88af-3a3f385c3fa7",
+        "name": "Rig"
+      },
+      "teams": [
+        {
+          "id": "41e1aa00-b853-44a9-930d-79e424259565",
+          "key": "DEV",
+          "name": "Dev"
+        }
+      ],
+      "scopes": [
+        "app:assignable",
+        "read",
+        "write"
+      ],
+      "token_persisted": false,
+      "expires_in": 2591999,
+      "team_access": {
+        "mode": "only_selected_teams",
+        "team_ids": [
+          "41e1aa00-b853-44a9-930d-79e424259565"
+        ],
+        "verified_by": "Linear installed-app settings: Only select teams selected, Dev only, Update disabled after saved confirmation"
+      }
+    },
+    {
+      "app": "daybreak",
+      "oauth_client_id": "56cdf6931848e6c10e5e6f27192abfb4",
+      "viewer": {
+        "id": "3dc1a02b-4b99-4b73-8135-c0901efe50d9",
+        "name": "Daybreak Cloud Agent"
+      },
+      "organization": {
+        "id": "9b259b98-cb6c-4256-88af-3a3f385c3fa7",
+        "name": "Rig"
+      },
+      "teams": [
+        {
+          "id": "41e1aa00-b853-44a9-930d-79e424259565",
+          "key": "DEV",
+          "name": "Dev"
+        }
+      ],
+      "scopes": [
+        "app:assignable",
+        "read",
+        "write"
+      ],
+      "token_persisted": false,
+      "expires_in": 2591999,
+      "team_access": {
+        "mode": "only_selected_teams",
+        "team_ids": [
+          "41e1aa00-b853-44a9-930d-79e424259565"
+        ],
+        "verified_by": "Linear installed-app settings: Only select teams selected, Dev only, Update disabled after saved confirmation"
+      }
+    }
+  ],
+  "all_signing_keys_distinct": true,
+  "credentials_in_outputs": false,
+  "coordinator_revision_unchanged": "fb0cad378d79b8b275a4ddb3cf70ac51b0abcdbd"
+}

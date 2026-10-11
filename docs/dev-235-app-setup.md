@@ -1,9 +1,23 @@
 # DEV-235 additional app setup plan
 
-This exact plan was approved in the Factory Orchestrator chat. Both OAuth
-application records are created, with installation and credential storage still
-pending. No secret container or access grant has been created yet. The existing
-coordinator and one qualified worker are sufficient.
+This exact plan was approved in the Factory Orchestrator chat. Both OAuth apps
+are installed with DEV-only team access. The four secret containers and four
+coordinator-only grants were applied on 2026-10-11, and every secret is pinned
+to enabled version `1`. Activation of the additional routes and native acceptance
+remain pending. The existing coordinator and one qualified worker are sufficient.
+
+| App | Client ID | Verified app-user ID |
+| --- | --- | --- |
+| High Effort Cloud Agent | `456e94735c924ab9b1148ce1a870a133` | `a7d15aec-f9a2-4806-9fbf-ca36a141178b` |
+| Daybreak Cloud Agent | `56cdf6931848e6c10e5e6f27192abfb4` | `3dc1a02b-4b99-4b73-8135-c0901efe50d9` |
+
+The app token checks resolved the expected Rig organization, DEV team and exactly
+`read,write,app:assignable` scopes. Linear's installed-app settings then confirmed
+**Only select teams → Dev** for both apps. All three webhook signing keys compare
+distinct. Credential values and access tokens are absent from task artifacts.
+See [installation evidence](evidence/dev235/app-installation.json),
+[container apply](evidence/dev235/secret-container-apply.json) and
+[version metadata](evidence/dev235/secret-version-metadata.json).
 
 ## Exact additions
 

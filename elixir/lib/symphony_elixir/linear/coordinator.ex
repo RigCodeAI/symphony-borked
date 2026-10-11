@@ -2,7 +2,7 @@ defmodule SymphonyElixir.Linear.Coordinator do
   @moduledoc "Durable native event intake owned by the existing coordinator."
 
   alias SymphonyElixir.Linear.{AgentMapping, Delegation}
-  alias SymphonyElixir.{Config, WorkstreamRun, WorkstreamStore}
+  alias SymphonyElixir.{Config, Evidence, WorkstreamRun, WorkstreamStore}
 
   @spec init(map(), keyword()) :: {:ok, map()} | {:error, term()}
   def init(state, opts) do
@@ -382,6 +382,10 @@ defmodule SymphonyElixir.Linear.Coordinator do
   end
 
   defp reassignment_quiescent?(run) do
+    quiescent_operations?(run)
+  end
+
+  defp quiescent_operations?(run) do
     Enum.all?(run.operations, fn {_id, operation} ->
       case operation do
         %{status: status} when status in [:completed, :not_applied] -> not Map.has_key?(operation, :reconciliation)
@@ -473,16 +477,109 @@ defmodule SymphonyElixir.Linear.Coordinator do
           event = task.event
           run = state.workstreams.runs[task.run_id]
 
-          start_job(state, {:check, issue_id, revision}, fn ->
-            with :ok <- Delegation.execution_isolated(run, route),
-                 do: Delegation.inspect_event(event, route, state.linear.opts)
-          end)
+          case pin_current_secret_environment_names(state, run, route) do
+            {:ok, updated_state, updated_run} ->
+              start_task_check(updated_state, issue_id, revision, event, updated_run, route)
+
+            {:unsafe, updated_state, _unchanged_run} ->
+              defer_task_check(updated_state, task)
+
+            {:retry, updated_state} ->
+              defer_task_check(updated_state, task)
+          end
 
         true ->
           nil
       end
     end)
   end
+
+  defp start_task_check(state, issue_id, revision, event, run, route) do
+    start_job(state, {:check, issue_id, revision}, fn ->
+      with :ok <- Delegation.execution_isolated(run, route),
+           do: Delegation.inspect_event(event, route, state.linear.opts)
+    end)
+  end
+
+  defp pin_current_secret_environment_names(state, run, route) when is_map(run) and is_map(route) do
+    execution = Map.get(run, :execution)
+    existing = if is_map(execution), do: Map.get(execution, :secret_environment_names, []), else: nil
+    current = AgentMapping.credential_environment_names(route) ++ ["FACTORY_LINEAR_SECRET_NAMES_JSON"]
+
+    cond do
+      not is_list(existing) or not valid_environment_names?(existing) or not valid_environment_names?(current) ->
+        {:retry, state}
+
+      Enum.all?(current, &(&1 in existing)) ->
+        {:ok, state, run}
+
+      not secret_environment_names_update_safe?(run) ->
+        {:unsafe, state, run}
+
+      true ->
+        merged = Enum.sort(Enum.uniq(existing ++ current))
+        updated = Map.put(run, :execution, Map.put(execution, :secret_environment_names, merged))
+        persist_secret_environment_names(state, updated, merged)
+    end
+  end
+
+  defp pin_current_secret_environment_names(state, _run, _route), do: {:retry, state}
+
+  defp persist_secret_environment_names(state, updated, names) do
+    names = Enum.sort(names)
+    event = %{kind: :service_secret_environment_names_pinned, environment_names: names}
+    event_id = "linear-secret-environment-names/" <> digest(Jason.encode!([updated.id, names]))
+
+    case WorkstreamStore.commit(state.workstreams.store, updated, event_id, event) do
+      :ok ->
+        {:ok, record_secret_environment_update(state, updated), updated}
+
+      {:duplicate, run_id} when run_id == updated.id ->
+        case {WorkstreamStore.event(state.workstreams.store, event_id), WorkstreamStore.fetch(state.workstreams.store, updated.id)} do
+          {{:ok, %{run_id: ^run_id, event: ^event}}, {:ok, stored}} ->
+            stored_names = get_in(stored, [:execution, :secret_environment_names])
+
+            if stored == updated and valid_environment_names?(stored_names) and Enum.all?(names, &(&1 in stored_names)) do
+              {:ok, record_secret_environment_update(state, stored), stored}
+            else
+              {:retry, state}
+            end
+
+          _ ->
+            {:retry, state}
+        end
+
+      _ ->
+        {:retry, state}
+    end
+  end
+
+  defp record_secret_environment_update(state, run) do
+    :ok = Evidence.sync!(state.workstreams.store)
+    :ok = Evidence.retain_validation!(run)
+    put_in(state.workstreams.runs[run.id], run)
+  end
+
+  defp defer_task_check(state, task) do
+    task = Map.merge(task, %{authorized_stage: nil, authorized_until: 0, check_at: System.system_time(:millisecond) + 5_000})
+    state = put_in(state.linear.tasks[task.issue_id], task)
+
+    case WorkstreamStore.linear_task(state.workstreams.store, task) do
+      :ok -> state
+      _ -> state
+    end
+  end
+
+  defp secret_environment_names_update_safe?(%{status: status} = run)
+       when status in [:ready, :waiting_for_answer],
+       do: quiescent_operations?(run)
+
+  defp secret_environment_names_update_safe?(_run), do: false
+
+  defp valid_environment_names?(names) when is_list(names),
+    do: Enum.all?(names, &(is_binary(&1) and String.match?(&1, ~r/^[A-Z][A-Z0-9_]*$/)))
+
+  defp valid_environment_names?(_names), do: false
 
   defp start_job(state, key, fun) do
     owner = self()

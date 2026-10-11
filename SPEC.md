@@ -9,6 +9,10 @@ executable checks and human waits, with declared inputs/outputs, inline exit-sta
 and repair edges bounded to three additional dispatches per gate. Invalid definitions,
 references, data dependencies, transitions and unbounded cycles reject before dispatch.
 
+A repair agent receives the immediately preceding failed check's result and gate detail
+in its prompt, including when its executing attempt is already durably recorded. A
+passing check or an older failure does not add repair feedback to a later agent turn.
+
 The existing orchestrator can own manually queued durable runs with SQLite storage.
 One coordinator holds the database write lock. Enqueue pins resolved workstream, agent,
 instruction and skill text/digests, execution context, and service policy digests. Each

@@ -786,16 +786,43 @@ defmodule SymphonyElixir.WorkstreamRunner do
 
   defp durable_evidence_state?(_state), do: false
 
-  defp repair_feedback(%{attempts: attempts}) do
-    case List.last(attempts) do
-      %{type: :check, result: result} = attempt ->
-        detail = Map.get(attempt, :gate_detail)
-        "\nGate failure triggering repair:\n#{Jason.encode!(%{result: result, gate_detail: detail})}"
+  defp repair_feedback(%{attempts: attempts} = state) do
+    previous_attempt =
+      attempts
+      |> Enum.reject(&current_attempt?(&1, Map.get(state, :current_attempt_id)))
+      |> List.last()
+
+    case previous_attempt do
+      %{type: :check} = attempt ->
+        if failed_check_attempt?(attempt) do
+          detail = Map.get(attempt, :gate_detail)
+          "\nGate failure triggering repair:\n#{Jason.encode!(%{result: attempt.result, gate_detail: detail})}"
+        else
+          ""
+        end
 
       _ ->
         ""
     end
   end
+
+  defp current_attempt?(attempt, attempt_id) when is_binary(attempt_id),
+    do: Map.get(attempt, :id) == attempt_id
+
+  defp current_attempt?(_attempt, _attempt_id), do: false
+
+  defp failed_check_attempt?(%{gate: :passed}), do: false
+  defp failed_check_attempt?(%{gate: :failed}), do: true
+  defp failed_check_attempt?(%{result: %{status: status}}) when status in [:error, "error"], do: true
+
+  defp failed_check_attempt?(%{result: %{evidence: evidence}}) when is_map(evidence) do
+    case Map.get(evidence, :exit_status, Map.get(evidence, "exit_status")) do
+      exit_status when is_integer(exit_status) -> exit_status != 0
+      _ -> false
+    end
+  end
+
+  defp failed_check_attempt?(_attempt), do: false
 
   defp default_codex_command do
     path = "'" <> String.replace(System.get_env("PATH", ""), "'", "'\\''") <> "'"

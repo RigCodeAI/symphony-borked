@@ -957,6 +957,31 @@ defmodule SymphonyElixir.DurableWorkstreamTest do
     assert blocked.attempts == []
   end
 
+  test "changed executor policy preserves a saved human wait but blocks recovery", c do
+    waiting =
+      fixture_run(c, "old-executor-wait")
+      |> WorkstreamRun.start_stage()
+      |> WorkstreamRun.finish_stage({:ok, %{session_id: "saved-session"}})
+      |> WorkstreamRun.start_stage()
+      |> WorkstreamRun.finish_stage({:ok, %{exit_status: 0, output: "saved check", timed_out: false}})
+      |> WorkstreamRun.start_stage()
+
+    assert waiting.status == :waiting_for_answer
+    historical = put_in(waiting.policy.executor_sha256, "previous-executor-policy")
+    saved = persist_pre_dev234_run(c, historical, "old-executor-wait", historical.policy)
+    runtime = runtime(c, &normal_executor/4, auto_advance: false)
+    blocked = run_state(runtime, saved.id, :policy_blocked)
+    loaded = coordinator_run(runtime, saved.id)
+    assert_pre_dev234_defaults(loaded, saved)
+    assert loaded.pending_wait == saved.pending_wait
+    assert blocked.policy.executor_sha256 == "previous-executor-policy"
+    restart(runtime)
+    assert run_state(runtime, saved.id, :policy_blocked) == blocked
+    assert coordinator_run(runtime, saved.id).pending_wait == saved.pending_wait
+    assert :ok = Orchestrator.step_workstreams(runtime.coordinator)
+    assert Task.Supervisor.children(runtime.tasks) == []
+  end
+
   test "manual mode avoids tracker startup and rejects malformed requests without dispatch", c do
     runtime = runtime(c, &normal_executor/4)
     assert {:error, :inputs_must_be_json_data} = Orchestrator.queue_workstream(runtime.coordinator, "bad", "task", c.path, %{"task" => self()}, c.options)

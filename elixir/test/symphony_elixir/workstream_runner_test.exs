@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.WorkstreamRunnerTest do
   use ExUnit.Case, async: true
-  alias SymphonyElixir.{WorkstreamCommand, WorkstreamRunner}
+  alias SymphonyElixir.{WorkstreamCommand, WorkstreamRun, WorkstreamRunner}
 
   setup do
     root = Path.join(System.tmp_dir!(), "workstream-runner-#{System.unique_integer([:positive])}")
@@ -304,6 +304,127 @@ defmodule SymphonyElixir.WorkstreamRunnerTest do
     assert length(report.attempts) == 6
   end
 
+  test "durable repair prompts include only the immediately preceding failed check", context do
+    path = Path.join(context.root, "durable-repair-feedback.yaml")
+    codex_binary = Path.join(context.root, "fake-codex")
+    trace_file = Path.join(context.root, "codex.trace")
+
+    gate_command = [
+      "sh",
+      "-c",
+      "if [ -f gate-passes ]; then printf 'gate passed'; else printf 'fixture missing'; exit 17; fi"
+    ]
+
+    File.write!(path, """
+    version: 1
+    name: smoke
+    inputs: [task]
+    agents:
+      worker: agent.yaml
+    entry: implement
+    stages:
+      - id: implement
+        type: agent
+        inputs: [task]
+        outputs: [candidate]
+        agent: worker
+        prompt: Add the requested regression.
+        next: validate
+      - id: validate
+        type: check
+        inputs: [candidate]
+        outputs: [check]
+        gate:
+          command: #{Jason.encode!(gate_command)}
+          timeout_ms: 1000
+          success: followup
+          failure: {repair: implement, max_attempts: 1}
+      - id: followup
+        type: agent
+        inputs: [candidate, check]
+        outputs: [followup]
+        agent: worker
+        prompt: Continue after validation.
+        next: final-check
+      - id: final-check
+        type: check
+        inputs: [followup]
+        outputs: []
+        gate:
+          command: ["true"]
+          timeout_ms: 1000
+          success: complete
+          failure: blocked
+    """)
+
+    write_fake_workstream_app_server!(codex_binary, trace_file)
+
+    opts = [
+      workspace: context.workspace,
+      workspace_root: Path.join(context.root, "workspaces"),
+      codex_command: "#{codex_binary} app-server"
+    ]
+
+    assert {:ok, definition, workspace} =
+             WorkstreamRunner.prepare(path, %{"task" => "repair feedback"}, opts)
+
+    run = WorkstreamRun.new("task-repair-feedback", definition, workspace, opts)
+
+    run =
+      run
+      |> WorkstreamRun.start_stage()
+      |> WorkstreamRun.finish_stage({:ok, %{thread_id: "initial-thread", session_id: "initial-turn"}})
+      |> WorkstreamRun.start_stage()
+
+    assert {:ok, failed_check} =
+             WorkstreamRunner.execute_stage("validate", definition, run, Map.to_list(run.execution))
+
+    assert failed_check.exit_status == 17
+    assert failed_check.output == "fixture missing"
+    run = WorkstreamRun.finish_stage(run, {:ok, failed_check})
+    assert run.stage_id == "implement"
+    assert run.repairs == %{"validate" => 1}
+
+    run = WorkstreamRun.start_stage(run)
+    assert List.last(run.attempts).id == run.current_attempt_id
+    assert List.last(run.attempts).status == :executing
+
+    assert {:ok, repaired_agent} =
+             WorkstreamRunner.execute_stage("implement", definition, run, Map.to_list(run.execution))
+
+    run = WorkstreamRun.finish_stage(run, {:ok, repaired_agent}) |> WorkstreamRun.start_stage()
+
+    File.write!(Path.join(workspace, "gate-passes"), "ready")
+
+    assert {:ok, passed_check} =
+             WorkstreamRunner.execute_stage("validate", definition, run, Map.to_list(run.execution))
+
+    assert passed_check.exit_status == 0
+    run = WorkstreamRun.finish_stage(run, {:ok, passed_check}) |> WorkstreamRun.start_stage()
+    assert run.stage_id == "followup"
+    assert List.last(run.attempts).id == run.current_attempt_id
+    assert Enum.any?(run.attempts, &(&1.type == :check and &1.gate == :failed))
+
+    assert {:ok, _followup_agent} =
+             WorkstreamRunner.execute_stage("followup", definition, run, Map.to_list(run.execution))
+
+    prompts =
+      trace_file
+      |> File.read!()
+      |> String.split("\n", trim: true)
+      |> Enum.map(&Jason.decode!/1)
+      |> Enum.filter(&(&1["method"] == "turn/start"))
+      |> Enum.map(fn request -> get_in(request, ["params", "input", Access.at(0), "text"]) end)
+
+    assert length(prompts) == 2
+    repair_prompt = Enum.at(prompts, 0)
+    followup_prompt = Enum.at(prompts, 1)
+    assert repair_prompt =~ "Gate failure triggering repair:"
+    assert repair_prompt =~ "fixture missing"
+    refute followup_prompt =~ "Gate failure triggering repair:"
+    refute followup_prompt =~ "fixture missing"
+  end
+
   test "agent failure stops before executing the check", context do
     path = definition(context, ["touch", "unexpected"])
     agent = fn _, _, _, _ -> {:error, {:raw, "secret"}} end
@@ -380,5 +501,31 @@ defmodule SymphonyElixir.WorkstreamRunnerTest do
       assert String.valid?(result.output)
       assert Jason.encode!(result)
     end
+  end
+
+  defp write_fake_workstream_app_server!(path, trace_file) do
+    File.write!(path, """
+    #!/bin/sh
+    trace_file='#{trace_file}'
+    while IFS= read -r line; do
+      printf '%s\\n' "$line" >> "$trace_file"
+      case "$line" in
+        *'"id":101'*) printf '%s\\n' '{"id":101,"result":{"account":{"type":"chatgpt","planType":"plus"}}}' ;;
+        *'"id":102'*) printf '%s\\n' '{"id":102,"result":{"data":[{"id":"gpt-6-luna","supportedReasoningEfforts":[{"reasoningEffort":"medium"}],"availableAccessPrograms":{"cyber":["standard"]}}]}}' ;;
+        *'"id":103'*) printf '%s\\n' '{"id":103,"result":{"ordinaryUsageAllowed":true}}' ;;
+        *'"id":104'*) printf '%s\\n' '{"id":104,"result":{"config":{},"layers":[]}}' ;;
+        *'"id":1'*) printf '%s\\n' '{"id":1,"result":{}}' ;;
+        *'"method":"initialized"'*) ;;
+        *'"id":2'*) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"controlled-thread","model":"gpt-6-luna","reasoningEffort":"medium","daybreakEnabled":false},"model":"gpt-6-luna"}}' ;;
+        *'"id":3'*)
+          printf '%s\\n' '{"id":3,"result":{"turn":{"id":"controlled-turn"}}}'
+          printf '%s\\n' '{"method":"turn/completed"}'
+          exit 0
+          ;;
+      esac
+    done
+    """)
+
+    File.chmod!(path, 0o755)
   end
 end

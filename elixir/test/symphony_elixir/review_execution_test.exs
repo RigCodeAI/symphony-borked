@@ -19,7 +19,7 @@ defmodule SymphonyElixir.ReviewExecutionTest do
     seed = Path.join(root, "seed")
     workspace_root = Path.join(root, "workspaces")
     workspace = Path.join(workspace_root, "rig")
-    review_root = Path.join(root, "review-checkouts")
+    review_root = workspace_root
     definition_root = Path.join(root, "definitions")
     validation_archive = Path.join(root, "validation-archive")
     validation_scratch = Path.join(root, "validation-scratch")
@@ -70,6 +70,12 @@ defmodule SymphonyElixir.ReviewExecutionTest do
      review_config: config_file!(root, "review.pem", 103, 203)}
   end
 
+  test "preparation command pin covers the actual isolated script" do
+    argv = ["/usr/bin/python3", "-I", "-c", review_workspace_script() <> "\n"]
+    assert byte_size(List.last(argv)) > 4_096
+    assert ReviewWorkspace.command_sha256() == Base.encode16(:crypto.hash(:sha256, Jason.encode!(argv)), case: :lower)
+  end
+
   test "prepares a separate clean Git clone, replays it, and rejects a moved source head", c do
     run = %{id: "review-workspace-run", workspace: c.workspace, current_attempt_id: "checkout-attempt", operations: %{"checkout-attempt" => %{side_effect_id: "stable-checkout"}}}
     identity = workspace_identity(c, "cloud-thread", nil)
@@ -80,6 +86,10 @@ defmodule SymphonyElixir.ReviewExecutionTest do
     assert git!(prepared.workspace, ["rev-parse", "HEAD"]) == c.head_sha
     assert git!(prepared.workspace, ["status", "--porcelain=v1"]) == ""
     assert {:ok, ^prepared} = ReviewWorkspace.prepare(run, identity, workspace_root: c.review_root)
+    retried = %{run | current_attempt_id: "retry-attempt", operations: %{"retry-attempt" => %{side_effect_id: "stable-checkout"}}}
+    assert {:ok, replayed} = ReviewWorkspace.prepare(retried, identity, workspace_root: c.review_root)
+    assert replayed.workspace == prepared.workspace
+    assert replayed.current_operation_id == "retry-attempt"
 
     File.write!(Path.join(c.workspace, "README.md"), "moved candidate version\n")
     git!(c.workspace, ["add", "README.md"])
@@ -100,8 +110,11 @@ defmodule SymphonyElixir.ReviewExecutionTest do
     run = %{id: "interrupted-review-run", workspace: c.workspace, current_attempt_id: "checkout-attempt", operations: %{}}
     identity = workspace_identity(c, "cloud-thread", nil)
     name = :crypto.hash(:sha256, run.id <> "\n" <> run.current_attempt_id) |> Base.encode16(case: :lower)
-    target = Path.join([c.review_root, ".factory-reviews", name])
-    pins = Map.merge(identity, %{root: c.review_root, workspace: target, operation_id: run.current_attempt_id})
+    target = Path.join([c.review_root, ".factory-reviews", name, "checkout"])
+
+    pins =
+      Map.merge(identity, %{root: c.review_root, workspace: target, operation_id: run.current_attempt_id, run_id: run.id, source_workspace: run.workspace, current_operation_id: run.current_attempt_id})
+
     interrupted_path = Path.join(c.root, "interrupted-staging.json")
 
     interrupt = """
@@ -152,7 +165,7 @@ defmodule SymphonyElixir.ReviewExecutionTest do
 
     other = %{run | id: "unknown-review-directory"}
     name = :crypto.hash(:sha256, other.id <> "\n" <> other.current_attempt_id) |> Base.encode16(case: :lower)
-    target = Path.join([c.review_root, ".factory-reviews", name])
+    target = Path.join([c.review_root, ".factory-reviews", name, "checkout"])
     File.mkdir_p!(target)
     File.write!(Path.join(target, "unknown-data"), "never remove")
     assert {:error, :review_checkout_failed} = ReviewWorkspace.prepare(other, identity, workspace_root: c.review_root)
@@ -163,8 +176,11 @@ defmodule SymphonyElixir.ReviewExecutionTest do
     run = %{id: "raced-review-target", workspace: c.workspace, current_attempt_id: "checkout-attempt", operations: %{}}
     identity = workspace_identity(c, "cloud-thread", nil)
     name = :crypto.hash(:sha256, run.id <> "\n" <> run.current_attempt_id) |> Base.encode16(case: :lower)
-    target = Path.join([c.review_root, ".factory-reviews", name])
-    pins = Map.merge(identity, %{root: c.review_root, workspace: target, operation_id: run.current_attempt_id})
+    target = Path.join([c.review_root, ".factory-reviews", name, "checkout"])
+
+    pins =
+      Map.merge(identity, %{root: c.review_root, workspace: target, operation_id: run.current_attempt_id, run_id: run.id, source_workspace: run.workspace, current_operation_id: run.current_attempt_id})
+
     inode_path = Path.join(c.root, "unknown-target-inode")
 
     race = """
@@ -191,7 +207,7 @@ defmodule SymphonyElixir.ReviewExecutionTest do
     assert output =~ "REVIEW_CHECKOUT_FAILED"
     assert File.ls!(target) == []
     assert File.stat!(target).inode == String.to_integer(File.read!(inode_path))
-    assert [_completed_staging_marker] = Path.wildcard(Path.join([c.review_root, ".factory-reviews", ".*.prepare-*", "checkout", ".git", "factory-review.json"]), match_dot: true)
+    assert [_completed_staging_marker] = Path.wildcard(Path.join([c.review_root, ".factory-reviews", name, ".*.prepare-*", "checkout", ".git", "factory-review.json"]), match_dot: true)
     assert {:error, :review_checkout_failed} = ReviewWorkspace.prepare(run, identity, workspace_root: c.review_root)
     assert File.stat!(target).inode == String.to_integer(File.read!(inode_path))
   end

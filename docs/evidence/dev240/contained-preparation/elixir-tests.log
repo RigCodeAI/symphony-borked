@@ -1,0 +1,16 @@
+Compiling 61 files (.ex)
+Compiling 5 files (.ex)
+Generated symphony_elixir app
+specs.check: all public functions have @spec or exemption
+{'lifecycle_sha256': '96b3f754fae20657a74993320094ab5213735a84157f6022915099babc671545', 'executor_sha256': '6f5ede8ed566d444f09f63fbf7afbbb1a239880d185f5d199ba814aadfee104f', 'child_sha256': 'a598793bd67ae523b441445143c548b0ed28e9572c471196f3f7291e20b465d5', 'validation_sha256': '47a77cb57082970ce8f6ca5515b327fc49c31a68a19482fff07893d93efc9cbf'}
+Compiling 61 files (.ex)
+Compiling 5 files (.ex)
+Generated symphony_elixir app
+Running ExUnit with seed: 240, max_cases: 4
+Excluding tags: [:test]
+Including tags: [location: "test/symphony_elixir/worker_operation_test.exs", location: "test/symphony_elixir/review_execution_test.exs", location: "test/symphony_elixir/candidate_context_test.exs", location: "test/symphony_elixir/factory_secret_name_migration_test.exs", location: "test/symphony_elixir/workstream_cancellation_test.exs", location: {"test/symphony_elixir/backup_capture_owner_test.exs", 639}, location: {"test/symphony_elixir/backup_capture_owner_test.exs", 749}, location: {"test/symphony_elixir/backup_capture_owner_test.exs", 835}]
+
+.....................................................
+Finished in 20.8 seconds (0.9s async, 19.9s sync)
+53 tests, 0 failures (8 excluded)
+PR body format OK

@@ -405,6 +405,51 @@ class WorkerOperationTransportTests(unittest.TestCase):
         self.assertNotEqual(result, 0)
         self.assertEqual(json.loads(output.getvalue()), {"error": "invalid_command"})
 
+    def test_review_preparation_rpc_has_bounded_large_command_and_bound_operation_ids(self):
+        request = {
+            "current_operation_id": "run-100/review/2",
+            "run_id": "run-100",
+            "stable_operation_id": "run-100/review/1",
+            "source_workspace": "/srv/factory/contained-workspaces/run-100",
+            "identity": {
+                "number": 241,
+                "url": "https://github.com/RigCodeAI/rig/pull/241",
+                "base_sha": "a" * 40,
+                "head_sha": "b" * 40,
+                "head_branch": "feature/review",
+                "base_branch": "main",
+                "rubric_sha256": "c" * 64,
+                "cloud_thread_id": "cloud-thread-1",
+                "candidate_context_id": None,
+            },
+            "command_argv": ["/usr/bin/python3", "-I", "-c", "#" + "x" * 4800],
+        }
+        envelope = {
+            "action": "prepare_review_workspace",
+            "request": request,
+            "expected_release": {"service_revision": REVISION, "release_sha256": RELEASE_SHA256},
+        }
+        validated = transport.validate_rpc_request(envelope)
+        self.assertEqual(validated["request"], request)
+        self.assertGreater(len(validated["request"]["command_argv"][3].encode("utf-8")), 4096)
+
+        mismatched = json.loads(json.dumps(envelope))
+        mismatched["request"]["current_operation_id"] = "run-other/review/2"
+        with self.assertRaises(transport.ProtocolError):
+            transport.validate_rpc_request(mismatched)
+
+        ordinary = {
+            "action": "prepare",
+            "request": {
+                "operation_id": "run-100/review/2",
+                "argv": request["command_argv"],
+                "workspace": request["source_workspace"],
+            },
+            "expected_release": envelope["expected_release"],
+        }
+        with self.assertRaises(transport.ProtocolError):
+            transport.validate_rpc_request(ordinary)
+
     def test_qualification_receipt_is_bound_to_current_host_boot_release_and_systemd(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)

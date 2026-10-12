@@ -5,15 +5,20 @@ import grp
 import json
 import os
 import pwd
+import re
+import shutil
 import stat
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from factory.deploy import worker_operation as engine
+from factory.deploy import worker_operation_transport as transport
 from factory.deploy.worker_operation import (
     OperationCapacityError,
     OperationConflict,
@@ -140,8 +145,19 @@ class OperationControllerTests(unittest.TestCase):
         self.manager = FakeManager()
         self.user = pwd.getpwuid(os.getuid()).pw_name
         self.group = grp.getgrgid(os.getgid()).gr_name
-        self.controller = OperationController(
-            self.manager,
+        review_source = Path(__file__).resolve().parents[3] / "elixir/lib/symphony_elixir/review_workspace.ex"
+        review_module = review_source.read_text(encoding="utf-8")
+        match = re.search(r'^  @script ~S"""\n(?P<body>.*?)^  """$', review_module, re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(match, "ReviewWorkspace script heredoc was not found")
+        review_script = textwrap.dedent(match.group("body"))
+        self.assertTrue(review_script.endswith("\n"), "ReviewWorkspace heredoc trailing newline is part of its pin")
+        self.review_command_argv = ["/usr/bin/python3", "-I", "-c", review_script]
+        self.review_command_sha256 = engine._sha256_command(self.review_command_argv)
+        self.controller = self.make_controller(self.manager, review_pin=self.review_command_sha256)
+
+    def make_controller(self, manager, *, review_pin=None):
+        return OperationController(
+            manager,
             records_dir=str(self.records),
             operation_dir=str(self.operations),
             workspace_root=str(self.workspaces),
@@ -152,6 +168,7 @@ class OperationControllerTests(unittest.TestCase):
             worker_user=self.user,
             worker_group=self.group,
             expected_owner_uid=os.getuid(),
+            review_preparation_command_sha256=review_pin,
             operation_timeout=0.25,
             stop_timeout=0.02,
         )
@@ -164,6 +181,26 @@ class OperationControllerTests(unittest.TestCase):
             "operation_id": operation_id,
             "argv": [sys.executable, "-c", "print('worker')"],
             "workspace": str(self.workspace),
+        }
+
+    def review_request(self, *, current_operation_id="run-100/review/1"):
+        return {
+            "current_operation_id": current_operation_id,
+            "run_id": "run-100",
+            "stable_operation_id": "run-100/review/1",
+            "source_workspace": str(self.workspace),
+            "identity": {
+                "number": 241,
+                "url": "https://github.com/RigCodeAI/rig/pull/241",
+                "base_sha": "a" * 40,
+                "head_sha": "b" * 40,
+                "head_branch": "feature/review",
+                "base_branch": "main",
+                "rubric_sha256": "c" * 64,
+                "cloud_thread_id": "cloud-thread-1",
+                "candidate_context_id": None,
+            },
+            "command_argv": list(self.review_command_argv),
         }
 
     def record_for(self, identity):
@@ -255,6 +292,348 @@ class OperationControllerTests(unittest.TestCase):
             with self.assertRaises(OperationValidationError):
                 self.controller.prepare({**self.request(), "workspace": str(path)})
         self.assertEqual(self.manager.start_calls, [])
+
+    def test_review_preparation_derives_pinned_command_and_single_private_write_leaf(self):
+        request = self.review_request()
+
+        identity = self.controller.prepare_review_workspace(request)
+
+        leaf_name = hashlib.sha256(
+            f"{request['run_id']}\n{request['stable_operation_id']}".encode("utf-8")
+        ).hexdigest()
+        leaf = self.workspaces / ".factory-reviews" / leaf_name
+        unit, _wrapper, manifest_name, properties = self.manager.start_calls[0]
+        manifest = json.loads(Path(manifest_name).read_text(encoding="utf-8"))
+        pins = json.loads(manifest["argv"][1].split("=", 1)[1])
+
+        self.assertEqual(identity["operation_id"], request["current_operation_id"])
+        self.assertEqual(manifest["workspace"], str(self.workspace))
+        self.assertEqual(properties["WorkingDirectory"], str(self.workspace))
+        self.assertEqual(properties["ReadWritePaths"], [str(leaf)])
+        self.assertIn(str(self.home), properties["InaccessiblePaths"])
+        self.assertEqual(properties["ProtectHome"], "read-only")
+        self.assertEqual(pins["root"], str(self.workspaces))
+        self.assertEqual(pins["workspace"], str(leaf / "checkout"))
+        self.assertEqual(pins["operation_id"], request["stable_operation_id"])
+        self.assertEqual(pins["run_id"], request["run_id"])
+        self.assertEqual(pins["current_operation_id"], request["current_operation_id"])
+        self.assertEqual(pins["source_workspace"], str(self.workspace))
+        self.assertEqual(
+            set(pins),
+            {
+                "number", "url", "base_sha", "head_sha", "head_branch", "base_branch",
+                "rubric_sha256", "cloud_thread_id", "candidate_context_id", "root", "workspace",
+                "operation_id", "run_id", "current_operation_id", "source_workspace",
+            },
+        )
+        self.assertEqual(manifest["argv"][2:], self.review_command_argv)
+        self.assertGreater(len(manifest["argv"][5].encode("utf-8")), 4096)
+        environment = dict(item.split("=", 1) for item in properties["Environment"])
+        self.assertEqual(set(environment), {"HOME", "USER", "LOGNAME", "PATH", "LANG", "LC_ALL"})
+        self.assertEqual(environment["HOME"], "/nonexistent")
+        self.assertNotIn(str(self.home), properties["ReadWritePaths"])
+        self.assertFalse(leaf / "checkout" in leaf.iterdir())
+        self.assertEqual(stat.S_IMODE(leaf.stat().st_mode), 0o770)
+        self.assertEqual(stat.S_IMODE(leaf.parent.stat().st_mode), 0o710)
+
+    def test_review_preparation_rejects_tampered_command_or_caller_paths(self):
+        tampered_command = self.review_request()
+        tampered_command["command_argv"][-1] += "\nprint('not pinned')"
+        with self.assertRaises(OperationValidationError):
+            self.controller.prepare_review_workspace(tampered_command)
+
+        tampered_path = self.review_request()
+        tampered_path["workspace"] = str(self.workspace)
+        with self.assertRaises(OperationValidationError):
+            self.controller.prepare_review_workspace(tampered_path)
+
+        canonical, _details = self.controller._validate_review_preparation_request(self.review_request())
+        with self.assertRaises(OperationValidationError):
+            self.controller.prepare(canonical)
+
+        self.assertEqual(self.manager.start_calls, [])
+
+    def test_review_preparation_binds_current_and_stable_operation_ids_to_one_run_stage(self):
+        request = self.review_request(current_operation_id="run-other/review/2")
+        with self.assertRaises(OperationValidationError):
+            self.controller.prepare_review_workspace(request)
+
+        request = self.review_request(current_operation_id="run-100/implement/2")
+        with self.assertRaises(OperationValidationError):
+            self.controller.prepare_review_workspace(request)
+
+        request = self.review_request(current_operation_id="run-100/review/0")
+        with self.assertRaises(OperationValidationError):
+            self.controller.prepare_review_workspace(request)
+        self.assertEqual(self.manager.start_calls, [])
+
+    def test_review_preparation_rejects_source_symlink_and_cross_task_source(self):
+        source_link = self.workspaces / "source-link"
+        source_link.symlink_to(self.workspace, target_is_directory=True)
+        with self.assertRaises(OperationValidationError):
+            self.controller.prepare_review_workspace(
+                {**self.review_request(), "source_workspace": str(source_link)}
+            )
+
+        review_checkout = self.workspaces / ".factory-reviews" / "another-task" / "checkout"
+        review_checkout.mkdir(parents=True)
+        with self.assertRaises(OperationValidationError):
+            self.controller.prepare_review_workspace(
+                {**self.review_request(), "source_workspace": str(review_checkout)}
+            )
+        self.assertEqual(self.manager.start_calls, [])
+
+    def test_review_preparation_rejects_a_symlinked_derived_leaf_without_touching_target(self):
+        request = self.review_request()
+        name = hashlib.sha256(
+            f"{request['run_id']}\n{request['stable_operation_id']}".encode("utf-8")
+        ).hexdigest()
+        parent = self.workspaces / ".factory-reviews"
+        parent.mkdir(mode=0o710)
+        parent.chmod(0o710)
+        outside = self.root / "outside-review"
+        outside.mkdir()
+        leaf = parent / name
+        leaf.symlink_to(outside, target_is_directory=True)
+
+        with self.assertRaises(OperationUnavailable):
+            self.controller.prepare_review_workspace(request)
+
+        self.assertEqual(self.manager.start_calls, [])
+        self.assertTrue(leaf.is_symlink())
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_review_preparation_rejects_unknown_preexisting_leaf_even_with_worker_marker(self):
+        request = self.review_request()
+        name = hashlib.sha256(
+            f"{request['run_id']}\n{request['stable_operation_id']}".encode("utf-8")
+        ).hexdigest()
+        parent = self.workspaces / ".factory-reviews"
+        parent.mkdir(mode=0o710)
+        parent.chmod(0o710)
+        leaf = parent / name
+        leaf.mkdir(mode=0o770)
+        leaf.chmod(0o770)
+        (leaf / "worker-created-marker").write_text("looks plausible\n", encoding="utf-8")
+
+        with self.assertRaises(OperationUnavailable):
+            self.controller.prepare_review_workspace(request)
+
+        self.assertEqual(self.manager.start_calls, [])
+        self.assertTrue((leaf / "worker-created-marker").is_file())
+        self.assertFalse((self.records / "review-owners" / f"{name}.json").exists())
+
+    def test_review_preparation_is_disabled_without_a_root_owned_command_pin(self):
+        manager = FakeManager()
+        controller = self.make_controller(manager)
+        self.assertFalse(controller.review_preparation_available)
+        with self.assertRaises(OperationUnavailable):
+            controller.prepare_review_workspace(self.review_request())
+        self.assertEqual(manager.start_calls, [])
+
+    def test_review_preparation_duplicate_and_restart_reuse_the_held_unit(self):
+        request = self.review_request()
+        identity = self.controller.prepare_review_workspace(request)
+        self.assertEqual(self.controller.prepare_review_workspace(request), identity)
+        self.assertEqual(len(self.manager.start_calls), 1)
+
+        restarted_manager = FakeManager()
+        restarted_manager.snapshot = self.manager.snapshot
+        restarted_manager.populated = self.manager.populated
+        restarted_manager.stream_available = False
+        restarted_controller = self.make_controller(
+            restarted_manager,
+            review_pin=self.review_command_sha256,
+        )
+        self.assertEqual(restarted_controller.prepare_review_workspace(request), identity)
+        self.assertEqual(restarted_manager.start_calls, [])
+
+    def test_review_leaf_owner_rejects_retry_identity_and_source_drift(self):
+        request = self.review_request()
+        first_identity = self.controller.prepare_review_workspace(request)
+        self.manager.populated = 0
+        self.manager.snapshot = UnitSnapshot(
+            **{
+                **self.manager.snapshot.__dict__,
+                "active_state": "active",
+                "sub_state": "exited",
+                "exec_main_code": "exited",
+                "exec_main_status": 0,
+                "main_pid": 0,
+            }
+        )
+        self.assertEqual(self.controller.status(first_identity)["status"], "terminated")
+
+        changed_identity = self.review_request(current_operation_id="run-100/review/2")
+        changed_identity["identity"]["head_sha"] = "f" * 40
+        with self.assertRaises(OperationConflict):
+            self.controller.prepare_review_workspace(changed_identity)
+
+        other_source = self.workspaces / "another-source"
+        other_source.mkdir()
+        changed_source = self.review_request(current_operation_id="run-100/review/2")
+        changed_source["source_workspace"] = str(other_source)
+        with self.assertRaises(OperationConflict):
+            self.controller.prepare_review_workspace(changed_source)
+        self.assertEqual(len(self.manager.start_calls), 1)
+
+    def test_same_private_leaf_waits_for_prior_operation_terminal_proof(self):
+        first_request = self.review_request()
+        first_identity = self.controller.prepare_review_workspace(first_request)
+        second_request = self.review_request(current_operation_id="run-100/review/2")
+
+        with self.assertRaises(OperationCapacityError):
+            self.controller.prepare_review_workspace(second_request)
+        self.assertEqual(len(self.manager.start_calls), 1)
+
+        self.manager.populated = 0
+        self.manager.snapshot = UnitSnapshot(
+            **{
+                **self.manager.snapshot.__dict__,
+                "active_state": "active",
+                "sub_state": "exited",
+                "exec_main_code": "exited",
+                "exec_main_status": 0,
+                "main_pid": 0,
+            }
+        )
+        self.assertEqual(self.controller.status(first_identity)["status"], "terminated")
+        second_identity = self.controller.prepare_review_workspace(second_request)
+
+        first_manifest = json.loads(Path(self.manager.start_calls[0][2]).read_text(encoding="utf-8"))
+        second_manifest = json.loads(Path(self.manager.start_calls[1][2]).read_text(encoding="utf-8"))
+        first_pins = json.loads(first_manifest["argv"][1].split("=", 1)[1])
+        second_pins = json.loads(second_manifest["argv"][1].split("=", 1)[1])
+        self.assertEqual(first_identity["operation_id"], first_request["current_operation_id"])
+        self.assertEqual(second_identity["operation_id"], second_request["current_operation_id"])
+        self.assertEqual(first_pins["workspace"], second_pins["workspace"])
+        self.assertNotEqual(first_pins["current_operation_id"], second_pins["current_operation_id"])
+        self.assertEqual(len(self.manager.start_calls), 2)
+
+    def test_review_workspace_script_digest_and_local_git_checkout_match_broker_argv(self):
+        if not Path("/usr/bin/python3").is_file() or not shutil.which("git"):
+            self.skipTest("pinned Python or Git executable is unavailable")
+        self._initialize_review_source()
+        head_sha = self._git(self.workspace, "rev-parse", "HEAD")
+        request = self.review_request()
+        request["identity"]["base_sha"] = head_sha
+        request["identity"]["head_sha"] = head_sha
+
+        # The command pin is the canonical compact JSON digest used by the Elixir client.
+        self.assertEqual(
+            self.review_command_sha256,
+            "e9484451418b48094ace5c5694ff396733c5e2929c0f5e65b35620ed2ec06a25",
+        )
+        first_identity = self.controller.prepare_review_workspace(request)
+        first_manifest = json.loads(Path(self.manager.start_calls[0][2]).read_text(encoding="utf-8"))
+        self.assertEqual(first_manifest["argv"][2:], self.review_command_argv)
+        self.assertEqual(
+            first_manifest["review_preparation_command_sha256"],
+            self.review_command_sha256,
+        )
+        self.workspaces.chmod(0o750)
+        self.assertEqual(self.controller.release(first_identity)["status"], "released")
+        executed: list[tuple[str, list[str], dict[str, str]]] = []
+
+        def record_exec(executable, argv, environment):
+            executed.append((executable, list(argv), dict(environment)))
+
+        self.assertEqual(
+            transport.held_wrapper_main(
+                self.manager.start_calls[0][2],
+                expected_owner_uid=os.getuid(),
+                expected_worker_gid=os.getgid(),
+                operation_root=self.operations,
+                workspace_root=self.workspaces,
+                worker_home=self.home,
+                wait_timeout=0.05,
+                poll_interval=0.001,
+                environ={"INVOCATION_ID": first_identity["invocation_id"]},
+                exec_function=record_exec,
+            ),
+            127,
+        )
+        self.assertEqual(len(executed), 1)
+        self.assertEqual(executed[0][0], first_manifest["argv"][0])
+        self.assertEqual(executed[0][1], first_manifest["argv"])
+        self.assertEqual(executed[0][2], {
+            "HOME": "/nonexistent",
+            "USER": self.user,
+            "LOGNAME": self.user,
+            "PATH": "/usr/bin:/bin",
+            "LANG": "C",
+            "LC_ALL": "C",
+        })
+        first_output = self._run_manifest(first_manifest)
+        self.assertEqual(first_output["current_operation_id"], request["current_operation_id"])
+
+        leaf = self.workspaces / ".factory-reviews" / hashlib.sha256(
+            f"{request['run_id']}\n{request['stable_operation_id']}".encode("utf-8")
+        ).hexdigest()
+        checkout = leaf / "checkout"
+        marker = checkout / ".git" / "factory-review.json"
+        durable = json.loads(marker.read_text(encoding="utf-8"))
+        self.assertNotIn("current_operation_id", durable)
+        self.assertEqual(durable["operation_id"], request["stable_operation_id"])
+        self.assertEqual(self._git(checkout, "rev-parse", "HEAD"), head_sha)
+
+        self.manager.populated = 0
+        self.manager.snapshot = UnitSnapshot(
+            **{
+                **self.manager.snapshot.__dict__,
+                "active_state": "active",
+                "sub_state": "exited",
+                "exec_main_code": "exited",
+                "exec_main_status": 0,
+                "main_pid": 0,
+            }
+        )
+        self.assertEqual(self.controller.status(first_identity)["status"], "terminated")
+        retry = self.review_request(current_operation_id="run-100/review/2")
+        retry["identity"]["base_sha"] = head_sha
+        retry["identity"]["head_sha"] = head_sha
+        second_identity = self.controller.prepare_review_workspace(retry)
+        second_manifest = json.loads(Path(self.manager.start_calls[1][2]).read_text(encoding="utf-8"))
+        self.assertEqual(second_identity["operation_id"], retry["current_operation_id"])
+        second_output = self._run_manifest(second_manifest)
+        self.assertEqual(second_output["current_operation_id"], retry["current_operation_id"])
+        self.assertEqual(len(self.manager.start_calls), 2)
+        self.assertEqual(json.loads(marker.read_text(encoding="utf-8")), durable)
+
+    def _initialize_review_source(self):
+        self._git(self.workspace, "init")
+        self._git(self.workspace, "checkout", "-b", "main")
+        self._git(self.workspace, "config", "user.name", "Review Test")
+        self._git(self.workspace, "config", "user.email", "review@example.invalid")
+        (self.workspace / "README.md").write_text("review fixture\n", encoding="utf-8")
+        self._git(self.workspace, "add", "README.md")
+        self._git(self.workspace, "commit", "-m", "review fixture")
+
+    @staticmethod
+    def _git(directory: Path, *arguments: str) -> str:
+        result = subprocess.run(
+            ["git", *arguments], cwd=directory, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
+        )
+        if result.returncode != 0:
+            raise AssertionError(f"Git fixture command failed: {arguments}: {result.stderr}")
+        return result.stdout.strip()
+
+    def _run_manifest(self, manifest: dict[str, object]) -> dict[str, object]:
+        environment = {
+            name: value
+            for name, value in dict(manifest["environment"]).items()
+        }
+        result = subprocess.run(
+            manifest["argv"], cwd=manifest["workspace"], env=environment,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=90, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout.strip())
+        pins = json.loads(manifest["argv"][1].split("=", 1)[1])
+        self.assertEqual(output, pins)
+        return output
 
     def test_release_is_exactly_bound_and_status_reconciles_the_marker(self):
         identity = self.controller.prepare(self.request())

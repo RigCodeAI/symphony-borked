@@ -1627,7 +1627,10 @@ def ssh_client_main(
 ) -> int:
     """Forced-SSH entrypoint. The only client-controlled value is the grammar."""
     environment = os.environ if environment is None else environment
-    input_stream = sys.stdin.buffer if input_stream is None else input_stream
+    # The daemon reader may still be blocked when the worker closes stdout.
+    # A buffered stdin lock makes Python abort during interpreter shutdown;
+    # the raw pipe forwards short reads without holding that buffered lock.
+    input_stream = sys.stdin.buffer.raw if input_stream is None else input_stream
     output_stream = sys.stdout.buffer if output_stream is None else output_stream
     command = environment.get("SSH_ORIGINAL_COMMAND")
     try:

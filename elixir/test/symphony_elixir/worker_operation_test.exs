@@ -250,6 +250,34 @@ defmodule SymphonyElixir.WorkerOperationTest do
              )
   end
 
+  test "drains late check output and waits for delayed transport exit after terminal proof" do
+    assert {:ok, %{exit_status: 0, output: "{\"candidate\":true}\n", truncated: false, timed_out: false}} =
+             delayed_check("printf '{\"candidate\":'; sleep 0.8; printf 'true}\\n'; sleep 0.1", 2_000)
+  end
+
+  test "delayed drain preserves output limits and rejects unsuccessful transport exit" do
+    assert {:ok, %{output: output, truncated: true}} = delayed_check("head -c 65537 /dev/zero; echo", 2_000)
+    assert byte_size(output) <= 65_536
+    assert {:ok, %{truncated: true}} = delayed_check("echo partial; exit 255", 2_000)
+  end
+
+  defp delayed_check(script, timeout_ms) do
+    identity = identity()
+
+    rpc = fn _, %{"action" => action} ->
+      case action do
+        "prepare" -> {:ok, identity}
+        "release" -> {:ok, released_payload(identity)}
+        "status" -> {:ok, terminal_payload(identity)}
+      end
+    end
+
+    WorkerOperation.run_check(["check.sh"], @workspace, timeout_ms, @operation_id, @config, fn _ -> :ok end, %{},
+      rpc_fun: rpc,
+      stream_start_fun: fn _, _, _ -> {:ok, fake_port(stream_script(~s(echo '{"ok":"stream_ready"}'), script))} end
+    )
+  end
+
   test "stop accepts only a complete exact terminal proof" do
     identity = identity()
 

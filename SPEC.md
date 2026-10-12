@@ -1166,6 +1166,13 @@ reconciliation must confirm the recorded published head and real GitHub merge,
 require fresh contained termination of every external operation, persist the
 deletion intent, and verify the exact current permanent archive before deleting
 each recorded directory. A recreated path never inherits the old deletion intent.
+Supported service-only checks require a durable service-key seal created after
+authenticated gate verification and bound to the run, pinned definitions and
+execution, stage attempt, result and gate. Unknown agents/executable checks cannot
+use this distinction. Typed output projections preserve actual redacted metadata
+and stdout bytes, bind to original output identities and require immutable archive
+receipts. Printed filenames grant no retained file-content guarantee; unknown
+structured file outputs retain their directories.
 Failures remain pending and restart retries all gates. A Linear terminal state
 alone must not trigger automatic deletion. Cancellation stays retained until an
 approved retention and verified recovery contract exists. Parent output artifacts

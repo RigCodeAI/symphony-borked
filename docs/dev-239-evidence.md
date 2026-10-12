@@ -3,6 +3,7 @@
 Development PR: <https://github.com/RigCodeAI/symphony/pull/20>.
 Original tested source commit: `aa8583d6968fa6fced8c5bdf19a47e593c746745`.
 Tested PR review correction: `c16ee06dc056ff5f1284dcf7b069712c95ea3849`.
+Tested cleanup integration merge: `9ecad6b464b8b4f4bfee9d3a2b5a3b6fd72d8ad9`.
 The following evidence-only commit does not change this tested code.
 
 Branch: `cycle/dev-239`. Source base: merged DEV-238 PR 18,
@@ -69,6 +70,23 @@ Coordinator PR review identified two further source blockers:
   listing before name filtering; the regression reproduced this error before the
   inbound-only fix. Outbound external IDs still must be nonempty.
 
+## Integration with merged cleanup
+
+Merged `origin/main` at DEV-241 PR 19 commit
+`c498b78044cd5392615f4f623955fe1fbca2004e` into the existing branch.
+Conflicts affected `elixir/README.md` and three Orchestrator areas: startup,
+adjacent ownership callbacks and durable state initialization. The resolution
+preserves cleanup jobs/timer/ownership and validation checks/timer/ownership.
+The DOWN path retains validation cleanup followed by cleanup/cancellation/Linear
+and worker dispatch. No production evidence or storage code was manually changed.
+
+The first combined 94-test run had 18 durable-test evidence-sync failures.
+All 21 durable tests passed alone. Cleanup fixtures had configured an evidence
+root that was later removed; raw ExUnit durable fixtures inherited the cached
+workflow. Durable tests now use the existing isolated `TestSupport` harness.
+The same 94-test suite and seed `330629` then passed. This is a test fixture
+correction, not a change to production evidence failure behavior.
+
 ## Checks actually run
 
 Own local container `dev239-check`, pinned image
@@ -86,11 +104,17 @@ was copied read-only. Other ticket containers and cloud workers were not modifie
   Compilation, specs, full formatting and PR-body validation also passed again.
 - Final related validation/publication/workstream/durable lifecycle suite:
   **117 tests, zero failures, one Docker validation test excluded**.
+- Cleanup integration suite: **94 tests, zero failures** after fixture isolation.
+  Covers validation, cleanup, publication, cancellation and durable recovery.
+  Compilation, specs, full formatting and PR-body checks passed after the merge.
 - `git diff --check`: passed.
 - `make all`: executed; failed at strict Credo, including baseline and new
   refactoring/readability categories. Setup/build/format/spec stages were reached.
   Coverage and Dialyzer were not reached. Broad CI is not green.
 
+Integration diagnostics are `/private/tmp/dev239-cleanup-integration.log`
+(initial 18 failures), `/private/tmp/dev239-durable-isolated.log` (21 passed),
+and `/private/tmp/dev239-cleanup-integration-fixed.log` (94 passed, same seed).
 Correction diagnostics are `/private/tmp/dev239-review-focused.log` and
 `/private/tmp/dev239-empty-id-reproduction.log` (one expected failure before the fix).
 Current remote CI on the prior head `95279392306410ca2eb3268d1d7fcc90c4e9371b`

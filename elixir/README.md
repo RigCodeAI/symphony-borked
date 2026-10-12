@@ -505,7 +505,8 @@ rejects publication. See [configuration, App setup and verification limits](../d
 
 Trusted coordinator startup option `merged_cleanup: true` enables idle reconciliation
 of recorded merged work. Cleanup requires exact directory identity, fresh contained
-worker termination and a verified current evidence archive. It is disabled by default;
+worker termination, sealed completion for supported service checks, typed retained
+output bytes and a verified current evidence archive. It is disabled by default;
 legacy tracker terminal states retain work. See [merged cleanup](../docs/merged-workspace-cleanup.md)
 for the read-only composition proof, retry/capture boundaries and validation limits.
 

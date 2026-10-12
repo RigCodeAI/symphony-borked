@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.WorkstreamCleanupTest do
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.{AgentRuntimeSupervisor, Evidence, Orchestrator, Publisher, WorkstreamCleanup, WorkstreamRun, WorkstreamStore}
+  alias SymphonyElixir.{AgentRuntimeSupervisor, Evidence, Orchestrator, Publisher, ServiceCheckCompletion, WorkstreamCleanup, WorkstreamOutputs, WorkstreamRun, WorkstreamStore}
   alias SymphonyElixir.WorkstreamCleanupTest.Transport
 
   @remote __MODULE__.Remote
@@ -109,7 +109,8 @@ defmodule SymphonyElixir.WorkstreamCleanupTest do
     assert {:error, :worker_termination_unknown} = WorkstreamCleanup.prepare(c.run, Keyword.put(c.options, :cleanup_worker_reconciler, fn _, _ -> :running end))
     local = put_in(c.run, [:operations, id, :external_process], %{"kind" => "linux-process-group", "operation_id" => id})
     missing = update_in(c.run, [:operations, id], &Map.delete(&1, :external_process))
-    for run <- [local, missing], do: assert({:error, :worker_termination_unknown} = WorkstreamCleanup.prepare(run, c.options))
+    absent = %{c.run | operations: Map.delete(c.run.operations, id)}
+    for run <- [local, missing, absent], do: assert({:error, :worker_termination_unknown} = WorkstreamCleanup.prepare(run, c.options))
     assert File.dir?(c.workspace)
   end
 
@@ -126,6 +127,79 @@ defmodule SymphonyElixir.WorkstreamCleanupTest do
     assert List.last(planned.attempts).result == %{resolved_by: :github_merge}
     approval = put_in(run.pending_wait[:approval_digest], "candidate-approval")
     assert {:error, :cleanup_run_not_eligible} = WorkstreamCleanup.prepare(approval, c.options)
+  end
+
+  test "authenticated service completion permits cleanup but unknown agents and executables retain", c do
+    run = service_completed(c)
+    id = hd(run.attempts).id
+    assert ServiceCheckCompletion.verified?(run, id)
+    assert {:ok, _} = WorkstreamCleanup.prepare(run, c.options)
+
+    for changed <- [
+          update_in(run, [:operations, id], &Map.delete(&1, :service_completion)),
+          put_in(run, [:operations, id, :service_completion, :mac], "forged"),
+          put_in(run, [:definition, :stages, "validate", :gate], %{command: ["true"]}),
+          put_in(run, [:operations, id, :type], :agent),
+          put_in(run, [:execution, :validation_base], String.duplicate("f", 40))
+        ],
+        do: assert({:error, :worker_termination_unknown} = WorkstreamCleanup.prepare(changed, c.options))
+
+    assert File.dir?(c.workspace)
+  end
+
+  test "typed metadata and command text require actual archived bytes and survive directory removal", c do
+    agent = %{id: "implement", type: :agent, outputs: ["candidate"]}
+    command = %{id: "inspect", type: :check, outputs: ["log"], gate: %{command: ["true"]}}
+    run = c.run |> Map.put(:parent_run_id, "parent-run")
+    run = add_output(run, agent, %{"thread_id" => "thread-1", "model" => "gpt-6-luna", "workspace" => c.workspace})
+    text = "candidate bundle locator: .git/factory-candidates/input.bundle\n"
+    # WorkerOperation's registered remote check adds the terminal exit-code enum.
+    run = add_output(run, command, %{"exit_status" => 0, "output" => text, "truncated" => false, "timed_out" => false, "exit_code" => "exited"})
+    archive(c, run, "typed-output-inputs")
+    assert {:error, :retained_output_archive_unavailable} = WorkstreamCleanup.prepare(run, c.options)
+    assert File.dir?(c.workspace)
+    archive(c, run, "typed-output-upload")
+    assert {:ok, intent} = WorkstreamCleanup.prepare(run, c.options)
+    planned = WorkstreamCleanup.plan(run, intent)
+    assert planned.retained_output_artifacts["candidate"].kind == "agent_metadata"
+    archive(c, planned, "typed-output-intent")
+    assert {:ok, _} = WorkstreamCleanup.delete(planned, c.options)
+    refute File.exists?(c.workspace)
+    assert {:ok, %{"kind" => "agent_metadata", "value" => metadata}} = WorkstreamCleanup.retained_output(planned, "candidate", c.options)
+    assert metadata == %{"thread_id" => "thread-1", "model" => "gpt-6-luna"}
+    assert {:ok, %{"kind" => "command_log", "value" => %{"output" => ^text}}} = WorkstreamCleanup.retained_output(planned, "log", c.options)
+    forged = put_in(planned.retained_output_artifacts["candidate"].kind, "file")
+    assert {:error, :parent_outputs_not_retained} = WorkstreamCleanup.retained_output(forged, "candidate", c.options)
+    assert {:ok, _} = WorkstreamCleanup.merge_proof(planned, c.options)
+  end
+
+  test "untyped files and producer identity changes cannot be preserved as metadata", c do
+    stage = %{id: "implement", type: :agent, outputs: ["candidate"]}
+
+    for value <- [%{"thread_id" => "thread-1", "workspace" => c.workspace, "report" => "report.json"}, %{"thread_id" => "path/to/report", "workspace" => c.workspace}] do
+      run = add_output(c.run, stage, value)
+      assert {:error, :workspace_outputs_not_retained} = WorkstreamCleanup.prepare(run, c.options)
+    end
+
+    run = add_output(c.run, stage, %{"thread_id" => "thread-1", "workspace" => c.workspace})
+    changed = put_in(run.artifacts["candidate"].sha256, String.duplicate("0", 64))
+    assert {:error, :workspace_outputs_not_retained} = WorkstreamCleanup.prepare(changed, c.options)
+    assert File.dir?(c.workspace)
+  end
+
+  test "local and remote command-log shapes are typed without accepting arbitrary file fields", c do
+    stage = %{id: "inspect", type: :check, outputs: ["log"], gate: %{command: ["true"]}}
+    value = %{"exit_status" => 0, "output" => "report.json\n", "truncated" => false, "timed_out" => false}
+
+    for output <- [value, Map.put(value, "exit_code", "exited")] do
+      run = add_output(c.run, stage, output)
+      assert {:ok, %{"kind" => "command_log", "value" => ^output}} = WorkstreamOutputs.projection(run, "log")
+    end
+
+    for output <- [Map.put(value, "exit_code", "report.json"), Map.put(value, "file", "report.json")] do
+      run = add_output(c.run, stage, output)
+      assert {:error, :workspace_outputs_not_retained} = WorkstreamOutputs.projection(run, "log")
+    end
   end
 
   test "delete failure remains pending and can retry without losing the owned directory", c do
@@ -188,7 +262,7 @@ defmodule SymphonyElixir.WorkstreamCleanupTest do
 
   test "parent outputs remain readable after child cleanup and need verified immutable references", c do
     child = Map.put(c.run, :parent_run_id, "parent-run")
-    assert {:error, :parent_outputs_not_retained} = WorkstreamCleanup.prepare(child, c.options)
+    assert {:error, :retained_output_archive_unavailable} = WorkstreamCleanup.prepare(child, c.options)
     child = retain_outputs(c, child)
     assert {:ok, proof} = WorkstreamCleanup.merge_proof(child, c.options)
     assert proof.retained_outputs != %{}
@@ -211,6 +285,17 @@ defmodule SymphonyElixir.WorkstreamCleanupTest do
     child = c.run |> Map.put(:parent_run_id, "parent-run") |> put_in([:outputs, "publication"], %{"path" => "result.log"})
     child = retain_outputs(c, child)
     assert {:error, :workspace_outputs_not_retained} = WorkstreamCleanup.prepare(child, c.options)
+    assert File.dir?(c.workspace)
+  end
+
+  test "read-only merge proof explicitly distinguishes partial retained outputs", c do
+    run = retain_outputs(c, Map.put(c.run, :parent_run_id, "parent-run"))
+    assert {:ok, %{retained_outputs_complete: true}} = WorkstreamCleanup.merge_proof(run, c.options)
+    run = %{run | artifacts: Map.put(run.artifacts, "counter", %{sha256: "fixture"}), outputs: Map.put(run.outputs, "counter", true)}
+    archive(c, run, "partial-retained-output-map")
+    assert {:ok, %{retained_outputs_complete: false, retained_outputs: refs}} = WorkstreamCleanup.merge_proof(run, c.options)
+    assert Map.keys(refs) == ["publication"]
+    assert {:error, :parent_outputs_not_retained} = WorkstreamCleanup.prepare(run, c.options)
     assert File.dir?(c.workspace)
   end
 
@@ -321,7 +406,7 @@ defmodule SymphonyElixir.WorkstreamCleanupTest do
       entry: "publish",
       agents: %{},
       definitions: %{"flow.yaml" => %{sha256: digest("flow"), text: "contract fixture"}},
-      stages: %{"validate" => %{id: "validate", type: :check}, "publish" => %{id: "publish", type: :publish}}
+      stages: %{"validate" => %{id: "validate", type: :check}, "publish" => %{id: "publish", type: :publish, outputs: ["publication"]}}
     }
 
     execution = %{workspace_root: c.root, codex_command: "pinned", publisher: %{app_id: 1, installation_id: 1, private_key_path: Path.join(c.base, "publisher.pem")}}
@@ -363,7 +448,7 @@ defmodule SymphonyElixir.WorkstreamCleanupTest do
         attempts: [validation, publication],
         operations: operations,
         outputs: %{"publication" => value},
-        artifacts: %{"publication" => %{run_id: run.id, attempt_id: publication_id, sha256: digest("output")}}
+        artifacts: %{"publication" => %{run_id: run.id, attempt_id: publication_id, sha256: WorkstreamCleanup.fingerprint(value)}}
     }
 
     WorkstreamCleanup.enroll(run)
@@ -387,6 +472,40 @@ defmodule SymphonyElixir.WorkstreamCleanupTest do
   defp plan(c) do
     {:ok, intent} = WorkstreamCleanup.prepare(c.run, c.options)
     WorkstreamCleanup.plan(c.run, intent)
+  end
+
+  # The coordinator-to-cleanup seam uses a sealed synthetic completion here.
+  # ValidationCheckTest exercises the actual authenticated finish_stage path.
+  defp service_completed(c) do
+    run = c.run
+    id = hd(run.attempts).id
+    archive = Path.join(c.base, "validation-archive")
+    File.mkdir_p!(archive)
+    File.write!(Path.join(archive, "producer.key"), :crypto.strong_rand_bytes(32))
+    File.chmod!(Path.join(archive, "producer.key"), 0o600)
+    run = put_in(run.execution[:validation_archive], archive)
+    run = put_in(run.definition.stages["validate"][:gate], %{evaluator: :candidate_validation})
+    run = update_in(run.operations[id], &Map.delete(&1, :external_process))
+    run = %{run | attempts: Enum.map(run.attempts, fn a -> if a.id == id, do: Map.put(a, :gate_detail, %{verified: true}), else: a end), current_attempt_id: id}
+    run = ServiceCheckCompletion.record(run)
+    %{run | current_attempt_id: nil}
+  end
+
+  defp add_output(run, stage, value) do
+    id = run.id <> "/" <> stage.id <> "/" <> Integer.to_string(length(run.attempts) + 1)
+    name = hd(stage.outputs)
+    attempt = %{id: id, stage: stage.id, type: stage.type, ordinal: length(run.attempts) + 1, status: :completed, gate: :passed, result: %{status: :ok, evidence: value}}
+    operation = %{id: id, stage: stage.id, type: stage.type, status: :completed, external_process: %{"kind" => "systemd-unit", "operation_id" => id}}
+
+    run = %{
+      run
+      | attempts: run.attempts ++ [attempt],
+        operations: Map.put(run.operations, id, operation),
+        artifacts: Map.put(run.artifacts, name, %{run_id: run.id, attempt_id: id, sha256: WorkstreamCleanup.fingerprint(value)}),
+        outputs: Map.put(run.outputs, name, value)
+    }
+
+    put_in(run.definition.stages[stage.id], stage)
   end
 
   defp archive(c, run, id) do

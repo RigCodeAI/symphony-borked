@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.ValidationCheckTest do
   use SymphonyElixir.TestSupport
-  alias SymphonyElixir.{Evidence, Validation, ValidationPolicy, ValidationCheck, WorkstreamRun, WorkstreamStore}
+  alias SymphonyElixir.{Evidence, ServiceCheckCompletion, Validation, ValidationPolicy, ValidationCheck, WorkstreamCleanup, WorkstreamOutputs, WorkstreamRun, WorkstreamStore}
 
   # Authenticated synthetic contract receipts and simulated GitHub only.
   # No check, archive upload, live GitHub mutation or merge is performed here.
@@ -397,7 +397,67 @@ defmodule SymphonyElixir.ValidationCheckTest do
     for claim <- [Map.delete(result, :attestation), Map.put(result, :check_id, 999), Map.put(result, :observed_at, System.system_time(:second) - 31)] do
       assert {:error, _} = ValidationCheck.verify_attested_completion(c.run, c.stage, {:ok, claim})
       assert :blocked == WorkstreamRun.finish_stage(c.run, {:ok, claim}).status
+      refute ServiceCheckCompletion.verified?(WorkstreamRun.finish_stage(c.run, {:ok, claim}), c.run.current_attempt_id)
     end
+  end
+
+  test "verified GitHub service completion is durable and bound to its exact attempt", c do
+    assert {:ok, result} = ValidationCheck.reconcile(c.run, c.stage)
+    finished = WorkstreamRun.finish_stage(c.run, {:ok, result})
+    id = c.run.current_attempt_id
+    assert ServiceCheckCompletion.verified?(finished, id)
+    path = Path.join(c.root, "completed-check.sqlite")
+    {:ok, store} = WorkstreamStore.start_link(path: path, owner: self())
+    :ok = WorkstreamStore.commit(store, finished, "completed-check", %{kind: :stage_completed})
+    GenServer.stop(store)
+    {:ok, store} = WorkstreamStore.start_link(path: path, owner: self())
+    assert {:ok, restored} = WorkstreamStore.fetch(store, finished.id)
+    GenServer.stop(store)
+    options = [cleanup_evidence_server: c.evidence_server]
+    :ok = Evidence.snapshot(restored, "completed-service-output", %{kind: :stage_completed}, c.evidence_server)
+    assert {:error, :retained_output_archive_unavailable} = WorkstreamCleanup.retain_outputs(restored, options)
+    {:ok, [view]} = Evidence.task(Evidence.task_key(restored.task_id), c.evidence_server)
+    write_upload_receipt(Path.join(c.root, "evidence"), view)
+    assert {:ok, refs} = WorkstreamCleanup.retain_outputs(restored, options)
+    restored = Map.put(restored, :retained_output_artifacts, refs)
+    # Completion proof remains usable after merge/checkout removal, with no GitHub reads.
+    Agent.update(c.remote, &Map.put(&1, :fail_reads, true))
+    File.rm_rf!(c.workspace)
+    assert ServiceCheckCompletion.verified?(restored, id)
+    assert {:ok, %{"kind" => "github_validation", "value" => %{"qualified" => true}}} = WorkstreamCleanup.retained_output(restored, "github-validation", options)
+
+    for altered <- [
+          %{restored | task_id: "different-task"},
+          put_in(restored, [:operations, id, :stage], "different-stage"),
+          put_in(restored, [:operations, id, :service_completion, :mac], String.duplicate("0", 64)),
+          put_in(restored, [:operations, id, :external_process], %{"kind" => "systemd-unit"}),
+          %{restored | attempts: Enum.map(restored.attempts, fn a -> if a.id == id, do: %{a | gate: :failed}, else: a end)}
+        ],
+        do: refute(ServiceCheckCompletion.verified?(altered, id))
+
+    File.rm!(Path.join(c.run.execution.validation_archive, "producer.key"))
+    refute ServiceCheckCompletion.verified?(restored, id)
+  end
+
+  test "candidate service completion is sealed only after authentic receipt verification", c do
+    receipt = hd(c.run.attempts).result.evidence["receipt"]
+    stage = c.run.definition.stages["validate"]
+    run = %{c.run | status: :ready, stage_id: stage.id, current_attempt_id: nil, attempts: [], operations: %{}}
+    run = put_in(run.definition.stages[stage.id].gate, Map.merge(stage.gate, %{success: :complete, failure: :blocked}))
+    started = WorkstreamRun.start_stage(run)
+    finished = WorkstreamRun.finish_stage(started, {:ok, %{receipt: receipt, gate: %{verdict: :failed}}})
+    assert finished.status == :complete
+    assert ServiceCheckCompletion.verified?(finished, started.current_attempt_id)
+    assert {:ok, %{"kind" => "candidate_validation"}} = WorkstreamOutputs.projection(finished, "validation")
+    forged = %{receipt | "manifest_sha256" => String.duplicate("0", 64)}
+    denied = WorkstreamRun.finish_stage(started, {:ok, %{receipt: forged, gate: %{verdict: :passed}}})
+    refute ServiceCheckCompletion.verified?(denied, started.current_attempt_id)
+    context = %{task_id: started.task_id, run_id: started.id, attempt_id: started.current_attempt_id, base_sha: c.base_sha}
+    {failed_receipt, _} = write_signed_contract(c.workspace, c.run.execution.validation_archive, c.run.execution.validation_policy, context, c.base_sha, exit_status: 1)
+    failed = WorkstreamRun.finish_stage(started, {:ok, %{receipt: failed_receipt}})
+    assert failed.status == :blocked
+    assert List.last(failed.attempts).gate == :failed
+    assert ServiceCheckCompletion.verified?(failed, started.current_attempt_id)
   end
 
   defp start_validation_runtime(c, run) do

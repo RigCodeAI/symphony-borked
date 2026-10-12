@@ -24,6 +24,8 @@ defmodule SymphonyElixir.WorkstreamRun do
                        validation_github.ex
                        candidate_transfer.ex
                        workstream_cleanup.ex
+                       service_check_completion.ex
+                       workstream_outputs.ex
                        evidence.ex
                      )
 
@@ -198,6 +200,7 @@ defmodule SymphonyElixir.WorkstreamRun do
     run = if stage.type == :check and stage.gate[:evaluator] == :github_validation and gate == :passed, do: Map.put(run, :validation_observation, elem(result, 1)), else: run
     run = update_attempt(run, %{status: :completed, result: evidence, gate: gate, gate_detail: gate_detail})
     run = put_in(run.operations[run.current_attempt_id].status, :completed)
+    run = SymphonyElixir.ServiceCheckCompletion.record(run)
     run = if stage.type == :agent, do: close_pending_questions(run, stage.id, run.current_attempt_id), else: run
 
     case {stage.type, result} do
@@ -1071,7 +1074,7 @@ defmodule SymphonyElixir.WorkstreamRun do
       {:ok, %{verdict: verdict} = detail} when verdict in [:passed, :failed] ->
         case verified_candidate_feedback(result, run.execution[:validation_archive]) do
           {:ok, feedback} ->
-            {put_candidate_result(result, detail, feedback), verdict, json_value(detail)}
+            {put_candidate_result(result, detail, feedback), verdict, json_value(Map.put(detail, :verified, true))}
 
           {:error, reason} ->
             failed_validation_result(result, {:feedback_unavailable, reason})

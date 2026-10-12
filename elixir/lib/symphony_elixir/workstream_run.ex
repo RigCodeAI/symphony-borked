@@ -6,6 +6,9 @@ defmodule SymphonyElixir.WorkstreamRun do
 
   @policy_digest :crypto.hash(:sha256, File.read!(__ENV__.file)) |> Base.encode16(case: :lower)
 
+  @external_resource Path.join(__DIR__, "workstream_child.ex")
+  @child_digest :crypto.hash(:sha256, File.read!(Path.join(__DIR__, "workstream_child.ex"))) |> Base.encode16(case: :lower)
+
   @executor_sources ~w(
                        orchestrator.ex
                        workstream_runner.ex
@@ -55,6 +58,7 @@ defmodule SymphonyElixir.WorkstreamRun do
     do: %{
       lifecycle_sha256: @policy_digest,
       executor_sha256: @executor_digest,
+      child_sha256: @child_digest,
       validation_sha256: @validation_digest,
       gate_policy: "exit-status-v1",
       version: 1
@@ -106,6 +110,226 @@ defmodule SymphonyElixir.WorkstreamRun do
       created_at: DateTime.utc_now() |> DateTime.to_iso8601()
     }
   end
+
+  @doc "Plans a waiting parent and linked child; the coordinator must commit both atomically before dispatch."
+  @spec begin_child(map(), map()) :: {:ok, map(), map(), map()} | {:error, atom()}
+  def begin_child(run, prepared_child) do
+    with {:ok, intent, child} <- SymphonyElixir.WorkstreamChild.prepare(run, prepared_child) do
+      attempt = %{
+        id: intent.parent_attempt_id,
+        stage: intent.parent_stage_id,
+        type: :child,
+        ordinal: length(run.attempts) + 1,
+        status: :waiting,
+        result: nil,
+        gate: nil,
+        gate_detail: nil
+      }
+
+      operation = %{
+        id: attempt.id,
+        attempt_id: attempt.id,
+        stage: attempt.stage,
+        type: :child,
+        status: :waiting_for_child,
+        worker: nil,
+        side_effect_id: intent.handoff_id,
+        transport_retries: 0,
+        child_handoff: intent
+      }
+
+      waiting =
+        run
+        |> Map.merge(%{
+          status: :waiting_for_child,
+          phase: :waiting_for_child,
+          current_attempt_id: attempt.id,
+          attempts: run.attempts ++ [attempt],
+          operations: Map.put(run.operations, attempt.id, operation),
+          child_handoff: intent
+        })
+
+      {:ok, waiting, child, intent}
+    end
+  end
+
+  @doc false
+  # The coordinator calls this only after its tracked service proof task and exact
+  # snapshot checks. Structural validation here does not establish proof provenance.
+  @spec finish_child(map(), map(), map()) :: {:ok, map()} | {:error, atom()}
+  def finish_child(parent, child, proof) when is_map(parent) and is_map(child) and is_map(proof) do
+    with {:ok, stage, attempt, operation, intent} <- current_child_wait(parent),
+         :ok <- current_child_identity(parent, child, intent),
+         :ok <- current_child_policies(parent, child),
+         :ok <- valid_child_service_proof(child, proof),
+         true <- valid_child_outputs?(stage.outputs),
+         envelope = child_result_envelope(child, proof),
+         completed_attempt = child_attempt_result(attempt, envelope, proof),
+         completed_operation = Map.merge(operation, %{status: :completed, completion_proof: proof}),
+         completed =
+           parent
+           |> Map.put(:attempts, replace_attempt(parent.attempts, attempt.id, completed_attempt))
+           |> put_in([:operations, attempt.id], completed_operation)
+           |> put_outputs(stage, envelope)
+           |> Map.merge(%{
+             status: :ready,
+             phase: :queued,
+             stage_id: stage.next,
+             current_attempt_id: nil,
+             pending_wait: nil
+           }) do
+      {:ok, completed}
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :child_completion_not_current}
+    end
+  rescue
+    _ -> {:error, :child_completion_not_current}
+  end
+
+  def finish_child(_parent, _child, _proof), do: {:error, :child_completion_not_current}
+
+  defp current_child_wait(
+         %{
+           status: :waiting_for_child,
+           phase: :waiting_for_child,
+           current_attempt_id: attempt_id,
+           child_handoff: %{version: 1} = intent,
+           definition: %{stages: stages}
+         } = parent
+       )
+       when is_binary(attempt_id) do
+    stage = Map.get(stages, parent.stage_id)
+    operation = get_in(parent, [:operations, attempt_id])
+    attempt = Enum.find(parent.attempts, &(&1.id == attempt_id))
+
+    with true <- compatible_policy?(parent),
+         true <- intent.parent_run_id == parent.id and intent.parent_stage_id == parent.stage_id and intent.parent_attempt_id == attempt_id,
+         %{type: :child, next: next, outputs: outputs} = stage when is_binary(next) and is_list(outputs) <- stage,
+         %{type: :check} <- Map.get(stages, stage.next),
+         true <- outputs != [] and Enum.all?(outputs, &(is_binary(&1) and &1 != "")) and length(outputs) == length(Enum.uniq(outputs)),
+         %{id: ^attempt_id, stage: stage_id, type: :child, ordinal: ordinal, status: :waiting, result: nil, gate: nil, gate_detail: nil} = attempt <- attempt,
+         true <- ordinal == length(parent.attempts) and stage_id == stage.id and stage.id == parent.stage_id,
+         %{id: ^attempt_id, attempt_id: ^attempt_id, stage: ^stage_id, type: :child, status: :waiting_for_child, worker: nil, side_effect_id: handoff_id, transport_retries: 0, child_handoff: ^intent} =
+           operation <- operation,
+         true <- handoff_id == intent.handoff_id do
+      {:ok, stage, attempt, operation, intent}
+    else
+      _ -> {:error, :child_completion_not_current}
+    end
+  end
+
+  defp current_child_wait(_parent), do: {:error, :child_completion_not_current}
+
+  defp current_child_identity(parent, child, intent) do
+    if child[:id] == intent.child_run_id and child[:parent_run_id] == parent.id and is_map(child[:parent_handoff]) and
+         child.status in [:complete, :waiting_for_answer] and
+         SymphonyElixir.WorkstreamChild.correlate(intent, Map.put(child.parent_handoff, :child_run_id, child.id)) == :ok do
+      :ok
+    else
+      {:error, :child_result_identity_mismatch}
+    end
+  end
+
+  defp current_child_policies(parent, child) do
+    if compatible_policy?(parent) and compatible_policy?(child),
+      do: :ok,
+      else: {:error, :child_policy_mismatch}
+  end
+
+  defp valid_child_service_proof(child, proof) do
+    publication_attempt_id = proof[:publication_attempt_id]
+    publication_id = proof[:publication_id]
+    attempt = Enum.find(child.attempts, &(&1.id == publication_attempt_id))
+
+    with true <- proof[:version] == 1,
+         true <- proof[:repository] == "RigCodeAI/rig",
+         true <- proof[:run_id] == child.id and proof[:task_id] == child.task_id,
+         true <- valid_child_digest?(publication_id),
+         true <- is_binary(publication_attempt_id) and publication_attempt_id != "",
+         %{id: ^publication_attempt_id, stage: stage_id, type: :publish, status: :completed, gate: :passed, result: %{status: :ok, evidence: evidence}} <- attempt,
+         %{type: :publish} <- get_in(child, [:definition, :stages, stage_id]),
+         %{type: :publish, status: :completed, publication_intent: publication_intent} <-
+           get_in(child, [:operations, publication_attempt_id]),
+         true <- publication_intent[:publication_id] == publication_id,
+         true <- evidence["publication_id"] == publication_id,
+         true <- valid_child_sha?(proof[:published_head]) and evidence["candidate_sha"] == proof.published_head,
+         true <- evidence["branch"] == SymphonyElixir.Publisher.branch(child),
+         %{"number" => number, "url" => url} <- evidence["pr"],
+         true <- is_integer(number) and number > 0 and is_binary(url) and url != "",
+         true <- proof[:pr] == %{number: number, url: url},
+         %{commit: commit} <- proof[:merge],
+         true <- valid_child_sha?(commit),
+         archive when is_map(archive) and map_size(archive) > 0 <- proof[:archive],
+         true <- proof[:retained_outputs_complete] == true,
+         :ok <- valid_retained_child_outputs(child, proof[:retained_outputs]),
+         :ok <- valid_retained_child_values(child, proof[:outputs]) do
+      :ok
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :invalid_child_service_proof}
+    end
+  end
+
+  defp valid_retained_child_outputs(child, retained) do
+    artifacts = child[:artifacts]
+    saved = child[:retained_output_artifacts]
+
+    with true <- is_map(artifacts) and map_size(artifacts) > 0,
+         true <- is_map(saved) and map_size(saved) > 0 and retained == saved,
+         true <- Enum.sort(Map.keys(saved)) == Enum.sort(Map.keys(artifacts)),
+         true <-
+           Enum.all?(artifacts, fn {name, artifact_id} ->
+             is_map(saved[name]) and saved[name][:version] == 2 and saved[name][:output_id] == artifact_id and saved[name][:run_id] == child.id and
+               is_map(child.outputs) and Map.has_key?(child.outputs, name)
+           end) do
+      :ok
+    else
+      _ -> {:error, :invalid_child_service_proof}
+    end
+  end
+
+  defp valid_retained_child_values(child, values) do
+    if is_map(values) and Enum.sort(Map.keys(values)) == Enum.sort(Map.keys(child.artifacts)) and
+         Enum.all?(values, fn {name, value} ->
+           is_map(value) and value["version"] == 2 and value["kind"] == child.retained_output_artifacts[name].kind and
+             value["output_id"] == json_value(child.artifacts[name]) and Map.has_key?(value, "value")
+         end),
+       do: :ok,
+       else: {:error, :invalid_child_service_proof}
+  end
+
+  defp valid_child_outputs?(outputs), do: is_list(outputs) and outputs != [] and Enum.all?(outputs, &(is_binary(&1) and &1 != ""))
+
+  defp child_result_envelope(child, proof) do
+    %{
+      child_run_id: child.id,
+      merge: proof.merge,
+      archive: proof.archive,
+      retained_outputs: proof.retained_outputs,
+      outputs: proof.outputs
+    }
+  end
+
+  defp child_attempt_result(attempt, envelope, proof) do
+    Map.merge(attempt, %{
+      status: :completed,
+      result: %{status: :ok, evidence: json_value(envelope)},
+      gate: :passed,
+      gate_detail: %{
+        child_run_id: proof.run_id,
+        publication_id: proof.publication_id,
+        merge_commit: proof.merge.commit
+      }
+    })
+  end
+
+  defp replace_attempt(attempts, id, replacement),
+    do: Enum.map(attempts, fn attempt -> if attempt.id == id, do: replacement, else: attempt end)
+
+  defp valid_child_sha?(value), do: is_binary(value) and Regex.match?(~r/\A[a-f0-9]{40}\z/, value)
+
+  defp valid_child_digest?(value), do: is_binary(value) and Regex.match?(~r/\A[a-f0-9]{64}\z/, value)
 
   @spec start_stage(map()) :: map()
   def start_stage(%{status: :ready} = run) do

@@ -130,6 +130,16 @@ defmodule SymphonyElixir.WorkstreamStore do
     end
   end
 
+  @doc "Atomically stores a waiting parent and its linked child before either is dispatched."
+  @spec commit_child_handoff(GenServer.server(), run_map(), run_map(), run_map(), map()) ::
+          {:ok, run_map(), run_map()} | {:duplicate, run_map(), run_map()} | {:error, term()}
+  def commit_child_handoff(server, expected_parent, waiting_parent, linked_child, intent) do
+    case validate_child_handoff(expected_parent, waiting_parent, linked_child, intent) do
+      :ok -> safe_call(server, {:commit_child_handoff, expected_parent, waiting_parent, linked_child, intent})
+      {:error, _reason} = error -> error
+    end
+  end
+
   @doc "Stores a normalized Linear event once, returning its existing record on replay."
   @spec linear_receive(GenServer.server(), String.t(), map()) ::
           :ok | {:duplicate, map()} | {:error, term()}
@@ -427,6 +437,28 @@ defmodule SymphonyElixir.WorkstreamStore do
     {:reply, reply, state}
   end
 
+  def handle_call(
+        {:commit_child_handoff, expected_parent, waiting_parent, linked_child, intent},
+        {caller, _tag},
+        %State{db: db, owner: owner} = state
+      ) do
+    reply =
+      cond do
+        caller != owner ->
+          {:error, :not_owner}
+
+        not __MODULE__.capture_write_allowed?(state) ->
+          {:error, :capture_in_progress}
+
+        true ->
+          with :ok <- validate_child_handoff(expected_parent, waiting_parent, linked_child, intent) do
+            commit_child_handoff_transaction(db, expected_parent, waiting_parent, linked_child, intent)
+          end
+      end
+
+    {:reply, reply, state}
+  end
+
   @impl true
   def handle_cast({:capture_settle, token}, %State{capture: %{token: token}, owner: owner} = state) do
     send(owner, {:backup_capture_settled, token, :store, self()})
@@ -709,6 +741,223 @@ defmodule SymphonyElixir.WorkstreamStore do
       {:error, reason} -> {:error, reason}
     end
   end
+
+  defp commit_child_handoff_transaction(db, expected_parent, waiting_parent, linked_child, intent) do
+    case transaction(db, "BEGIN IMMEDIATE", fn ->
+           with {:ok, stored_parent} <- fetch_stored_run(db, field(expected_parent, :id)) do
+             case child_handoff_replay(db, stored_parent, linked_child, intent) do
+               {:ok, parent, child} ->
+                 {:rollback, {:duplicate, parent, child}}
+
+               :not_a_replay ->
+                 commit_new_child_handoff(db, stored_parent, expected_parent, waiting_parent, linked_child, intent)
+
+               {:error, reason} ->
+                 {:error, reason}
+             end
+           else
+             :not_found -> {:error, :parent_not_found}
+             {:error, reason} -> {:error, reason}
+           end
+         end) do
+      {:committed, {:ok, parent, child}} -> {:ok, parent, child}
+      {:rolled_back, {:duplicate, parent, child}} -> {:duplicate, parent, child}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp commit_new_child_handoff(db, stored_parent, expected_parent, waiting_parent, linked_child, intent) do
+    {parent_event_id, parent_event, child_event_id, child_event} = child_handoff_events(intent, linked_child)
+
+    with true <- stored_parent === expected_parent,
+         :ok <- ensure_no_child_alias(db, linked_child),
+         :ok <- ensure_child_handoff_events_absent(db, parent_event_id, child_event_id),
+         :ok <- persist_commit(db, waiting_parent, parent_event_id, parent_event),
+         :ok <- persist_commit(db, linked_child, child_event_id, child_event) do
+      {:commit, {:ok, waiting_parent, linked_child}}
+    else
+      false -> {:error, :parent_state_conflict}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp child_handoff_replay(db, parent, linked_child, intent) do
+    saved_intent = field(parent, :child_handoff)
+
+    if is_map(saved_intent) and field(saved_intent, :handoff_id) == field(intent, :handoff_id) do
+      with :ok <- SymphonyElixir.WorkstreamChild.replay(saved_intent, intent),
+           {:ok, child} <- fetch_stored_run(db, field(linked_child, :id)),
+           true <- field(child, :parent_run_id) == field(intent, :parent_run_id),
+           true <- field(child, :parent_handoff) == child_handoff_lineage(intent),
+           :ok <- ensure_child_handoff_events(db, parent, child, intent) do
+        {:ok, parent, child}
+      else
+        false -> {:error, :child_handoff_conflict}
+        :not_found -> {:error, :child_handoff_conflict}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      :not_a_replay
+    end
+  end
+
+  defp ensure_child_handoff_events(db, parent, child, intent) do
+    {parent_event_id, parent_event, child_event_id, child_event} = child_handoff_events(intent, child)
+
+    with {:ok, %{run_id: parent_id, event: ^parent_event}} <- fetch_stored_event(db, parent_event_id),
+         true <- parent_id == field(parent, :id),
+         {:ok, %{run_id: child_id, event: ^child_event}} <- fetch_stored_event(db, child_event_id),
+         true <- child_id == field(child, :id) do
+      :ok
+    else
+      false -> {:error, :child_handoff_conflict}
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :child_handoff_conflict}
+    end
+  end
+
+  defp child_handoff_events(intent, child) do
+    handoff_id = field(intent, :handoff_id)
+    parent_id = field(intent, :parent_run_id)
+    child_id = field(child, :id)
+    parent_event_id = "child-handoff/#{handoff_id}/parent"
+    child_event_id = "child-handoff/#{handoff_id}/child"
+
+    parent_event = %{
+      kind: :child_handoff_started,
+      handoff_id: handoff_id,
+      parent_run_id: parent_id,
+      child_run_id: child_id,
+      intent: intent
+    }
+
+    child_event = %{
+      kind: :child_handoff_linked,
+      handoff_id: handoff_id,
+      parent_run_id: parent_id,
+      child_run_id: child_id,
+      intent: intent
+    }
+
+    {parent_event_id, parent_event, child_event_id, child_event}
+  end
+
+  defp child_handoff_lineage(intent),
+    do: Map.take(intent, ~w(handoff_id parent_run_id parent_stage_id parent_attempt_id fingerprint)a)
+
+  defp ensure_child_handoff_events_absent(db, parent_event_id, child_event_id) do
+    with {:ok, nil} <- existing_event_run(db, parent_event_id),
+         {:ok, nil} <- existing_event_run(db, child_event_id),
+         :ok <- ensure_evidence_event_absent(db, parent_event_id),
+         :ok <- ensure_evidence_event_absent(db, child_event_id) do
+      :ok
+    else
+      {:ok, _run_id} -> {:error, :child_handoff_event_conflict}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp ensure_evidence_event_absent(db, event_id) do
+    case query(db, "SELECT event_id FROM evidence_outbox WHERE event_id = ?1", [event_id]) do
+      {:ok, []} -> :ok
+      {:ok, _rows} -> {:error, :child_handoff_event_conflict}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp fetch_stored_run(db, run_id) do
+    case query(db, "SELECT payload FROM runs WHERE run_id = ?1", [run_id]) do
+      {:ok, [[payload]]} -> decode_run(payload)
+      {:ok, []} -> :not_found
+      {:ok, _rows} -> {:error, :invalid_run_row}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp fetch_stored_event(db, event_id) do
+    case query(db, "SELECT run_id, payload FROM events WHERE event_id = ?1", [event_id]) do
+      {:ok, [[run_id, payload]]} ->
+        case decode_term(payload) do
+          {:ok, event} when is_map(event) -> {:ok, %{run_id: run_id, event: event}}
+          {:ok, _event} -> {:error, :invalid_event_payload}
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:ok, []} ->
+        :not_found
+
+      {:ok, _rows} ->
+        {:error, :invalid_event_row}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp ensure_no_child_alias(db, child) do
+    case query(db, "SELECT run_id, task_id, payload FROM runs ORDER BY run_id") do
+      {:ok, rows} -> ensure_no_child_alias_rows(rows, child)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp ensure_no_child_alias_rows([], _child), do: :ok
+
+  defp ensure_no_child_alias_rows([[run_id, task_id, payload] | rest], child)
+       when is_binary(run_id) and is_binary(task_id) and is_binary(payload) do
+    with {:ok, run} <- decode_run(payload),
+         true <- field(run, :id) == run_id and field(run, :task_id) == task_id do
+      workspace = field(run, :workspace)
+
+      cond do
+        run_id == field(child, :id) -> {:error, :child_run_conflict}
+        task_id == field(child, :task_id) -> {:error, :child_task_conflict}
+        not (is_binary(workspace) and workspace != "") -> {:error, :child_workspace_unverified}
+        workspaces_overlap?(workspace, field(child, :workspace)) -> {:error, :child_workspace_conflict}
+        true -> ensure_no_child_alias_rows(rest, child)
+      end
+    else
+      false -> {:error, :invalid_run_row}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp ensure_no_child_alias_rows(_rows, _child), do: {:error, :invalid_run_row}
+
+  defp workspaces_overlap?(left, right) when is_binary(left) and is_binary(right) do
+    left = Path.expand(left)
+    right = Path.expand(right)
+    left == right or String.starts_with?(left, right <> "/") or String.starts_with?(right, left <> "/")
+  end
+
+  defp workspaces_overlap?(_left, _right), do: false
+
+  defp validate_child_handoff(expected_parent, waiting_parent, linked_child, intent)
+       when is_map(expected_parent) and is_map(waiting_parent) and is_map(linked_child) and is_map(intent) do
+    prepared_child = Map.drop(linked_child, [:parent_handoff, :parent_run_id])
+
+    case SymphonyElixir.WorkstreamRun.begin_child(expected_parent, prepared_child) do
+      {:ok, ^waiting_parent, ^linked_child, ^intent} ->
+        parent_event_id = "child-handoff/#{field(intent, :handoff_id)}/parent"
+        child_event_id = "child-handoff/#{field(intent, :handoff_id)}/child"
+
+        with :ok <- validate_commit(waiting_parent, parent_event_id, %{}),
+             :ok <- validate_commit(linked_child, child_event_id, %{}) do
+          :ok
+        end
+
+      {:ok, _waiting, _child, _intent} ->
+        {:error, :child_handoff_state_mismatch}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  rescue
+    _error -> {:error, :invalid_child_handoff}
+  end
+
+  defp validate_child_handoff(_expected_parent, _waiting_parent, _linked_child, _intent),
+    do: {:error, :invalid_child_handoff}
 
   defp receive_linear_event(db, delivery_id, normalized_event, record) do
     case query(db, "SELECT payload FROM linear_events WHERE delivery_id = ?1", [delivery_id]) do

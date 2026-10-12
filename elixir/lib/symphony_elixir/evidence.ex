@@ -159,6 +159,76 @@ defmodule SymphonyElixir.Evidence do
   @spec identity(map()) :: map()
   def identity(run), do: Map.take(report(run), @identity_keys)
 
+  @doc "Inspects a captured index in memory without opening or exporting an evidence root."
+  @spec inspect_recovery_image(binary(), [map()]) :: {:ok, map()} | {:error, atom()}
+  def inspect_recovery_image(bytes, runs) when is_list(runs) and length(runs) <= 128 do
+    BackupCapture.inspect_image(bytes, fn db ->
+      with :ok <- recovery_schema(db),
+           {:ok, [[0]]} <- query(db, "SELECT COUNT(*) FROM evidence_events WHERE run_id NOT IN (SELECT run_id FROM evidence_runs)", []),
+           {:ok, [[0]]} <- query(db, "SELECT COUNT(*) FROM evidence_artifacts WHERE run_id NOT IN (SELECT run_id FROM evidence_runs)", []),
+           {:ok, [[count, largest]]} <- query(db, "SELECT COUNT(*),COALESCE(MAX(length(payload)),0) FROM evidence_events", []),
+           true <- count <= 10_000 and largest <= @limit,
+           {:ok, [[artifacts, largest_artifact]]} <- query(db, "SELECT COUNT(*),COALESCE(MAX(length(payload)),0) FROM evidence_artifacts", []),
+           true <- artifacts <= 10_000 and largest_artifact <= @limit,
+           {:ok, snapshots} <- query(db, "SELECT run_id,task_key,snapshot FROM evidence_runs ORDER BY run_id LIMIT 129", []),
+           true <- length(snapshots) == length(runs),
+           true <- Enum.all?(snapshots, fn [id, key, snapshot] -> is_binary(id) and is_binary(key) and recovery_json?(snapshot) end),
+           true <- Enum.sort(Enum.map(snapshots, fn [id, key, _] -> {id, key} end)) == Enum.sort(Enum.map(runs, &{&1.id, task_key(&1.task_id)})),
+           true <- capture_snapshots_match?(%{db: db}, runs),
+           {:ok, events} <- query(db, "SELECT payload FROM evidence_events", []),
+           true <- Enum.all?(events, fn [event] -> recovery_json?(event) end),
+           {:ok, [[watermark]]} <- query(db, "SELECT COALESCE(MAX(seq),0) FROM evidence_events", []) do
+        {:ok, %{event_watermark: watermark}}
+      else
+        _ -> {:error, :invalid_recovery_evidence}
+      end
+    end)
+  end
+
+  def inspect_recovery_image(_bytes, _runs), do: {:error, :invalid_recovery_evidence}
+
+  defp recovery_schema(db) do
+    with {:ok, expected} <- Sqlite3.open(":memory:") do
+      try do
+        with :ok <- Sqlite3.execute(expected, @schema),
+             {:ok, [[1]]} <- query(db, "PRAGMA user_version", []),
+             {:ok, schema} <- recovery_schema_rows(db),
+             {:ok, ^schema} <- recovery_schema_rows(expected) do
+          :ok
+        else
+          _ -> {:error, :unsupported_recovery_evidence_schema}
+        end
+      after
+        Sqlite3.close(expected)
+      end
+    end
+  end
+
+  defp recovery_schema_rows(db) do
+    with {:ok, rows} <- query(db, "SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name", []) do
+      {:ok, Enum.map(rows, fn [type, name, sql] -> [type, name, sql |> String.downcase() |> String.replace(~r/\s+/, " ") |> String.replace(~r/\s*([(),])\s*/, "\\1") |> String.trim()] end)}
+    end
+  end
+
+  defp recovery_json?(bytes) when is_binary(bytes) and byte_size(bytes) <= @limit do
+    case Jason.decode(bytes, objects: :ordered_objects) do
+      {:ok, %Jason.OrderedObject{} = value} -> unique_recovery_json?(value, 0)
+      _ -> false
+    end
+  end
+
+  defp recovery_json?(_bytes), do: false
+
+  defp unique_recovery_json?(_value, depth) when depth > 64, do: false
+
+  defp unique_recovery_json?(%Jason.OrderedObject{values: pairs}, depth) do
+    keys = Enum.map(pairs, &elem(&1, 0))
+    length(keys) == MapSet.size(MapSet.new(keys)) and Enum.all?(pairs, fn {_key, value} -> unique_recovery_json?(value, depth + 1) end)
+  end
+
+  defp unique_recovery_json?(values, depth) when is_list(values), do: Enum.all?(values, &unique_recovery_json?(&1, depth + 1))
+  defp unique_recovery_json?(_value, _depth), do: true
+
   defp report(run) do
     report = run |> WorkstreamRun.report() |> Map.drop([:workspace, :operations, :continuation])
     definitions = Map.new(run.definition.definitions, fn {path, resource} -> {path, Map.take(resource, [:sha256, :text])} end)

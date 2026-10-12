@@ -2748,6 +2748,26 @@ binary. Provider reconciliation, remote archival, old-writer fencing, compatible
 payload validation and a dispatch-held restore remain separate requirements.
 See [the capture source and qualification boundary](docs/dev-242-capture-barrier.md).
 
+### 24.1 Held recovery inspection
+
+A trusted startup option MAY inspect an independently anchored local capture
+through the existing coordinator without installing it. That branch MUST run
+before normal Store initialization, Evidence recovery, Linear initialization or
+worker/provider reconciliation. It MUST inspect the exact verified bytes in
+memory, reject unsupported schemas and invalid correlated payload identities,
+and preserve saved definitions, policy pins, waits, artifacts and counters.
+
+Policy incompatibility MUST be visible without rewriting the saved run. The
+inspection MUST remain dispatch-held on every restart, reject mutating calls,
+and suppress all runtime replay/dispatch messages. It MUST NOT infer fencing,
+worker termination, provider state or permanent archive availability from the
+local image. It MUST NOT expose a dispatch-release action until those separate
+proofs are supplied through a qualified service-owned contract.
+
+This optional mode does not redefine ordinary application startup or the legacy
+cloud backup verifier. See [held recovery inspection](docs/held-recovery-inspection.md)
+for the isolated runtime-supervisor and full-service qualification boundaries.
+
 ## Bounded child workstream handoff
 
 A version-1 parent MAY declare one `child` stage with `id`, `inputs`, `outputs`,

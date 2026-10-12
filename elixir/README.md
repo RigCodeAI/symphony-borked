@@ -1,5 +1,9 @@
 # Symphony Elixir
 
+For partial DEV-242 recovery, see [held local inspection](../docs/held-recovery-inspection.md).
+Its trusted startup option reads an anchored owner capture in memory and keeps
+dispatch held; it does not install state or authorize replacement workers.
+
 For the file-defined local agent → executable gate, use
 [`mix workstream.run`](../docs/local-workstreams.md). It validates version 1
 definitions and runs synchronously without starting tracker polling. The

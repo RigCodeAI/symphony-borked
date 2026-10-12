@@ -1,5 +1,9 @@
 # DEV-239 source evidence and rollout boundary
 
+Development PR: <https://github.com/RigCodeAI/symphony/pull/20>.
+Tested source commit: `aa8583d6968fa6fced8c5bdf19a47e593c746745`.
+This record-only follow-up does not change the tested implementation.
+
 Branch: `cycle/dev-239`. Source base: merged DEV-238 PR 18,
 `e7fd8290ed7e508547867c9a5233d9b9eb0bfd16`. GitHub independently confirmed merge.
 The orchestrator released source implementation without claiming DEV-238's live
@@ -104,7 +108,7 @@ On this host, after acquiring the shared build slot:
 /opt/homebrew/bin/docker stop dev239-check
 ```
 
-Expected: the 41 source/contract tests pass with no live App, PR, upload or merge.
+Expected: the 43 source/contract tests pass with no live App, PR, upload or merge.
 Tests delete only their own temporary fixtures. Stop only this ticket's container;
 preserve its cache volumes and diagnostics until the grouped checkpoint is reviewed.
 Live demo commands and expected readbacks are in the rollout plan and remain gated

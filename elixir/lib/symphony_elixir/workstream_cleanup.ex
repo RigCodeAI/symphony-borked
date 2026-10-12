@@ -6,7 +6,7 @@ defmodule SymphonyElixir.WorkstreamCleanup do
   A merge proof is read-only and does not require deleting a child workspace.
   """
 
-  alias SymphonyElixir.{Evidence, Publisher, PublisherGithub, WorkerOperation, Workspace, WorkstreamRun}
+  alias SymphonyElixir.{Evidence, Publisher, PublisherGithub, ServiceCheckCompletion, WorkerOperation, Workspace, WorkstreamOutputs, WorkstreamRun}
 
   @version 1
 
@@ -58,7 +58,8 @@ defmodule SymphonyElixir.WorkstreamCleanup do
          published_head: publication.candidate_sha,
          merge: merge,
          archive: archive,
-         retained_outputs: run[:retained_output_artifacts] || %{}
+         retained_outputs: run[:retained_output_artifacts] || %{},
+         retained_outputs_complete: complete_references?(run)
        }}
     else
       {:error, _} = error -> error
@@ -79,7 +80,7 @@ defmodule SymphonyElixir.WorkstreamCleanup do
          :ok <- resources(run),
          :ok <- quiescent(run, opts),
          :ok <- detached_outputs(run),
-         :ok <- retained_outputs(run, opts),
+         {:ok, refs} <- retain_outputs(run, opts),
          {:ok, merge} <- confirmed_merge(run, publication, opts) do
       intent = %{
         version: @version,
@@ -90,7 +91,7 @@ defmodule SymphonyElixir.WorkstreamCleanup do
         merge: merge,
         resources: run.managed_resources,
         operations: operation_identities(run),
-        retained_outputs: run[:retained_output_artifacts] || %{}
+        retained_outputs: refs
       }
 
       {:ok, Map.put(intent, :id, fingerprint(intent))}
@@ -136,6 +137,7 @@ defmodule SymphonyElixir.WorkstreamCleanup do
     run
     |> Map.merge(%{status: :complete, phase: :cleanup_pending, stage_id: :complete, current_attempt_id: nil, pending_wait: nil, attempts: attempts})
     |> Map.put(:cleanup, %{intent: intent, status: :pending, attempts: 0, last_error: nil})
+    |> Map.put(:retained_output_artifacts, intent.retained_outputs)
   end
 
   @spec result(map(), {:ok, map()} | {:error, atom()}) :: map()
@@ -242,6 +244,13 @@ defmodule SymphonyElixir.WorkstreamCleanup do
   end
 
   defp quiescent(run, opts) do
+    if Enum.all?(run.attempts, fn attempt ->
+         operation = run.operations[attempt.id]
+         attempt.type == :human_wait or (is_map(operation) and operation[:id] == attempt.id and operation[:stage] == attempt.stage and operation[:type] == attempt.type)
+       end), do: operations_quiescent(run, opts), else: {:error, :worker_termination_unknown}
+  end
+
+  defp operations_quiescent(run, opts) do
     reconcile = Keyword.get(opts, :cleanup_worker_reconciler, &WorkerOperation.reconcile/2)
 
     Enum.reduce_while(run.operations, :ok, fn {id, operation}, :ok ->
@@ -256,7 +265,7 @@ defmodule SymphonyElixir.WorkstreamCleanup do
                reconcile.(run.execution[:worker_control], identity) == :terminated, do: {:cont, :ok}, else: {:halt, {:error, :worker_termination_unknown}}
 
         operation.type in [:agent, :check] and operation.status != :not_applied ->
-          {:halt, {:error, :worker_termination_unknown}}
+          if ServiceCheckCompletion.verified?(run, id), do: {:cont, :ok}, else: {:halt, {:error, :worker_termination_unknown}}
 
         true ->
           {:cont, :ok}
@@ -264,18 +273,80 @@ defmodule SymphonyElixir.WorkstreamCleanup do
     end)
   end
 
-  defp retained_outputs(%{parent_run_id: parent} = run, opts) when is_binary(parent) do
+  @doc "Produces typed output references once their actual redacted bytes are permanently archived."
+  @spec retain_outputs(map(), keyword()) :: {:ok, map()} | {:error, atom()}
+  def retain_outputs(run, opts \\ []) do
     refs = run[:retained_output_artifacts] || %{}
+    required = is_binary(run[:parent_run_id]) or not legacy_detached?(run) or map_size(refs) > 0
 
-    with true <- Map.keys(refs) |> Enum.sort() == Map.keys(run.artifacts) |> Enum.sort(),
-         true <- map_size(refs) > 0 do
-      verified_references(run, opts)
-    else
-      _ -> {:error, :parent_outputs_not_retained}
+    cond do
+      not required ->
+        {:ok, refs}
+
+      map_size(refs) > 0 ->
+        if Enum.sort(Map.keys(refs)) == Enum.sort(Map.keys(run.artifacts)) do
+          with :ok <- verified_references(run, opts), do: {:ok, refs}
+        else
+          {:error, :parent_outputs_not_retained}
+        end
+
+      map_size(run.artifacts) == 0 ->
+        {:error, :parent_outputs_not_retained}
+
+      true ->
+        produce_references(run, opts)
     end
   end
 
-  defp retained_outputs(_run, _opts), do: :ok
+  defp produce_references(run, opts) do
+    server = evidence_server(opts)
+
+    with {:ok, projections} <- projections(run),
+         :ok <- store_projections(run, projections, server),
+         {:ok, archive} <- Evidence.retained(run, server) do
+      refs =
+        Map.new(projections, fn {name, projection} ->
+          bytes = Jason.encode!(projection)
+          sha = fingerprint_bytes(bytes)
+
+          ref = %{
+            version: 2,
+            kind: projection["kind"],
+            run_id: run.id,
+            task_key: Evidence.task_key(run.task_id),
+            revision: archive.revision,
+            name: "artifact-" <> sha <> ".txt",
+            sha256: sha,
+            output_id: run.artifacts[name]
+          }
+
+          {name, ref}
+        end)
+
+      with :ok <- verified_references(Map.put(run, :retained_output_artifacts, refs), opts), do: {:ok, refs}
+    else
+      {:error, :current_evidence_not_permanently_archived} -> {:error, :retained_output_archive_unavailable}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp projections(run) do
+    Enum.reduce_while(Map.keys(run.artifacts), {:ok, %{}}, fn name, {:ok, values} ->
+      case WorkstreamOutputs.projection(run, name) do
+        {:ok, value} -> {:cont, {:ok, Map.put(values, name, value)}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp store_projections(run, projections, server) do
+    Enum.reduce_while(projections, :ok, fn {name, value}, :ok ->
+      case Evidence.artifact(run.id, "retained-output/" <> name, Jason.encode!(value), server) do
+        :ok -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
+  end
 
   defp verified_references(run, opts) do
     Enum.reduce_while(run[:retained_output_artifacts] || %{}, :ok, fn {name, ref}, :ok ->
@@ -284,10 +355,10 @@ defmodule SymphonyElixir.WorkstreamCleanup do
       with true <- Map.has_key?(run.artifacts, name),
            true <- ref[:output_id] == run.artifacts[name] and ref[:run_id] == run.id,
            true <- ref[:task_key] == Evidence.task_key(run.task_id) and valid_digest?(ref[:sha256]),
-           false <- workspace_dependent?(value, run.workspace),
            {:ok, bytes} <- Evidence.retained_artifact(ref, evidence_server(opts)),
            true <- :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower) == ref.sha256,
-           {:ok, ^value} <- Jason.decode(bytes) do
+           {:ok, retained} <- Jason.decode(bytes),
+           true <- matching_output?(run, name, ref, value, retained) do
         {:cont, :ok}
       else
         _ -> {:halt, {:error, :parent_outputs_not_retained}}
@@ -295,15 +366,46 @@ defmodule SymphonyElixir.WorkstreamCleanup do
     end)
   end
 
+  defp complete_references?(run),
+    do:
+      map_size(run.artifacts) > 0 and
+        Enum.sort(Map.keys(run[:retained_output_artifacts] || %{})) == Enum.sort(Map.keys(run.artifacts))
+
+  defp matching_output?(run, name, %{version: 2, kind: kind}, _value, retained) do
+    case WorkstreamOutputs.projection(run, name) do
+      {:ok, ^retained} -> retained["kind"] == kind
+      _ -> false
+    end
+  end
+
+  defp matching_output?(run, _name, _ref, value, retained), do: value == retained and not workspace_dependent?(value, run.workspace)
+
+  @doc "Reads a verified typed retained output without requiring the disposable workspace."
+  @spec retained_output(map(), String.t(), keyword()) :: {:ok, map()} | {:error, atom()}
+  def retained_output(run, name, opts \\ []) do
+    with ref when is_map(ref) <- run[:retained_output_artifacts][name],
+         :ok <- verified_references(%{run | retained_output_artifacts: %{name => ref}}, opts),
+         {:ok, bytes} <- Evidence.retained_artifact(ref, evidence_server(opts)),
+         {:ok, value} <- Jason.decode(bytes) do
+      {:ok, value}
+    else
+      _ -> {:error, :parent_outputs_not_retained}
+    end
+  end
+
   defp detached_outputs(run) do
+    if legacy_detached?(run) or match?({:ok, _}, projections(run)), do: :ok, else: {:error, :workspace_outputs_not_retained}
+  end
+
+  defp legacy_detached?(run) do
     publication = Enum.find(Enum.reverse(run.attempts), &(&1.type == :publish))
     trusted = if publication, do: get_in(publication, [:result, :evidence]), else: nil
 
-    if Enum.all?(Map.keys(run.artifacts), fn name ->
-         value = run.outputs[name]
-         # This service-owned output is PR metadata, not a filesystem reference.
-         (name == "publication" and value == trusted) or inline_value?(value)
-       end), do: :ok, else: {:error, :workspace_outputs_not_retained}
+    Enum.all?(Map.keys(run.artifacts), fn name ->
+      value = run.outputs[name]
+      # This service-owned output is PR metadata, not a filesystem reference.
+      (name == "publication" and value == trusted) or inline_value?(value)
+    end)
   end
 
   # Unknown string values may be paths even without an extension or separator.
@@ -325,7 +427,8 @@ defmodule SymphonyElixir.WorkstreamCleanup do
 
   defp workspace_dependent?(_value, _path), do: false
 
-  defp operation_identities(run), do: Map.new(run.operations, fn {id, op} -> {id, Map.take(op, [:type, :status, :external_process])} end)
+  defp operation_identities(run), do: Map.new(run.operations, fn {id, op} -> {id, Map.take(op, [:stage, :type, :status, :external_process, :service_completion])} end)
+  defp fingerprint_bytes(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
   defp evidence_server(opts), do: Keyword.get(opts, :cleanup_evidence_server, Evidence)
 
   defp owner_check(opts, revision) do

@@ -33,21 +33,21 @@ transfer directories remain retained until their lifecycle owners provide an
 explicit registration contract. Current-root changes and old service-policy pins
 also retain work; stored pins are never rewritten to match a new build.
 
-The shipped `software-change` definition does **not** currently qualify for
-deletion. Its `candidate_validation` stage uses `CandidateTransfer.sync` followed
-by the local trusted `Validation.execute` adapter, without registering a systemd
-external-process identity. The current all-checks quiescence gate therefore
-retains that run. Recognizing supported service-only checks with authenticated,
-attempt-bound completion evidence is a missing integration distinction, not
-proof that an unknown check terminated. DEV-239's service GitHub-check adapter
-needs the same explicit treatment after it merges. Agents and arbitrary
-executable checks must keep their fresh contained-termination requirement.
+The coordinator records a durable `service_completion` attestation only after
+recomputing an authenticated `candidate_validation` or `github_validation` gate.
+The seal binds the run/task, pinned policy/definitions/execution, stage, attempt,
+result and gate. Cleanup authenticates it with the service-only validation key;
+it does not require an open PR or a still-present candidate checkout. Invalid
+receipts and observations produce no seal. Authenticated failed candidate checks
+can also record completion, without becoming passing validation decisions.
+Unknown agents and executable checks still require fresh contained termination.
+Every executed attempt must retain its matching operation record; an absent
+record is uncertainty, not evidence of termination.
+Old runs with no seal retain their directories; there is no retrofit.
 
-The shipped candidate outputs also contain opaque strings that the supported
-output contract below retains. The usable source boundary is read-only
-merge/archive proof plus the owned-removal/retry integration exercised by
-contained-operation contract fixtures. The shipped end-to-end cleanup path is
-not enabled or qualified by this PR.
+The shipped flow's supported service checks and known outputs now have cleanup
+contracts. Actual worker termination, GitHub merge and permanent upload receipts
+remain required. The shipped end-to-end path has not been demonstrated live.
 
 Admission denies equal and ancestor/descendant workspace overlap with any recorded
 run. Cleanup jobs stay tracked by the sole coordinator; another task cannot claim
@@ -118,7 +118,8 @@ The result schema is:
   published_head: "40-character SHA",
   merge: %{commit: "40-character SHA", merged_at: "ISO8601", merged_by: %{"id" => 1, "login" => "user", "type" => "User"}},
   archive: %{run_id: "recorded run", task_key: "digest", revision: "digest", manifest_sha256: "digest", artifacts: []},
-  retained_outputs: %{}
+  retained_outputs: %{},
+  retained_outputs_complete: false
 }
 ```
 
@@ -130,31 +131,90 @@ artifact reference in `run.retained_output_artifacts`, keyed by output name:
   name: artifact_name, sha256: artifact_sha256, output_id: child.artifacts[output_name]}
 ```
 
-`Evidence.retained_artifact/2` verifies the exact receipt and bytes before returning
-them. The payload must decode to the child's saved output and match its artifact
-identity. Workspace-dependent values and file/path fields block this JSON-output
-contract; binary/file outputs need their own retained-content contract. The
-parent can read the immutable output after child deletion. Registering these
-references in a real parent lifecycle is DEV-243's integration boundary.
+`WorkstreamCleanup.retain_outputs(run, options)` produces version 2 references.
+It writes redacted projections through Evidence, then waits for a verified
+permanent receipt for those exact bytes. An unavailable upload visibly retains
+the workspace. Cleanup stores the references with its durable intent. DEV-243
+can use this producer independently of deletion and persist the returned map
+through its existing owner before consuming read-only merge proof.
 
-Deletion currently supports the known service-owned publication metadata and
-JSON containers of numeric, boolean or null values. Other string-valued outputs
-may name files even without an extension, so they retain the workspace until a
-typed retained-content adapter supplies actual bytes. This restriction also
-applies to top-level runs. It does not block read-only merge/archive proof: that
-API verifies any supplied immutable references independently, and consumers must
-enforce their own output-content contract. JSON path text is never proof that the
-referenced file was retained.
+A version 2 reference adds `version: 2` and `kind`. Its JSON payload is:
+
+```json
+{"version":2,"kind":"agent_metadata","output_id":{"run_id":"run", "attempt_id":"attempt", "sha256":"original output digest"},"value":{"thread_id":"thread"}}
+```
+
+The service derives the type from the pinned producer stage and exact output
+identity. Supported types are `agent_metadata`, `command_log`,
+`candidate_validation`, `github_validation`, `publication` and `inline` numeric,
+boolean or null data. Agent metadata removes the disposable workspace locator
+and accepts only the Runner's known ID/model fields. Service validation outputs
+require the authenticated completion seal. Unknown fields and output identities
+fail closed. Redacted projections retain their original source digest without
+claiming byte equality to secret-bearing originals.
+
+`command_log` retains actual stdout text. A printed bundle or report filename
+remains text; it grants no file handle and promises no file contents. Candidate
+bundle transport is not an exported retained binary artifact. Unknown structured
+file outputs, binary data and unsupported producer types retain the directory.
+Consumers requiring files must use a separately verified file-content contract.
+
+`Evidence.retained_artifact/2` verifies the exact receipt and bytes.
+`WorkstreamCleanup.retained_output(run, name, options)` additionally verifies
+the typed projection and original output identity before returning its envelope.
+This works after child deletion. Legacy references still require exact JSON
+output equality and reject workspace/file fields. Read-only `merge_proof/2`
+never produces references or deletes data; consumers enforce required output
+names and accepted content types before advancing their own lifecycle.
+`retained_outputs_complete` reports whether verified references cover the entire
+current artifact map. A partial map can still accompany a read-only merge proof;
+it never qualifies for parent-dependent deletion or parent advancement.
 
 ## Capture boundary
 
 `Orchestrator.cleanup_active_or_uncertain?/1` is true for any active cleanup job
 or pending deletion with an uncertain outcome. DEV-242's coordinator capture hold
 must stop new observation/deletion scheduling and the final ownership check.
-The source checks a non-nil `workstreams.capture`; combined validation against
-DEV-242's merged capture APIs remains required.
+The source checks a non-nil `workstreams.capture`. DEV-242's capture APIs are
+merged in PR21; combined qualification of this follow-up remains pending.
 
 ## Verification
+
+The service-completion and version 2 output follow-up is qualified on merged
+DEV-239 revision `9fb13f8acf701f444e7a8a6f6e323193632a9d17` and DEV-242 revision
+`797c61464e2e835100218233feee3041eebf6102`. Warnings-as-errors compilation, full
+formatting, public specs and PR-body checks passed in the same isolated image
+below. The final combined run reported 79 tests, zero failures and one excluded
+Docker validation test (seed `879902`). It covered cleanup, authenticated
+validation, lifecycle, publication, durable archival and capture ownership.
+
+New checks prove sealed service completion through store restart and checkout
+removal; altered attempts, execution pins and missing keys fail closed. Both local
+and registered remote command-log shapes are supported. Typed metadata/text
+requires actual archived bytes, survives owned-directory removal and rejects
+forged types, changed source identities and unsupported file fields. The earlier
+removal retry and coordinator restart checks passed in this combined run.
+
+The scoped review found no concrete seal replay or generic-worker termination
+bypass. Read-only merge proof now explicitly reports retained-output
+completeness, while the parent deletion gate requires every artifact reference.
+This is source/contract qualification, not a live shipped-workflow demonstration.
+The container is removed and the serialized build slot is released. Broad hosted
+CI is inspected separately; the receipts below describe the earlier PR19 slice.
+
+The combined follow-up command was:
+
+```sh
+mix test test/symphony_elixir/workstream_cleanup_test.exs \
+  test/symphony_elixir/validation_check_test.exs \
+  test/symphony_elixir/workstream_run_test.exs \
+  test/symphony_elixir/validation_lifecycle_test.exs \
+  test/symphony_elixir/workstream_publication_test.exs \
+  test/symphony_elixir/durable_publication_test.exs \
+  test/symphony_elixir/evidence_publication_test.exs \
+  test/symphony_elixir/backup_capture_owner_test.exs \
+  test/symphony_elixir/backup_capture_test.exs
+```
 
 The focused suite is `test/symphony_elixir/workstream_cleanup_test.exs`. It uses
 real temporary directories, immutable evidence files, SQLite and coordinator
@@ -171,7 +231,7 @@ mix test test/symphony_elixir/workstream_cleanup_test.exs
 mix test test/symphony_elixir/workspace_removal_safety_test.exs
 ```
 
-Checks passed in the isolated, network-disabled qualified image
+PR19 checks passed in the isolated, network-disabled qualified image
 `sha256:930b428bffd3752c5a53310b0b93173e0fdf95e307970bb2c5854d894611d3c9`
 with Elixir 1.19.5, OTP 28 and Python 3.13.5. The checkout was copied into the
 container without shared source/build mounts.

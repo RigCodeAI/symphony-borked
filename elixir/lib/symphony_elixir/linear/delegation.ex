@@ -6,7 +6,7 @@ defmodule SymphonyElixir.Linear.Delegation do
   alias SymphonyElixir.{WorkerOperation, WorkstreamRunner}
 
   @required ~w(organization_id team_id app_user_id oauth_client_id webhook_secret_env store_path workspace_root workstream_path agent_id rig_label)
-  @optional ~w(workspaces codex_command reconcile_interval_ms worker_control token_env client_secret_env cloud_agents secret_environment_names)
+  @optional ~w(workspaces codex_command reconcile_interval_ms worker_control token_env client_secret_env cloud_agents secret_environment_names validation)
 
   @spec validate(map()) :: {:ok, map()} | {:error, atom()}
   def validate(config) when is_map(config) do
@@ -78,6 +78,7 @@ defmodule SymphonyElixir.Linear.Delegation do
 
     execution = if config["codex_command"], do: Keyword.put(execution, :codex_command, config["codex_command"]), else: execution
     execution = if config["worker_control"], do: Keyword.put(execution, :worker_control, config["worker_control"]), else: execution
+    execution = add_validation_options(execution, config["validation"])
 
     with true <- is_binary(workspace),
          {:ok, definition, _workspace} <- WorkstreamRunner.prepare(config["workstream_path"], inputs, execution),
@@ -202,7 +203,30 @@ defmodule SymphonyElixir.Linear.Delegation do
 
     is_integer(interval) and interval >= 1_000 and (is_nil(config["codex_command"]) or is_binary(config["codex_command"])) and
       (is_nil(config["worker_control"]) or (is_nil(config["codex_command"]) and WorkerOperation.validate_config(config["worker_control"]) == :ok)) and
-      (is_nil(config["secret_environment_names"]) or (is_list(config["secret_environment_names"]) and Enum.all?(config["secret_environment_names"], &environment_name?/1)))
+      (is_nil(config["secret_environment_names"]) or (is_list(config["secret_environment_names"]) and Enum.all?(config["secret_environment_names"], &environment_name?/1))) and
+      valid_validation?(config["validation"])
+  end
+
+  defp valid_validation?(nil), do: true
+
+  defp valid_validation?(config) when is_map(config) do
+    Enum.sort(Map.keys(config)) == Enum.sort(~w(policy archive scratch candidates base)) and
+      Enum.all?(~w(policy archive scratch candidates), &absolute?(config[&1])) and
+      is_binary(config["base"]) and Regex.match?(~r/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/, config["base"])
+  end
+
+  defp valid_validation?(_config), do: false
+
+  defp add_validation_options(execution, nil), do: execution
+
+  defp add_validation_options(execution, config) do
+    Keyword.merge(execution,
+      validation_policy: config["policy"],
+      validation_archive: config["archive"],
+      validation_scratch: config["scratch"],
+      validation_candidates: config["candidates"],
+      validation_base: config["base"]
+    )
   end
 
   defp credential_environment(config) do

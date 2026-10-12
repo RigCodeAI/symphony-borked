@@ -48,6 +48,8 @@ MAX_CONFIG_BYTES = 32 * 1024
 MAX_MANIFEST_BYTES = 64 * 1024
 MAX_ARGV_BYTES = 32 * 1024
 MAX_ARGUMENT_BYTES = 4096
+MAX_CANDIDATE_BUNDLE_BYTES = 64 * 1024 * 1024
+CANDIDATE_BUNDLE_CHUNK_BYTES = 64 * 1024
 MAX_STREAM_BUFFER = 1024 * 1024
 STREAM_TIMEOUT_SECONDS = 60 * 60
 TERMINAL_STREAM_RETENTION_SECONDS = 60.0
@@ -222,6 +224,35 @@ def validate_rpc_request(value: Any) -> dict[str, Any]:
             "identity": validate_identity(value.get("identity")),
             "expected_release": validate_release(value.get("expected_release")),
         }
+    if action == "candidate_bundle":
+        expected = frozenset({
+            "action", "identity", "expected_release", "input_sha256", "offset",
+            "expected_sha256", "expected_bytes",
+        })
+        _require_exact_keys(value, expected, "candidate bundle request")
+        input_sha256 = value.get("input_sha256")
+        expected_sha256 = value.get("expected_sha256")
+        expected_bytes = value.get("expected_bytes")
+        offset = value.get("offset")
+        if not isinstance(input_sha256, str) or not _HEX64_RE.fullmatch(input_sha256):
+            raise ProtocolError("invalid candidate bundle identity")
+        if not isinstance(expected_sha256, str) or not _HEX64_RE.fullmatch(expected_sha256):
+            raise ProtocolError("invalid candidate bundle digest")
+        if type(expected_bytes) is not int or not 1 <= expected_bytes <= MAX_CANDIDATE_BUNDLE_BYTES:
+            raise ProtocolError("invalid candidate bundle size")
+        if type(offset) is not int or offset < 0 or offset > expected_bytes:
+            raise ProtocolError("invalid candidate bundle offset")
+        if offset != expected_bytes and offset % CANDIDATE_BUNDLE_CHUNK_BYTES != 0:
+            raise ProtocolError("invalid candidate bundle offset")
+        return {
+            "action": action,
+            "identity": validate_identity(value.get("identity")),
+            "expected_release": validate_release(value.get("expected_release")),
+            "input_sha256": input_sha256,
+            "offset": offset,
+            "expected_sha256": expected_sha256,
+            "expected_bytes": expected_bytes,
+        }
     raise ProtocolError("unsupported RPC action")
 
 
@@ -291,6 +322,7 @@ class BrokerConfig:
     expected_machine_id: str
     service_revision: str
     release_sha256: str
+    candidate_producer_command_sha256: str | None = None
 
     @classmethod
     def load(cls, path: Path = DAEMON_CONFIG, *, expected_owner_uid: int = 0) -> "BrokerConfig":
@@ -302,7 +334,9 @@ class BrokerConfig:
             "worker_user", "worker_group", "control_user", "expected_machine_id",
             "service_revision", "release_sha256",
         })
-        _require_exact_keys(raw, expected, "daemon config")
+        candidate_pin_key = "candidate_producer_command_sha256"
+        if set(raw) not in (expected, expected | {candidate_pin_key}):
+            raise ProtocolError("invalid daemon config fields")
         if type(raw.get("version")) is not int or raw["version"] != 1:
             raise ProtocolError("unsupported daemon config version")
         if raw.get("socket_path") != str(CONTROL_SOCKET):
@@ -340,6 +374,11 @@ class BrokerConfig:
             "service_revision": raw.get("service_revision"),
             "release_sha256": raw.get("release_sha256"),
         })
+        candidate_producer_command_sha256 = raw.get(candidate_pin_key)
+        if (candidate_producer_command_sha256 is not None
+                and (not isinstance(candidate_producer_command_sha256, str)
+                     or not _HEX64_RE.fullmatch(candidate_producer_command_sha256))):
+            raise ProtocolError("invalid candidate producer command pin")
         wrapper_suffix = f"/releases/{release['service_revision']}/factory/deploy/worker_operation_exec.py"
         allowed_wrappers = {
             Path(f"/opt/factory{wrapper_suffix}"),
@@ -385,6 +424,7 @@ class BrokerConfig:
             expected_machine_id=expected_machine_id,
             service_revision=release["service_revision"],
             release_sha256=release["release_sha256"],
+            candidate_producer_command_sha256=candidate_producer_command_sha256,
         )
 
     def expected_release(self) -> dict[str, str]:
@@ -909,6 +949,9 @@ class OperationBroker:
                     raise ProtocolError("operation_unavailable")
                 return {
                     **capabilities,
+                    "candidate_bundle_v1": bool(
+                        getattr(self.controller, "candidate_bundle_available", False)
+                    ),
                     "containment_qualified": (
                         capabilities.get("contained") is True
                         and containment_is_qualified(
@@ -940,6 +983,21 @@ class OperationBroker:
             identity = request["identity"]
             if identity["machine_id"] != self.expected_machine_id:
                 raise ProtocolError("operation_unavailable")
+            if action == "candidate_bundle":
+                method = getattr(self.controller, "candidate_bundle", None)
+                if (not callable(method)
+                        or getattr(self.controller, "candidate_bundle_available", False) is not True):
+                    raise ProtocolError("unsupported_action")
+                result = method(
+                    identity,
+                    request["input_sha256"],
+                    request["offset"],
+                    request["expected_sha256"],
+                    request["expected_bytes"],
+                )
+                if not isinstance(result, dict):
+                    raise ProtocolError("invalid_request")
+                return result
             method = getattr(self.controller, action)
             result = method(identity)
             if not isinstance(result, dict):
@@ -1702,6 +1760,8 @@ def _load_engine(config: BrokerConfig) -> tuple[Any, Any]:
         worker_user=config.worker_user,
         worker_group=config.worker_group,
         expected_machine_id=config.expected_machine_id,
+        service_revision=config.service_revision,
+        candidate_producer_command_sha256=config.candidate_producer_command_sha256,
     )
     return controller, manager
 

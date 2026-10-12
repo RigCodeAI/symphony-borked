@@ -860,6 +860,8 @@ defmodule SymphonyElixir.Linear.Coordinator do
   end
 
   defp run_publications(task, run) do
+    task = publication_link(task, run)
+
     task =
       case SymphonyElixir.Evidence.url(run) do
         nil -> task
@@ -891,7 +893,12 @@ defmodule SymphonyElixir.Linear.Coordinator do
         add_publication(task, key, "error", "Run #{run.id} is blocked by a changed service policy; explicit migration is required.")
 
       :complete ->
-        add_publication(task, key, "response", "Run #{run.id} completed its configured stages. Candidate publication remains disabled.")
+        message =
+          if published_pr(run),
+            do: "Run #{run.id} completed its configured stages. Human GitHub merge remains pending.",
+            else: "Run #{run.id} completed its configured stages. No PR has been published."
+
+        add_publication(task, key, "response", message)
 
       :implementing ->
         add_publication(task, key, "thought", "Run #{run.id}: working on stage #{run.stage_id}.")
@@ -899,9 +906,57 @@ defmodule SymphonyElixir.Linear.Coordinator do
       :validating ->
         add_publication(task, key, "thought", "Run #{run.id}: checking stage #{run.stage_id}.")
 
+      :publishing ->
+        add_publication(task, key, "thought", "Run #{run.id}: verifying exact validation and permanent archival before publishing stage #{run.stage_id}.")
+
       _ ->
         task
     end
+  end
+
+  defp publication_link(task, run) do
+    task = stopped_publication_links(task, run)
+
+    case published_pr(run) do
+      %{"number" => number, "url" => url} ->
+        add_publication(task, "github-pr/#{number}", "thought", "Validated Rig PR: #{url}. The PR contains the tested commit and permanent evidence links. Human merge remains in GitHub.")
+
+      _ ->
+        task
+    end
+  end
+
+  defp stopped_publication_links(task, run) do
+    Enum.reduce(run.operations, task, fn {_id, operation}, acc ->
+      case operation[:publication_observation] do
+        %{status: :observed, pr: %{number: number, url: url}} ->
+          add_publication(
+            acc,
+            "stopped-github-pr/#{number}",
+            "thought",
+            "GitHub PR observed after cancellation: #{url}. The run remains stopped; inspect the PR before taking further action. Human merge remains in GitHub."
+          )
+
+        %{status: :mismatched} ->
+          add_publication(
+            acc,
+            "stopped-publication-mismatch/#{operation.id}",
+            "error",
+            "GitHub state differs from the stopped publication intent. The run remains stopped; inspect the deterministic task branch and PR."
+          )
+
+        _ ->
+          acc
+      end
+    end)
+  end
+
+  defp published_pr(run) do
+    run.attempts
+    |> Enum.reverse()
+    |> Enum.find_value(fn attempt ->
+      if attempt.type == :publish and attempt.gate == :passed, do: get_in(attempt, [:result, :evidence, "pr"])
+    end)
   end
 
   defp add_publication(task, key, type, body) do

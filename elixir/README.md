@@ -489,3 +489,9 @@ and approval stages require the current artifact digest. See [questions and repl
 
 Trusted candidate validation is available locally through the pinned-policy runner and
 inline stage gates. See [trusted validation](../docs/trusted-validation.md) for development/final commands, evidence and limits.
+
+The `publish` workstream stage invokes the trusted Rig publisher, with an inline gate
+referencing a prior candidate-validation stage. A configured coordinator GitHub App and
+exact permanently archived validation evidence are required; agents never receive its key
+or tokens. Durable retries reconcile the same branch and PR. The synchronous local runner
+rejects publication. See [configuration, App setup and verification limits](../docs/trusted-publication.md).

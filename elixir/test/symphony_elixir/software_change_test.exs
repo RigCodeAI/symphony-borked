@@ -36,7 +36,11 @@ defmodule SymphonyElixir.SoftwareChangeTest do
     assert {:error, :unknown_cloud_agent_definition} = WorkstreamRunner.prepare(path, %{"task" => "reviewer forbidden"}, workspace: workspace, workspace_root: root, cloud_agent_id: "default-review")
     run = WorkstreamRun.new("linear/pilot", definition, workspace, workspace_root: root)
     File.write!(path, "changed after enqueue")
-    run = run |> WorkstreamRun.start_stage() |> WorkstreamRun.finish_stage({:ok, %{commit: "local-candidate"}}) |> WorkstreamRun.start_stage()
+    run = run |> WorkstreamRun.start_stage() |> WorkstreamRun.finish_stage({:ok, %{thread_id: "controlled-contract-conversation"}}) |> WorkstreamRun.start_stage()
+    assert run.stage_id == "local-commit"
+    File.write!(Path.join(workspace, "candidate"), "uncommitted local candidate")
+    assert {:ok, %{exit_status: 0} = committed} = WorkstreamRunner.execute_stage(run.stage_id, definition, run, workspace_root: root)
+    run = run |> WorkstreamRun.finish_stage({:ok, committed}) |> WorkstreamRun.start_stage()
     assert run.stage_id == "inspect-candidate"
     assert {:ok, %{exit_status: 0} = checked} = WorkstreamRunner.execute_stage(run.stage_id, definition, run, workspace_root: root)
     File.write!(Path.join(workspace, "untracked"), "dirty candidate")
@@ -46,7 +50,8 @@ defmodule SymphonyElixir.SoftwareChangeTest do
     assert run.status == :waiting_for_answer
     assert run.stage_id == "candidate-ready"
     assert run.pending_wait.prompt =~ "Publication is disabled"
-    assert run.outputs["candidate"] == %{"commit" => "local-candidate"}
-    assert Enum.map(run.attempts, & &1.stage) == ["implement", "inspect-candidate", "candidate-ready"]
+    assert run.outputs["candidate"] == %{"thread_id" => "controlled-contract-conversation"}
+    assert run.pending_wait.artifact_ids["candidate-commit"] == run.artifacts["candidate-commit"]
+    assert Enum.map(run.attempts, & &1.stage) == ["implement", "local-commit", "inspect-candidate", "candidate-ready"]
   end
 end

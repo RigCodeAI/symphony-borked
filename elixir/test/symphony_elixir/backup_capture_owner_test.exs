@@ -330,6 +330,21 @@ defmodule SymphonyElixir.BackupCaptureOwnerTest do
     runs = Map.values(capture.runs)
 
     assert :ok = WorkstreamChild.inspect_recovery_links(runs)
+    attempt_id = parent.child_handoff.parent_attempt_id
+    attempt = Enum.find(parent.attempts, &(&1.id == attempt_id))
+    assert Map.has_key?(attempt, :candidate_context_id)
+    assert attempt.candidate_context_id == nil
+
+    legacy = %{parent | attempts: Enum.map(parent.attempts, fn saved -> if saved.id == attempt_id, do: Map.delete(saved, :candidate_context_id), else: saved end)}
+    assert :ok = WorkstreamChild.inspect_recovery_links([legacy, child])
+
+    for value <- ["", String.duplicate("f", 64), false, %{}] do
+      unsupported = %{parent | attempts: Enum.map(parent.attempts, fn saved -> if saved.id == attempt_id, do: Map.put(saved, :candidate_context_id, value), else: saved end)}
+      assert {:error, :invalid_child_recovery_link} = WorkstreamChild.inspect_recovery_links([unsupported, child])
+    end
+
+    extra = %{parent | attempts: Enum.map(parent.attempts, fn saved -> if saved.id == attempt_id, do: Map.put(saved, "candidate_context_id", nil), else: saved end)}
+    assert {:error, :invalid_child_recovery_link} = WorkstreamChild.inspect_recovery_links([extra, child])
     assert {:error, _reason} = WorkstreamChild.inspect_recovery_links(Enum.reject(runs, &(&1.id == child.id)))
 
     tampered = put_in(child.parent_handoff.parent_attempt_id, "different-attempt")

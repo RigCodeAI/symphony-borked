@@ -12,9 +12,10 @@ defmodule SymphonyElixir.Factory.PinLinearSecretNames do
   @secret_names_marker "FACTORY_LINEAR_SECRET_NAMES_JSON"
   @environment_name ~r/^[A-Z][A-Z0-9_]*$/
   @supported_policy %{
-    lifecycle_sha256: "4738091da35b32648f515d973c1487984e35d2fbc4e83df8f8eed96c8f31ec18",
-    executor_sha256: "fbaf6c23ad73b6f16bc30187308b72d6ab49c88d09af3c0e38af2681013854ca",
-    validation_sha256: "33effc5b8c0181e8623a52ec0639a693422f74744d68edc0d0275127494307b9",
+    lifecycle_sha256: "96b3f754fae20657a74993320094ab5213735a84157f6022915099babc671545",
+    executor_sha256: "638f7f5351c4ad80325f93f859f007af55fd0cf4fc879db94392ae2c854e7052",
+    child_sha256: "a598793bd67ae523b441445143c548b0ed28e9572c471196f3f7291e20b465d5",
+    validation_sha256: "47a77cb57082970ce8f6ca5515b327fc49c31a68a19482fff07893d93efc9cbf",
     gate_policy: "exit-status-v1",
     version: 1
   }

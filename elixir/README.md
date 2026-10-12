@@ -535,3 +535,12 @@ It uses the durable coordinator and a separately prepared `child_workspace`; the
 local runner does not dispatch children. Contract tests cover atomic creation, restarts,
 cancellation, archived typed results and exact parent resume. Native child authorization
 and live external qualification remain pending. No test fixture certifies coverage.
+
+### Independent review and repair
+
+`review_checkout` and `review_publication` are service-owned check evaluators.
+The intervening agent declares `review_checkout_stage` and runs in the sealed
+separate checkout with a fresh conversation. Configure a distinct trusted `review`
+App reference outside workspace roots. Submitted findings authorize append-only
+same-run repair contexts; exact-head validation, three review rounds and human merge
+remain service boundaries. See [the source contract and live choices](../docs/review-repair.md).

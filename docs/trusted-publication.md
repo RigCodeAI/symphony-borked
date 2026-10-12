@@ -102,6 +102,24 @@ reconciles the remote branch and PR, including a lost push/create response. A ne
 validated candidate can update the same PR only when the recorded previous head
 matches the remote head and is an ancestor. An unexpected remote head blocks.
 
+Review-authorized repairs consume the append-only sealed candidate context. The
+producer, transfer, validator and publisher bind the same context ID. A repair's
+sole direct parent is the exact prior published head; its separately pinned
+validation base must be an ancestor of the new candidate. If main advances outside
+that lineage, this version blocks repair until a supported integration path exists.
+It does not substitute the old head for current main or reuse an older receipt.
+The publisher also requires the authenticated prior PR number, URL and branches,
+even when retry finds the new candidate already pushed.
+
+The protected local-commit input includes `candidate_context` with exactly `id`,
+`repair_parent_sha` and `validation_base`. Present context hashes compact sorted
+JSON `{candidate, candidate_context}`; absent or null context preserves the legacy
+candidate-only hash and seven-field producer output. The repair output adds
+`candidate_context_id`, `repair_parent_sha` and `validation_base`. Broker RPC shape
+is unchanged: its protected descriptor binds these inputs through the digest.
+The runner must inject this service-derived input before executing the producer;
+model output cannot supply authorization.
+
 Only the evidence section between `factory-evidence:start` and
 `factory-evidence:end` is managed. Text outside it is preserved byte for byte. New
 PRs retain the repository template from the pinned base commit and link the Linear
@@ -118,16 +136,15 @@ again before the coordinator accepts stage completion.
 
 ## Worker-control rollout plan (not executed)
 
-The qualified producer is merged in DEV-237 PR 16 at
-`7a8a87ae295188ae830527d2d26205a51b9bb744`. Its script hash is
-`9b7f2d4ea6e70c3ca71642c13ba0a1cb88b16d1a2b35a27cb5317c28777072c5`;
-the protected command argv pin is
-`aeae2623255e9c74ec80718023f5bda386d87d5943ca3dd2e171967b15483da8`.
-This checkout incorporates that exact producer and shared instruction. It started
-from PR 9 and now includes the complete current `main` through `7a8a87a`, including
-archive/viewer and the other merged factory slices. Before coordinator activation,
-review and test the exact final source package and preserve old run pins. A producer
-hash does not qualify a coordinator or worker-control deployment by itself.
+The original producer was qualified in DEV-237 PR 16 at
+`7a8a87ae295188ae830527d2d26205a51b9bb744`. This repair-context source changes its
+script and command pin. The new script SHA-256 is
+`d002fa5e6c5d65a73749de067109d020d55d148d9b3e7d6addb1acecd19811d0`;
+the UTF-8 compact command argv SHA-256 is
+`a7bf9930b1e99665d598a30c94db43896d9056a3aaeaf28347d5a1a12a1a1ed9`.
+These are source identities, pending combined integration testing and worker
+qualification. They do not authorize rollout. Preserve old run pins and qualify
+this exact final producer/broker/coordinator package before activation.
 
 1. Wait for DEV-237's qualified commit-preparation command. Record the exact
    protected workstream revision and SHA-256 of the UTF-8 compact JSON command argv

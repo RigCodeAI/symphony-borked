@@ -58,12 +58,19 @@ defmodule SymphonyElixir.ReviewResult do
   """
   @spec validate(binary(), recorded_revision(), revision(), Path.t()) :: {:ok, validated_result()} | {:error, term()}
   def validate(json, recorded, current, workspace) do
+    validate(json, recorded, current, workspace, workspace)
+  end
+
+  @doc "Validates remote reviewer paths against an independently imported copy of the exact commits."
+  @spec validate(binary(), recorded_revision(), revision(), Path.t(), Path.t()) :: {:ok, validated_result()} | {:error, term()}
+  def validate(json, recorded, current, workspace, reviewer_workspace) do
     with :ok <- identities(recorded, current),
          {:ok, workspace} <- workspace_path(workspace),
+         {:ok, reviewer_workspace} <- workspace_path(reviewer_workspace),
          {:ok, result} <- decode(json),
          :ok <- result_shape(result),
          :ok <- commits(workspace, recorded),
-         {:ok, locations} <- locations(result["findings"], workspace, recorded) do
+         {:ok, locations} <- locations(result["findings"], workspace, recorded, reviewer_workspace) do
       validated = %{
         base_sha: recorded.base_sha,
         head_sha: recorded.head_sha,
@@ -220,11 +227,11 @@ defmodule SymphonyElixir.ReviewResult do
     end
   end
 
-  defp locations(findings, workspace, recorded) do
+  defp locations(findings, workspace, recorded, reviewer_workspace) do
     Enum.reduce_while(Enum.with_index(findings), {:ok, [], %{}}, fn {finding, index}, {:ok, acc, cache} ->
       range = finding["code_location"]["line_range"]
 
-      with {:ok, path} <- relative_path(finding["code_location"]["absolute_file_path"], workspace),
+      with {:ok, path} <- relative_path(finding["code_location"]["absolute_file_path"], reviewer_workspace),
            {:ok, hunks} <- file_hunks(path, workspace, recorded, cache),
            true <- Enum.any?(hunks, &placeable?(&1, range)) do
         location = %{path: path, start_line: range["start"], end_line: range["end"], side: :right}

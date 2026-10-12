@@ -3081,7 +3081,7 @@ defmodule SymphonyElixir.Orchestrator do
                 :validation_scratch,
                 :validation_candidates,
                 :validation_base
-              ] and is_binary(value)) or (key in [:worker_control, :publisher, :validation_check] and is_map(value)) or
+              ] and is_binary(value)) or (key in [:worker_control, :publisher, :validation_check, :review] and is_map(value)) or
                (key == :validation_pr and is_integer(value) and value > 0) or
                (key == :secret_environment_names and is_list(value) and Enum.all?(value, &is_binary/1))
            end),
@@ -3177,8 +3177,10 @@ defmodule SymphonyElixir.Orchestrator do
 
     allowed =
       not is_nil(run) and not is_nil(worker) and caller == pid and worker.pid == pid and run.status in [:executing, :reconciling] and
-        run.current_attempt_id == attempt_id and (run.definition.stages[run.stage_id].type == :publish or get_in(run.definition.stages[run.stage_id], [:gate, :evaluator]) == :github_validation) and
-        run.artifacts == artifacts and not linear_stopped?(state, run)
+        run.current_attempt_id == attempt_id and
+        (run.definition.stages[run.stage_id].type == :publish or SymphonyElixir.Review.reviewer?(run.definition.stages[run.stage_id]) or
+           get_in(run.definition.stages[run.stage_id], [:gate, :evaluator]) in [:github_validation, :review_checkout, :review_publication]) and
+        run.artifacts == artifacts and not linear_stopped?(state, run) and not capture_held?(state)
 
     if allowed, do: :ok, else: {:error, :publication_no_longer_owned}
   end
@@ -3976,7 +3978,7 @@ defmodule SymphonyElixir.Orchestrator do
       end
     else
       reconciler = Keyword.get(state.workstreams.opts, :workstream_reconciler, &SymphonyElixir.Publisher.reconcile/2)
-      outcome = reconciler.(run, operation)
+      outcome = if SymphonyElixir.Review.retry_safe?(run.definition.stages[operation.stage]), do: :retry_safe, else: reconciler.(run, operation)
 
       updated =
         case outcome do
@@ -3990,7 +3992,7 @@ defmodule SymphonyElixir.Orchestrator do
             WorkstreamRun.retry_transport(run)
 
           :retry_safe ->
-            if operation.type == :publish or get_in(run.definition.stages[operation.stage], [:gate, :evaluator]) == :github_validation,
+            if operation.type == :publish or get_in(run.definition.stages[operation.stage], [:gate, :evaluator]) in [:github_validation, :review_publication],
               do: WorkstreamRun.retry_transport(run),
               else: WorkstreamRun.uncertain(run, :unknown)
 

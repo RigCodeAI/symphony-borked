@@ -1,0 +1,43 @@
+{
+  "base_head": "e9a2c61cb8b97d1776df738af5f859012f3f3c12",
+  "boundary": "Source contract tests with real Git/process interruption, SQLite capture and cold held application startup; no provider/model/App/live deployment qualification",
+  "cpus": 2,
+  "current_main": "58cbe54fa8e28cddb7b74cf13066f8cce8dd5938",
+  "files": {
+    "elixir/lib/symphony_elixir/review_workspace.ex": "32207d5ec086791d83c3aaa892cdfe5bb03aac38d94c1f8fcd2d4a62bc25585e",
+    "elixir/lib/symphony_elixir/workstream_child.ex": "a598793bd67ae523b441445143c548b0ed28e9572c471196f3f7291e20b465d5",
+    "elixir/lib/symphony_elixir/workstream_run.ex": "96b3f754fae20657a74993320094ab5213735a84157f6022915099babc671545",
+    "elixir/test/symphony_elixir/backup_capture_owner_test.exs": "2b99762f2dcf8fcaaf57a90fa301c0271210343e90b3c760278671811b445671",
+    "elixir/test/symphony_elixir/review_execution_test.exs": "9fa6630203cacd705a56b323f7f35df10bbd220ab0534ac344634f4b4e29dee6",
+    "factory/deploy/pin_linear_secret_names.exs": "ade2315d13ee70ffa433bd4cff20972a7a446fafec2b138ac995d6360e02f3d9"
+  },
+  "final_gate": {
+    "excluded_cases": 8,
+    "failures": 0,
+    "tests": 41
+  },
+  "host_smoke": {
+    "completed_replay": "passed",
+    "fixture_root": "/private/tmp/dev240-restart-smoke-h8l49eth",
+    "interruption_signal": 9,
+    "orphan_retained": true,
+    "platform": "macOS",
+    "retry": "passed"
+  },
+  "image": "sha256:930b428bffd3752c5a53310b0b93173e0fdf95e307970bb2c5854d894611d3c9",
+  "memory": "4g",
+  "network": "none",
+  "recorded_after": "Scoped formatting copied back; tested runtime bytes unchanged while prose/evidence added; containers removed",
+  "restart_gate": {
+    "failures": 0,
+    "tests": 31
+  },
+  "selected_actual_capture_tests": [
+    275,
+    326,
+    749
+  ],
+  "supplied_credentials": false,
+  "test_seed": 240,
+  "volumes": []
+}

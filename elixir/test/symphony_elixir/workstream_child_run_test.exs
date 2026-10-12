@@ -12,7 +12,7 @@ defmodule SymphonyElixir.WorkstreamChildRunTest do
     assert waiting.phase == :waiting_for_child
     assert waiting.current_attempt_id == intent.parent_attempt_id
     assert waiting.child_handoff == intent
-    assert [%{id: attempt_id, status: :waiting, result: nil, type: :child}] = waiting.attempts
+    assert [%{id: attempt_id, status: :waiting, result: nil, type: :child, candidate_context_id: nil}] = waiting.attempts
     assert attempt_id == intent.parent_attempt_id
 
     operation = waiting.operations[attempt_id]

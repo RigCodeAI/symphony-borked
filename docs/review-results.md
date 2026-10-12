@@ -1,10 +1,10 @@
-# Strict review results — DEV-240 independent slice
+# Strict review results
 
-This slice pins the review rubric and validates its output against recorded commit
-identities and local Git diff locations. It does not implement the full DEV-240
-review/fix loop. Publication, remote-head validation, review execution, durable
-dispatch, repair rounds and feedback ownership still require DEV-238/DEV-239 and
-the subsequent integration release.
+This validator pins the review rubric and validates its output against recorded
+commit identities and local Git diff locations. The subsequent
+[review/repair source integration](review-repair.md) owns execution, remote checks,
+submission and bounded repair. The evidence below records the original independent
+validator slice; it does not prove the live pilot.
 
 ## Caller contract
 
@@ -12,8 +12,8 @@ Use `SymphonyElixir.ReviewResult.validate(json, recorded, current, workspace)`.
 
 - `json` is the model's exact rubric JSON, without prose or Markdown fences.
 - `recorded` is a service-owned map with `base_sha`, `head_sha` and `rubric_sha256`.
-- `current` contains independently reconciled `base_sha` and `head_sha`. Future
-  GitHub integration must read these from GitHub, not from the model or its workspace.
+- `current` contains independently reconciled `base_sha` and `head_sha`, read from
+  GitHub by the trusted service, never from the model or its workspace.
 - `workspace` is the absolute path of a separate standalone clone checked out at
   the recorded head. It must have its own `.git` directory; managed Git worktrees
   and metadata symlinks are rejected by the existing `CandidateGit` contract.
@@ -25,7 +25,12 @@ local checkout's HEAD must match the recorded head.
 
 Record the rubric digest when starting the review. Adding service identity fields
 to the model's JSON would violate the pinned rubric schema. A matching envelope
-does not authenticate the reviewer: that remains the future service's responsibility.
+does not authenticate the reviewer: the separate service submission stage does that.
+
+For a remote reviewer, `validate/5` takes an additional sealed reviewer-workspace
+path. It validates absolute model paths within that root while inspecting the
+independently imported commits in the local workspace. It preserves strict JSON
+decoding and all location checks; it does not rewrite or partially accept findings.
 
 ```elixir
 alias SymphonyElixir.ReviewResult

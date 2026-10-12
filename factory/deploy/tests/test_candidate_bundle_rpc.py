@@ -23,7 +23,9 @@ RELEASE_SHA256 = "e" * 64
 
 
 def digest_json(value: object) -> str:
-    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    ).hexdigest()
 
 
 def make_identity(operation_id: str, request_sha256: str) -> dict[str, str]:
@@ -161,6 +163,26 @@ class CandidateBundleRpcTests(unittest.TestCase):
         self.controller._create_record(self.controller._record_path(self.operation_id), record)
         return identity
 
+    def context_argv(
+        self,
+        candidate_context: object,
+        *,
+        candidate: dict[str, object] | None = None,
+    ) -> tuple[list[str], str]:
+        candidate_value = self.candidate if candidate is None else candidate
+        inputs = {"candidate": candidate_value, "candidate_context": candidate_context}
+        inputs_json = json.dumps(inputs, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        argv = [
+            "/usr/bin/env",
+            f"WORKSTREAM_INPUTS_JSON={inputs_json}",
+            *self.command_argv,
+        ]
+        input_sha256 = digest_json({
+            "candidate": candidate_value,
+            "candidate_context": candidate_context,
+        })
+        return argv, input_sha256
+
     def request(self, *, identity: dict[str, str] | None = None, offset: int = 0,
                 expected_sha256: str | None = None, expected_bytes: int | None = None,
                 input_sha256: str | None = None) -> dict[str, object]:
@@ -288,6 +310,66 @@ class CandidateBundleRpcTests(unittest.TestCase):
             self.controller.candidate_bundle(
                 self.identity, wrong_input, 0, hashlib.sha256(self.bundle_bytes).hexdigest(), len(self.bundle_bytes)
             )
+
+    def test_context_digest_is_derived_from_protected_descriptor_inputs(self):
+        candidate = {"thread_id": "task-100", "revision": "main", "label": "café"}
+        context = {
+            "id": "1" * 64,
+            "repair_parent_sha": "2" * 40,
+            "validation_base": "3" * 64,
+        }
+        argv, input_sha256 = self.context_argv(context, candidate=candidate)
+        self.bundle_path = self.candidates / f"{input_sha256}.bundle"
+        self.write_bundle(self.bundle_bytes)
+        identity = self.install_operation(argv=argv)
+
+        response = self.fetch(identity=identity, input_sha256=input_sha256)
+        self.assertEqual(response["candidate_input_sha256"], input_sha256)
+        self.assertEqual(
+            base64.b64decode(response["data_base64"]),
+            self.bundle_bytes[:transport.CANDIDATE_BUNDLE_CHUNK_BYTES],
+        )
+
+    def test_context_digest_rejects_changed_or_invalid_descriptor_claims(self):
+        context = {
+            "id": "1" * 64,
+            "repair_parent_sha": "2" * 40,
+            "validation_base": "3" * 64,
+        }
+        expected_input_sha256 = digest_json({
+            "candidate": self.candidate,
+            "candidate_context": context,
+        })
+        changed_contexts = {
+            "id": {**context, "id": "4" * 64},
+            "repair parent": {**context, "repair_parent_sha": "5" * 64},
+            "validation base": {**context, "validation_base": "6" * 40},
+            "extra field": {**context, "extra": "not allowed"},
+            "invalid id": {**context, "id": "not-a-digest"},
+            "invalid SHA type": {**context, "repair_parent_sha": 7},
+        }
+        for label, changed_context in changed_contexts.items():
+            with self.subTest(context=label):
+                argv, _ = self.context_argv(changed_context)
+                identity = self.install_operation(argv=argv)
+                with self.assertRaises(engine.OperationUnavailable):
+                    self.fetch(identity=identity, input_sha256=expected_input_sha256)
+
+    def test_null_context_keeps_legacy_candidate_only_digest(self):
+        inputs_json = json.dumps(
+            {"candidate": self.candidate, "candidate_context": None},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        argv = [
+            "/usr/bin/env",
+            f"WORKSTREAM_INPUTS_JSON={inputs_json}",
+            *self.command_argv,
+        ]
+        identity = self.install_operation(argv=argv)
+        response = self.fetch(identity=identity, input_sha256=self.input_sha256)
+        self.assertEqual(response["candidate_input_sha256"], self.input_sha256)
 
     def test_unicode_inline_command_pin_uses_compact_utf8_json(self):
         unicode_command_argv = ["/usr/bin/python3", "-I", "-c", "print('café')"]

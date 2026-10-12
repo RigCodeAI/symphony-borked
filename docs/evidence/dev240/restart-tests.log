@@ -1,0 +1,15 @@
+Compiling 59 files (.ex)
+Compiling 5 files (.ex)
+Generated symphony_elixir app
+specs.check: all public functions have @spec or exemption
+{'lifecycle_sha256': 'f7ca388a6438608672ceda20cf76f690406318321bbd050438acdedf1b1c76aa', 'executor_sha256': '1ce637fa6f361ca1c88d9c4d6bb571793ee77e8b083730f0ec3e1b4832ac7bf9', 'child_sha256': 'a83895f16f4ff02a33ee340263c24d41a746abab9bf141665f37a622db747f6e', 'validation_sha256': '47a77cb57082970ce8f6ca5515b327fc49c31a68a19482fff07893d93efc9cbf'}
+Compiling 59 files (.ex)
+Compiling 5 files (.ex)
+Generated symphony_elixir app
+Running ExUnit with seed: 240, max_cases: 6
+Excluding tags: [:validation_docker]
+
+...............................
+Finished in 18.5 seconds (0.4s async, 18.1s sync)
+31 tests, 0 failures
+PR body format OK

@@ -887,7 +887,13 @@ defmodule SymphonyElixir.Linear.Coordinator do
         end
 
       :blocked ->
-        add_publication(task, key, "error", "Run #{run.id} failed or requires unsupported input. Inspect the durable stage receipt before retrying.")
+        message =
+          if run[:review_escalation],
+            do:
+              "Run #{run.id} requires a human decision about review: #{run.review_escalation}. Review repair rounds: #{run.review_repair_rounds}/3. Inspect the submitted review and durable receipts; merge remains a human GitHub action.",
+            else: "Run #{run.id} failed or requires unsupported input. Inspect the durable stage receipt before retrying."
+
+        add_publication(task, key, "error", message)
 
       :policy_blocked ->
         add_publication(task, key, "error", "Run #{run.id} is blocked by a changed service policy; explicit migration is required.")
@@ -908,6 +914,17 @@ defmodule SymphonyElixir.Linear.Coordinator do
 
       :publishing ->
         add_publication(task, key, "thought", "Run #{run.id}: verifying exact validation and permanent archival before publishing stage #{run.stage_id}.")
+
+      :reviewing ->
+        add_publication(task, key, "thought", "Run #{run.id}: reviewing the current validated PR head in a separate checkout and conversation.")
+
+      :fixing ->
+        add_publication(
+          task,
+          key,
+          "thought",
+          "Run #{run.id}: addressing the submitted review on the same PR with the original Cloud Agent. Completed review repair rounds: #{run.review_repair_rounds}/3."
+        )
 
       _ ->
         task

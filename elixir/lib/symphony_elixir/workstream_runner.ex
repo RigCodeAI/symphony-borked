@@ -13,11 +13,14 @@ defmodule SymphonyElixir.WorkstreamRunner do
   alias SymphonyElixir.{
     AgentReadiness,
     CandidateGit,
+    CandidateContext,
     CandidateTransfer,
     Config,
     Evidence,
     PathSafety,
     Publisher,
+    Review,
+    ReviewResult,
     Validation,
     ValidationCheck,
     ValidationPolicy,
@@ -64,8 +67,9 @@ defmodule SymphonyElixir.WorkstreamRunner do
     with {:ok, validation} <- validation,
          {:ok, transfer} <- pin_candidate_transfer(opts, definition),
          {:ok, publication} <- Publisher.pin(opts, workspace, definition),
-         {:ok, check} <- ValidationCheck.pin(Keyword.merge(opts, Map.to_list(publication)), workspace, definition) do
-      {:ok, context |> Map.merge(validation) |> Map.merge(transfer) |> Map.merge(publication) |> Map.merge(check)}
+         {:ok, check} <- ValidationCheck.pin(Keyword.merge(opts, Map.to_list(publication)), workspace, definition),
+         {:ok, review} <- Review.pin(Keyword.merge(opts, Map.to_list(Map.merge(publication, check))), workspace, definition) do
+      {:ok, context |> Map.merge(validation) |> Map.merge(transfer) |> Map.merge(publication) |> Map.merge(check) |> Map.merge(review)}
     end
   end
 
@@ -102,13 +106,32 @@ defmodule SymphonyElixir.WorkstreamRunner do
          :ok <- dedicated_clone(workspace),
          {:ok, definition} <- pin_definition_validation(opts, workspace, definition),
          {:ok, publication} <- Publisher.pin(opts, workspace, definition),
-         {:ok, _check} <- ValidationCheck.pin(Keyword.merge(opts, Map.to_list(publication)), workspace, definition) do
+         {:ok, check} <- ValidationCheck.pin(Keyword.merge(opts, Map.to_list(publication)), workspace, definition),
+         {:ok, _review} <- Review.pin(Keyword.merge(opts, Map.to_list(Map.merge(publication, check))), workspace, definition) do
       {:ok, definition, workspace}
     end
   end
 
   defp bind_cloud_agent(definition, nil), do: {:ok, definition}
-  defp bind_cloud_agent(definition, agent_id), do: SymphonyElixir.Linear.AgentMapping.bind(definition, agent_id)
+
+  defp bind_cloud_agent(definition, agent_id) do
+    with {:ok, bound} <- SymphonyElixir.Linear.AgentMapping.bind(definition, agent_id) do
+      original = bound.agents[bound.stages[bound.entry].agent]
+
+      changed =
+        Enum.any?(bound.stages, fn {_id, stage} ->
+          case stage do
+            %{gate: %{evaluator: :review_publication, failure: %{repair: target}}} ->
+              bound.agents[bound.stages[target].agent].revision != original.revision
+
+            _ ->
+              false
+          end
+        end)
+
+      if changed, do: {:error, :review_repair_agent_changed_by_binding}, else: {:ok, bound}
+    end
+  end
 
   @doc """
   Runs a validated local workstream synchronously until it completes, blocks, or reaches
@@ -149,23 +172,31 @@ defmodule SymphonyElixir.WorkstreamRunner do
   end
 
   def execute_stage(%{type: :agent} = stage, definition, state, opts) do
-    with {:ok, workspace} <- stage_workspace(state, definition, opts) do
-      run_agent(stage, definition, %{state | workspace: workspace}, opts)
+    with {:ok, view} <- stage_context(state),
+         {:ok, workspace} <- stage_workspace(view, definition, opts),
+         {:ok, workspace} <- agent_workspace(view, stage, workspace, opts) do
+      run_agent(stage, definition, %{view | workspace: workspace}, Keyword.merge(opts, Map.to_list(view.execution)))
     end
   end
 
   def execute_stage(%{type: :publish} = stage, definition, state, opts) do
-    with {:ok, workspace} <- stage_workspace(state, definition, opts) do
-      Publisher.publish(%{state | workspace: workspace}, stage, opts)
+    with {:ok, view} <- stage_context(state),
+         {:ok, workspace} <- stage_workspace(view, definition, opts) do
+      Publisher.publish(%{view | workspace: workspace}, stage, Keyword.merge(opts, Map.to_list(view.execution)))
     end
   end
 
   def execute_stage(%{type: :check} = stage, definition, state, opts) do
-    with {:ok, workspace} <- stage_workspace(state, definition, opts) do
+    with {:ok, view} <- stage_context(state),
+         {:ok, workspace} <- stage_workspace(view, definition, opts) do
+      opts = Keyword.merge(opts, Map.to_list(view.execution))
+
       case stage.gate[:evaluator] do
-        :candidate_validation -> execute_candidate_validation(stage, state, workspace, opts)
-        :github_validation -> ValidationCheck.reconcile(%{state | workspace: workspace}, stage, opts)
-        _ -> run_executable_check(stage, state, workspace, opts)
+        :candidate_validation -> execute_candidate_validation(stage, view, workspace, opts)
+        :github_validation -> ValidationCheck.reconcile(%{view | workspace: workspace}, stage, opts)
+        :review_checkout -> Review.prepare(%{view | workspace: workspace}, stage, opts)
+        :review_publication -> Review.submit(%{view | workspace: workspace}, stage, opts)
+        _ -> run_executable_check(stage, view, workspace, opts)
       end
     end
   end
@@ -176,12 +207,45 @@ defmodule SymphonyElixir.WorkstreamRunner do
   def execute_stage(_stage, _definition, _state, _opts),
     do: {:error, :invalid_workstream_stage}
 
+  defp stage_context(%{id: id} = state) when id not in [nil, "local"], do: CandidateContext.view(state, state.current_attempt_id)
+  defp stage_context(state), do: {:ok, Map.put_new(state, :execution, %{})}
+
+  defp agent_workspace(state, stage, workspace, opts) do
+    if Review.reviewer?(stage) do
+      with {:ok, checkout} <- Review.ready_checkout(state, stage, opts), do: {:ok, checkout["workspace"]}
+    else
+      {:ok, workspace}
+    end
+  end
+
   defp run_executable_check(stage, state, workspace, opts) do
-    inputs = Map.take(state.outputs, stage.inputs)
+    inputs = state.outputs |> Map.take(stage.inputs) |> producer_inputs(stage, state)
 
     case opts[:worker_control] do
       nil -> WorkstreamCommand.run(stage.gate.command, workspace, stage.gate.timeout_ms, inputs)
       control -> WorkerOperation.run_check(stage.gate.command, workspace, stage.gate.timeout_ms, state.current_attempt_id, control, opts[:on_process_start], inputs)
+    end
+  end
+
+  defp producer_inputs(inputs, stage, state) do
+    producer_stage = state.execution[:candidate_producer_stage] || "local-commit"
+
+    if stage.id == producer_stage do
+      inputs = Map.delete(inputs, "candidate_context")
+
+      case state.execution[:candidate_context_id] do
+        nil ->
+          inputs
+
+        id ->
+          Map.put(inputs, "candidate_context", %{
+            "id" => id,
+            "repair_parent_sha" => state.execution[:repair_parent_sha],
+            "validation_base" => state.execution[:validation_base]
+          })
+      end
+    else
+      inputs
     end
   end
 
@@ -395,14 +459,8 @@ defmodule SymphonyElixir.WorkstreamRunner do
     attempt_id = Map.get(state, :current_attempt_id) || stage.id
 
     if is_map(policy) and is_binary(base_sha) and is_binary(archive) and is_binary(scratch) do
-      context = %{
-        task_id: Map.get(state, :task_id) || "local",
-        run_id: Map.get(state, :id) || "local",
-        attempt_id: attempt_id,
-        base_sha: base_sha
-      }
-
-      with {:ok, candidate_workspace, _metadata} <- CandidateTransfer.sync(%{state | workspace: workspace}, stage, opts) do
+      with {:ok, context} <- validation_identity(state, attempt_id, base_sha),
+           {:ok, candidate_workspace, _metadata} <- CandidateTransfer.sync(%{state | workspace: workspace}, stage, opts) do
         Validation.execute(candidate_workspace, policy, context, stage.gate.required,
           validation_archive: archive,
           validation_scratch: scratch
@@ -412,6 +470,9 @@ defmodule SymphonyElixir.WorkstreamRunner do
       {:error, :candidate_validation_context_not_pinned}
     end
   end
+
+  defp validation_identity(%{id: "local"} = state, attempt_id, base), do: {:ok, %{task_id: state.task_id, run_id: state.id, attempt_id: attempt_id, base_sha: base}}
+  defp validation_identity(state, attempt_id, _base), do: CandidateContext.validation_context(state, attempt_id)
 
   defp pinned_workspace(workspace, canonical_workspace) when workspace == canonical_workspace, do: :ok
   defp pinned_workspace(_workspace, _canonical_workspace), do: {:error, :workspace_path_changed}
@@ -657,8 +718,17 @@ defmodule SymphonyElixir.WorkstreamRunner do
       Enum.map_join(resources, "\n\n", & &1.text) <>
         "\n\nStage instructions:\n#{stage.prompt}\n\nDeclared inputs:\n#{Jason.encode!(inputs)}\n" <>
         "Work only in #{state.workspace}. Do not push, publish a PR, merge, or modify definitions." <>
-        continuation_prompt(Map.put(state, :stage_id, stage.id)) <>
-        repair_feedback(state)
+        agent_context_prompt(stage, state)
+
+    output_tag = make_ref()
+    recipient = self()
+    capture = evidence_message_handler(state)
+
+    on_message = fn event ->
+      capture.(event)
+      if Review.reviewer?(stage) or state.execution[:candidate_context_id], do: capture_review_output(event, recipient, output_tag)
+      :ok
+    end
 
     app_opts = [
       workspace_root: Keyword.fetch!(opts, :workspace_root),
@@ -672,7 +742,7 @@ defmodule SymphonyElixir.WorkstreamRunner do
       model: agent.model,
       reasoning_effort: agent.reasoning_effort,
       dynamic_tools: false,
-      factory_tools: is_function(opts[:on_question], 1) and is_function(opts[:on_wait], 1),
+      factory_tools: not Review.reviewer?(stage) and is_function(opts[:on_question], 1) and is_function(opts[:on_wait], 1),
       on_question: opts[:on_question],
       on_wait: opts[:on_wait],
       read_timeout_ms: 30_000,
@@ -686,7 +756,7 @@ defmodule SymphonyElixir.WorkstreamRunner do
           "networkAccess" => false
         }
       },
-      on_message: evidence_message_handler(state)
+      on_message: on_message
     ]
 
     runner = Keyword.get(opts, :agent_executor, &AppServer.run/4)
@@ -705,7 +775,31 @@ defmodule SymphonyElixir.WorkstreamRunner do
 
     case result do
       {:ok, evidence} ->
-        {:ok, Map.put(Map.take(evidence, [:thread_id, :turn_id, :session_id, :model, :reasoning_effort]), :workspace, state.workspace)}
+        value = Map.put(Map.take(evidence, [:thread_id, :turn_id, :session_id, :model, :reasoning_effort]), :workspace, state.workspace)
+
+        if Review.reviewer?(stage) do
+          with true <- value[:thread_id] != state.thread_id,
+               {:ok, json} <- review_output(output_tag, []) do
+            {:ok, Map.put(value, :review_json, json)}
+          else
+            _ -> {:error, :independent_review_output_missing}
+          end
+        else
+          value = Map.merge(value, Map.take(state.execution, [:candidate_context_id, :repair_parent_sha, :validation_base]))
+
+          if state.execution[:candidate_context_id] do
+            with {:ok, text} <- review_output(output_tag, []),
+                 {:ok, feedback} <- Jason.decode(text),
+                 true <- is_map(feedback) and Enum.sort(Map.keys(feedback)) == ["explanation", "review_disagreement"],
+                 true <- is_boolean(feedback["review_disagreement"]) and is_binary(feedback["explanation"]) and String.trim(feedback["explanation"]) != "" do
+              {:ok, Map.merge(value, %{review_disagreement: feedback["review_disagreement"], repair_explanation: feedback["explanation"]})}
+            else
+              _ -> {:error, :review_fix_response_not_structured}
+            end
+          else
+            {:ok, value}
+          end
+        end
 
       {:error, reason} ->
         safe_agent_error(reason)
@@ -715,6 +809,50 @@ defmodule SymphonyElixir.WorkstreamRunner do
 
       {:uncertain, _reason} = uncertain ->
         uncertain
+    end
+  end
+
+  defp agent_context_prompt(stage, state) do
+    if Review.reviewer?(stage) do
+      "\nReview rubric (verbatim, pinned):\n" <>
+        ReviewResult.rubric().text <>
+        "\nReturn exactly one final agent message containing only the rubric JSON. Do not edit source files. Review the recorded committed diff; use absolute paths under #{state.workspace}."
+    else
+      continuation_prompt(Map.put(state, :stage_id, stage.id)) <> repair_feedback(state) <> review_repair_feedback(state)
+    end
+  end
+
+  defp review_repair_feedback(state) do
+    case state.execution[:candidate_context_id] do
+      nil ->
+        ""
+
+      id ->
+        context = state.candidate_contexts[id]
+        attempt = Enum.find(state.attempts, &(&1.id == context.review_attempt_id))
+
+        "\nAddress this submitted review on the same branch, using the original Cloud Agent definition. If you disagree, explain the specific finding and evidence; do not waive a finding or merge. Return exactly one final message containing only JSON with review_disagreement (boolean) and explanation (nonempty string reporting fixes, checks or disagreement evidence). A disagreement is escalated to a human.\n" <>
+          Jason.encode!(attempt.result.evidence)
+    end
+  end
+
+  defp capture_review_output(%{payload: %{"method" => "item/completed", "params" => %{"item" => %{"type" => "agentMessage", "text" => text} = item}}}, recipient, tag) when is_binary(text) do
+    if item["phase"] in [nil, "final", "final_answer"] do
+      send(recipient, {tag, if(byte_size(text) <= 1_048_576, do: {:ok, text}, else: {:error, :review_output_too_large})})
+    end
+  end
+
+  defp capture_review_output(_event, _recipient, _tag), do: :ok
+
+  defp review_output(tag, outputs) do
+    receive do
+      {^tag, output} -> review_output(tag, [output | outputs])
+    after
+      0 ->
+        case outputs do
+          [{:ok, text}] -> {:ok, text}
+          _ -> {:error, :ambiguous_or_missing_review_output}
+        end
     end
   end
 

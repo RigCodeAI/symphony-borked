@@ -39,6 +39,38 @@ re-verifies the receipt, archive, pinned identity, seal and 30-second observatio
 bound locally; worker-provided success is not accepted. `verify_ready/3` is the read-only readiness
 interface for the subsequent review increment.
 
+### Immutable repair context
+
+The review repair increment keeps two separate commits: `validation_base` is the
+trusted current `main` integration base; `repair_parent_sha` is the previous
+published head used for transfer lineage. A repair never substitutes its parent
+for the current-main validation base.
+
+DEV-240 owns the append-only sealed `CandidateContext` and attempt links. The gate
+consumes `view/2`, `validation_context/2` and `same_context?/3`: the consuming
+check or wait and the selected validation attempt must share the authorized
+context. The fresh authenticated receipt binds that context, exact candidate,
+policy and current-main base. The live PR must also match the sealed context's
+number, URL and branches. Original execution pins and earlier attempts stay
+unchanged. New context IDs enter the check identity and sealed completion path;
+the original context keeps its prior receipt and check identity shape.
+
+A changed `main` invalidates an old-base receipt before or after tests, even when
+the newer main commit is already an ancestor of the candidate. A candidate that
+does not contain current main also fails. A newly authorized context and fresh
+validation are required; ancestry alone cannot requalify old tests. The consumer is tested against shared source
+`1865a6acfc411a9a0cd112ffe3f6794f8c7c31aa`; that dependency branch is not a
+merged prerequisite or live release. The first bounded 119-test run had seven
+fixture failures: six repair fixtures changed an uncovered file and the shipped
+flow fixture lacked the new separate review setup. Repair fixtures now change
+the frozen policy's covered README without changing policy. All 32 native gate
+tests passed. The final bounded 119-test run passed with DEV-240's corrected
+shipped-flow fixture in a disposable test-file overlay; that fixture is excluded
+from this consumer commit and remains DEV-240-owned. Compile with warnings as
+errors, public specs, full formatting and diff checks passed. No broad suite was
+repeated. DEV-240 owns combined integration with DEV-238's producer, transfer and
+publisher consumers, and will qualify the actual combined source before its PR.
+
 The existing coordinator polls enrolled human-wait PRs every 60 seconds, outside
 worker slots. It persists only changed observations, with a durable sequence number.
 Head/base changes revoke qualification. Human replies are first durably queued as
@@ -50,12 +82,13 @@ GitHub reads are never performed in the coordinator's human-reply callback. Rest
 Normal discussion and human merging remain external. No merge endpoint is exposed.
 GitHub protection, once approved and enabled, is the independent merge boundary.
 
-DEV-242's capture-hold API is not merged into this source increment. Its integration
-must guard `validation_monitor_owner`, the `github_validation` publication-owner
-callback and validation scheduling, and drain `workstreams.validation_checks`
-before capture. This includes `stage/<attempt>` read-verifier tasks and their
-`:validation_stage_verified` result acceptance and `:validation_stage_verifier_owner`. Capture-enabled deployment remains
-gated on that combined test.
+The merged capture barrier guards `validation_monitor_owner`, the
+`github_validation` publication-owner callback and validation scheduling, and
+drains `workstreams.validation_checks` before capture. This includes
+`stage/<attempt>` read-verifier tasks and their `:validation_stage_verified`
+result acceptance and `:validation_stage_verifier_owner`. The bounded
+consumer suite includes capture and cleanup ownership regressions. Deployed
+capture and restore qualification remain separate.
 
 ## Separate App and rollout proposal — not executed
 
@@ -149,3 +182,15 @@ Replace the two explicit placeholders with the recorded pilot identities. Expect
 an App-bound required check and matching current head; missing/failed states remain
 blocked. Safe live cleanup preserves the pilot PR, evidence and protections; close
 or delete resources only under the agreed grouped-checkpoint cleanup decision.
+
+## Repair consumer source diagnostics
+
+Local diagnostics: `/private/tmp/dev239-context-consumers-tests.log` (initial
+119 tests, seven fixture failures), `/private/tmp/dev239-context-gate-recheck.log`
+(32 passed), `/private/tmp/dev239-software-change-fixture-check.log` (one passed
+with owner-provided fixture), and `/private/tmp/dev239-context-consumers-final-tests.log`
+(119 passed, seed 239, same production source with that explicit fixture overlay).
+The overlay is `/private/tmp/dev239-software-change-fixture-snapshot.exs`; only its
+source-file directory reference was adjusted for the disposable location. These
+are source tests and synthetic signed contracts, not live factory receipts. The
+local container was stopped and the shared build slot released after the pass.

@@ -82,7 +82,7 @@ defmodule SymphonyElixir.Workstream do
          :ok <- validate_input_values(input_names, input_values),
          :ok <- validate_agent_references(stages, agents),
          {:ok, stages, child_definitions} <- load_child_stages(stages, workstream_path, mode),
-         :ok <- validate_transitions(stages, entry),
+         :ok <- validate_transitions(stages, entry, agents),
          :ok <- validate_outputs(stages, input_names),
          :ok <- validate_dataflow(stages, entry, input_names),
          {:ok, definitions} <- merge_child_references(agent_definitions, child_definitions),
@@ -227,6 +227,11 @@ defmodule SymphonyElixir.Workstream do
     end
   end
 
+  @doc "Returns whether an agent stage is assigned to review a pinned checkout."
+  @spec reviewer?(map()) :: boolean()
+  def reviewer?(%{type: :agent, review_checkout_stage: checkout}) when is_binary(checkout), do: true
+  def reviewer?(_stage), do: false
+
   defp read_yaml(path, context) do
     with {:ok, canonical_path} <- canonical_definition_path(path, context) do
       read_yaml_file(canonical_path, context)
@@ -295,6 +300,9 @@ defmodule SymphonyElixir.Workstream do
 
   defp required_name(value, context), do: {:error, {:invalid_name, context, value}}
 
+  defp optional_name(:error, _context), do: {:ok, nil}
+  defp optional_name({:ok, value}, context), do: required_name(value, context)
+
   defp names(values, context) when is_list(values) do
     if Enum.all?(values, &(is_binary(&1) and String.trim(&1) != "")) do
       if length(values) == length(Enum.uniq(values)) do
@@ -353,14 +361,28 @@ defmodule SymphonyElixir.Workstream do
   defp normalize_stages(_stages), do: {:error, {:invalid_workstream_stages, :expected_nonempty_list}}
 
   defp normalize_stage(%{"type" => "agent"} = stage) do
-    with :ok <- exact_fields(stage, ~w(id type inputs outputs agent prompt next), {:stage, Map.get(stage, "id")}),
+    with :ok <-
+           exact_optional_fields(
+             stage,
+             ~w(id type inputs outputs agent prompt next),
+             ["review_checkout_stage"],
+             {:stage, Map.get(stage, "id")}
+           ),
          {:ok, id} <- required_name(Map.get(stage, "id"), :stage_id),
          {:ok, inputs} <- names(Map.get(stage, "inputs"), {:stage_inputs, id}),
          {:ok, outputs} <- names(Map.get(stage, "outputs"), {:stage_outputs, id}),
          {:ok, agent} <- required_name(Map.get(stage, "agent"), {:stage_agent, id}),
          {:ok, prompt} <- required_name(Map.get(stage, "prompt"), {:stage_prompt, id}),
-         {:ok, next} <- required_name(Map.get(stage, "next"), {:stage_next, id}) do
-      {:ok, %{id: id, type: :agent, inputs: inputs, outputs: outputs, agent: agent, prompt: prompt, next: next}}
+         {:ok, next} <- required_name(Map.get(stage, "next"), {:stage_next, id}),
+         {:ok, review_checkout_stage} <-
+           optional_name(Map.fetch(stage, "review_checkout_stage"), {:review_checkout_stage, id}) do
+      normalized = %{id: id, type: :agent, inputs: inputs, outputs: outputs, agent: agent, prompt: prompt, next: next}
+
+      {:ok,
+       if(is_binary(review_checkout_stage),
+         do: Map.put(normalized, :review_checkout_stage, review_checkout_stage),
+         else: normalized
+       )}
     end
   end
 
@@ -449,6 +471,34 @@ defmodule SymphonyElixir.Workstream do
   defp child_input_mapping(_mapping, stage_id),
     do: {:error, {:invalid_child_input_mapping, stage_id}}
 
+  defp normalize_gate(%{"evaluator" => "review_checkout"} = gate, stage_id) do
+    with :ok <- exact_fields(gate, ~w(evaluator validation_stage success failure), {:gate, stage_id}),
+         {:ok, validation_stage} <- required_name(gate["validation_stage"], {:validation_stage, stage_id}),
+         {:ok, success} <- gate_success(gate["success"], stage_id),
+         :ok <- review_gate_failure(gate["failure"], stage_id) do
+      {:ok, %{evaluator: :review_checkout, validation_stage: validation_stage, success: success, failure: :blocked}}
+    end
+  end
+
+  defp normalize_gate(%{"evaluator" => "review_publication"} = gate, stage_id) do
+    with :ok <- exact_fields(gate, ~w(evaluator validation_stage review_stage checkout_stage success failure), {:gate, stage_id}),
+         {:ok, validation_stage} <- required_name(gate["validation_stage"], {:validation_stage, stage_id}),
+         {:ok, review_stage} <- required_name(gate["review_stage"], {:review_stage, stage_id}),
+         {:ok, checkout_stage} <- required_name(gate["checkout_stage"], {:checkout_stage, stage_id}),
+         {:ok, success} <- gate_success(gate["success"], stage_id),
+         {:ok, failure} <- gate_failure(gate["failure"], stage_id) do
+      {:ok,
+       %{
+         evaluator: :review_publication,
+         validation_stage: validation_stage,
+         review_stage: review_stage,
+         checkout_stage: checkout_stage,
+         success: success,
+         failure: failure
+       }}
+    end
+  end
+
   defp normalize_gate(%{"evaluator" => "github_validation"} = gate, stage_id) do
     with :ok <- exact_fields(gate, ~w(evaluator validation_stage required success failure), {:gate, stage_id}),
          {:ok, validation_stage} <- required_name(gate["validation_stage"], {:validation_stage, stage_id}),
@@ -508,6 +558,9 @@ defmodule SymphonyElixir.Workstream do
 
   defp publish_gate_failure("blocked", _stage_id), do: :ok
   defp publish_gate_failure(value, stage_id), do: {:error, {:invalid_publish_gate_failure, stage_id, value}}
+
+  defp review_gate_failure("blocked", _stage_id), do: :ok
+  defp review_gate_failure(value, stage_id), do: {:error, {:invalid_review_gate_failure, stage_id, value}}
 
   defp validation_evaluator("candidate_validation", _stage_id), do: :ok
 
@@ -729,7 +782,7 @@ defmodule SymphonyElixir.Workstream do
     end
   end
 
-  defp validate_transitions(stages, entry) do
+  defp validate_transitions(stages, entry, agents) do
     cond do
       not Map.has_key?(stages, entry) ->
         {:error, {:unknown_workstream_entry, entry}}
@@ -740,7 +793,8 @@ defmodule SymphonyElixir.Workstream do
       true ->
         with :ok <- validate_stage_transitions(stages),
              :ok <- validate_publish_provenance(stages),
-             :ok <- validate_repair_edges(stages, entry),
+             :ok <- validate_review_contracts(stages),
+             :ok <- validate_repair_edges(stages, entry, agents),
              {:ok, reachable} <- reachable_stages(stages, entry),
              :ok <- all_stages_reachable(stages, reachable),
              {:ok, _order} <- topological_order(stages) do
@@ -860,33 +914,132 @@ defmodule SymphonyElixir.Workstream do
     end
   end
 
-  @spec validate_repair_edges(map(), String.t()) :: :ok | {:error, term()}
-  defp validate_repair_edges(stages, entry) do
-    {:ok, normal_reachable} = normal_reachable_stages(stages, entry)
-    validate_all_repair_edges(stages, normal_reachable)
-  end
-
-  @spec validate_all_repair_edges(map(), stage_id_set()) :: :ok | {:error, term()}
-  defp validate_all_repair_edges(stages, normal_reachable) do
-    Enum.reduce_while(stages, :ok, fn {check_id, stage}, :ok ->
-      case validate_repair_edge_for_stage(check_id, stage, stages, normal_reachable) do
+  defp validate_review_contracts(stages) do
+    Enum.reduce_while(stages, :ok, fn {id, stage}, :ok ->
+      case validate_review_contract(id, stage, stages) do
         :ok -> {:cont, :ok}
         {:error, _} = error -> {:halt, error}
       end
     end)
   end
 
-  @spec validate_repair_edge_for_stage(String.t(), map(), map(), stage_id_set()) ::
+  defp validate_review_contract(id, %{type: :check, gate: %{evaluator: :review_checkout} = gate}, stages) do
+    with :ok <- github_validation_stage(id, gate.validation_stage, stages),
+         :ok <-
+           normal_reaches?(stages, gate.validation_stage, id, {:review_validation_not_ancestor, id, gate.validation_stage}),
+         {:ok, reviewer} <- review_checkout_successor(id, gate.success, stages),
+         :ok <- review_publication_successor(id, gate.validation_stage, reviewer, stages) do
+      :ok
+    end
+  end
+
+  defp validate_review_contract(id, %{type: :check, gate: %{evaluator: :review_publication} = gate}, stages) do
+    with :ok <- github_validation_stage(id, gate.validation_stage, stages),
+         %{type: :check, gate: %{evaluator: :review_checkout} = checkout_gate} <- Map.get(stages, gate.checkout_stage),
+         true <- checkout_gate.success == gate.review_stage,
+         true <- checkout_gate.validation_stage == gate.validation_stage,
+         %{type: :agent, review_checkout_stage: checkout_id, next: ^id} <- Map.get(stages, gate.review_stage),
+         true <- checkout_id == gate.checkout_stage,
+         :ok <- normal_reaches?(stages, gate.validation_stage, id, {:review_validation_not_ancestor, id, gate.validation_stage}) do
+      :ok
+    else
+      {:error, _} = error -> error
+      _ -> {:error, {:invalid_review_publication_contract, id}}
+    end
+  end
+
+  defp validate_review_contract(id, %{type: :agent, review_checkout_stage: checkout_id} = reviewer, stages) do
+    with {:ok, _} <- review_checkout_successor(checkout_id, id, stages),
+         :ok <- review_publication_successor(checkout_id, nil, reviewer, stages) do
+      :ok
+    else
+      {:error, _} = error -> error
+    end
+  end
+
+  defp validate_review_contract(_id, _stage, _stages), do: :ok
+
+  defp github_validation_stage(owner_id, validation_id, stages) do
+    case Map.get(stages, validation_id) do
+      %{type: :check, gate: %{evaluator: :github_validation}} -> :ok
+      _ -> {:error, {:invalid_review_validation_stage, owner_id, validation_id}}
+    end
+  end
+
+  defp review_checkout_successor(checkout_id, reviewer_id, stages) do
+    case Map.get(stages, reviewer_id) do
+      %{type: :agent, review_checkout_stage: ^checkout_id} = reviewer -> {:ok, reviewer}
+      _ -> {:error, {:invalid_review_checkout_successor, checkout_id, reviewer_id}}
+    end
+  end
+
+  defp review_publication_successor(checkout_id, validation_id, reviewer, stages) do
+    case Map.get(stages, reviewer.next) do
+      %{type: :check, gate: %{evaluator: :review_publication, checkout_stage: ^checkout_id, review_stage: reviewer_id} = gate} ->
+        cond do
+          reviewer_id != reviewer.id -> {:error, {:invalid_review_publication_successor, checkout_id, reviewer.id}}
+          not is_nil(validation_id) and gate.validation_stage != validation_id -> {:error, {:review_validation_stage_mismatch, reviewer.next, validation_id}}
+          true -> :ok
+        end
+
+      _ ->
+        {:error, {:invalid_review_publication_successor, checkout_id, reviewer.id}}
+    end
+  end
+
+  defp normal_reaches?(stages, from, target, error) do
+    case normal_reachable_stages(stages, from) do
+      {:ok, reachable} -> if Map.has_key?(reachable, target), do: :ok, else: {:error, error}
+      _ -> {:error, error}
+    end
+  end
+
+  @spec validate_repair_edges(map(), String.t(), map()) :: :ok | {:error, term()}
+  defp validate_repair_edges(stages, entry, agents) do
+    {:ok, normal_reachable} = normal_reachable_stages(stages, entry)
+    validate_all_repair_edges(stages, normal_reachable, agents, entry)
+  end
+
+  @spec validate_all_repair_edges(map(), stage_id_set(), map(), String.t()) :: :ok | {:error, term()}
+  defp validate_all_repair_edges(stages, normal_reachable, agents, entry) do
+    Enum.reduce_while(stages, :ok, fn {check_id, stage}, :ok ->
+      case validate_repair_edge_for_stage(check_id, stage, stages, normal_reachable, agents, entry) do
+        :ok -> {:cont, :ok}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  @spec validate_repair_edge_for_stage(String.t(), map(), map(), stage_id_set(), map(), String.t()) ::
           :ok | {:error, term()}
+  defp validate_repair_edge_for_stage(
+         check_id,
+         %{
+           type: :check,
+           gate: %{
+             evaluator: :review_publication,
+             review_stage: review_stage,
+             failure: %{repair: target, max_attempts: max_attempts}
+           }
+         },
+         stages,
+         normal_reachable,
+         agents,
+         entry
+       ),
+       do: validate_review_repair_edge(check_id, review_stage, target, max_attempts, stages, normal_reachable, agents, entry)
+
   defp validate_repair_edge_for_stage(
          check_id,
          %{type: :check, gate: %{failure: %{repair: target, max_attempts: max_attempts}}},
          stages,
-         normal_reachable
+         normal_reachable,
+         _agents,
+         _entry
        ),
        do: validate_repair_edge(check_id, target, max_attempts, stages, normal_reachable)
 
-  defp validate_repair_edge_for_stage(_check_id, _stage, _stages, _normal_reachable), do: :ok
+  defp validate_repair_edge_for_stage(_check_id, _stage, _stages, _normal_reachable, _agents, _entry), do: :ok
 
   @spec validate_repair_edge(String.t(), String.t(), pos_integer(), map(), stage_id_set()) ::
           :ok | {:error, term()}
@@ -909,6 +1062,67 @@ defmodule SymphonyElixir.Workstream do
 
       true ->
         :ok
+    end
+  end
+
+  defp validate_review_repair_edge(
+         check_id,
+         review_stage,
+         target,
+         max_attempts,
+         stages,
+         normal_reachable,
+         agents,
+         entry
+       ) do
+    repair_reachable =
+      if Map.has_key?(stages, target),
+        do: normal_reachable_stages(stages, target),
+        else: {:ok, %{}}
+
+    cond do
+      not Map.has_key?(stages, target) ->
+        {:error, {:unknown_repair_stage, check_id, target}}
+
+      stages[target].type != :agent ->
+        {:error, {:repair_target_must_be_agent, check_id, target}}
+
+      reviewer?(stages[target]) ->
+        {:error, {:review_repair_target_must_be_cloud_agent, check_id, target}}
+
+      same_agent_definition?(stages[target], stages[review_stage], agents) ->
+        {:error, {:review_repair_agent_must_differ_from_reviewer, check_id, target}}
+
+      max_attempts not in 1..@max_repair_attempts ->
+        {:error, {:invalid_repair_attempts, check_id, max_attempts}}
+
+      not Map.has_key?(normal_reachable, target) or not Map.has_key?(normal_reachable, check_id) ->
+        {:error, {:repair_target_must_be_ancestor, check_id, target}}
+
+      not repair_path_reaches_review?(repair_reachable, check_id, review_stage) ->
+        {:error, {:review_repair_target_must_reach_review, check_id, target}}
+
+      not same_entry_agent_definition?(stages[target], stages, entry, agents) ->
+        {:error, {:review_repair_agent_must_preserve_entry_definition, check_id, target}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp repair_path_reaches_review?({:ok, reachable}, check_id, review_stage),
+    do: Map.has_key?(reachable, check_id) and Map.has_key?(reachable, review_stage)
+
+  defp repair_path_reaches_review?(_result, _check_id, _review_stage), do: false
+
+  defp same_agent_definition?(repair, reviewer, agents) do
+    repair.agent == reviewer.agent or agents[repair.agent].revision == agents[reviewer.agent].revision
+  end
+
+  defp same_entry_agent_definition?(repair, stages, entry, agents) do
+    case Map.get(stages, entry) do
+      %{type: :agent} = entry_agent -> same_agent_definition?(repair, entry_agent, agents)
+      _ -> false
     end
   end
 

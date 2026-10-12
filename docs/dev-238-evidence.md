@@ -158,3 +158,63 @@ The exact live demo commands depend on the approved installed App, qualified
 producer/worker-control release and permanent candidate archive. Follow the
 [reviewable setup/rollout plan](trusted-publication.md); do not substitute an
 operator cache or a model-authored receipt for the automated candidate path.
+
+## Qualified repair-context consumer source
+
+The consumer branch starts from the qualified shared integration commit
+`1865a6acfc411a9a0cd112ffe3f6794f8c7c31aa`. It preserves the frozen
+CandidateContext API, original execution pins, legacy producer metadata, and
+broker request/response shape. This source is intended for the single combined
+DEV-240 integration PR; it is not a separate release or deployed prerequisite.
+
+Python checks passed: 12 candidate-bundle RPC tests, 27 worker-operation tests,
+and 16 worker transport tests. A disposable real-Git smoke check executed the
+embedded producer directly and passed legacy commit/replay, context-bound repair
+commit/replay, and rejection of a main revision outside the parent's ancestry
+before staging. The script and command argv hashes matched the source pins in
+`software_change_test.exs` and `trusted-publication.md`.
+
+Final Elixir checks passed: compilation with warnings as errors, changed-file
+format verification, public spec checks, and 69 focused tests. Logs are
+`/private/tmp/dev238-context-compile.log`, `dev238-context-format.log`,
+`dev238-context-specs.log`, and `dev238-context-final-focused.log` in the same
+directory. The focused set covers transfer, local producer, Publisher, Git/App
+transports, permanent evidence, durable publication/restart, worker bundle client,
+publication definition and offline secret-name migration. Default Docker-validation
+exclusion remained active. The consumer container `dev238-check` was stopped after
+these checks; its build/dependency volumes remain available for later use.
+
+Self-review corrected publication-type normalization in historical lookup, exact
+PR-field comparisons, shallow permissions in the private copied Git metadata,
+raw persisted-context fixtures, and JSON digest handling for Unicode/DEL. Added
+cases reject historical development receipts, changed policy/environment,
+unauthenticated manifests and missing artifacts before new worker access.
+Publisher repair fixtures use synthetic authenticated service seals and retained
+receipts; they are not live review, upload or publication proof.
+
+The combined runner must inject the authorized `candidate_context` into the
+protected local-commit inputs before the final seam checks. The consumer change
+does not edit the runner owned by DEV-240. `software_change_test.exs` contains only
+producer pin/legacy-output assertion changes here; its new review-App setup and
+flow fixture remain DEV-240's integration responsibility and that file was not in
+the focused pass. Preserve those separate sections when combining the commits.
+The migration helper's supported policy was refreshed for this exact consumer
+source; recalculate it for the final combined source rather than retaining these
+intermediate hashes. Broad CI remains for the combined PR under the alpha policy.
+No separate PR, App, worker or coordinator rollout has been performed.
+
+Exact final focused set (from `elixir/`):
+
+```bash
+mise exec -- mix test \
+  test/symphony_elixir/candidate_transfer_test.exs \
+  test/symphony_elixir/local_candidate_commit_test.exs \
+  test/symphony_elixir/publisher_test.exs \
+  test/symphony_elixir/publisher_git_test.exs \
+  test/symphony_elixir/publisher_github_test.exs \
+  test/symphony_elixir/evidence_publication_test.exs \
+  test/symphony_elixir/durable_publication_test.exs \
+  test/symphony_elixir/worker_candidate_bundle_test.exs \
+  test/symphony_elixir/workstream_publication_test.exs \
+  test/symphony_elixir/factory_secret_name_migration_test.exs
+```

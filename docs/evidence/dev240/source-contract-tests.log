@@ -1,0 +1,13 @@
+Compiling 57 files (.ex)
+Compiling 5 files (.ex)
+Generated symphony_elixir app
+specs.check: all public functions have @spec or exemption
+Compiling 57 files (.ex)
+Compiling 5 files (.ex)
+Generated symphony_elixir app
+Running ExUnit with seed: 240, max_cases: 6
+Excluding tags: [:validation_docker]
+
+............................................................................................................................................................................................................................................................
+Finished in 54.8 seconds (2.7s async, 52.0s sync)
+252 tests, 0 failures

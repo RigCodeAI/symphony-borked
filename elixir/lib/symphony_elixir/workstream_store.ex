@@ -5,6 +5,9 @@ defmodule SymphonyElixir.WorkstreamStore do
   One process owns the database connection. It keeps SQLite's exclusive lock for its lifetime,
   closes the connection when its owner exits, and is linked to that owner so a store failure also
   stops the coordinator.
+
+  Before reading retained terms, load this application's trusted modules so their schema atoms
+  exist on cold startup. Payload decoding stays in safe mode and never creates atoms from data.
   """
 
   use GenServer
@@ -181,6 +184,7 @@ defmodule SymphonyElixir.WorkstreamStore do
   def inspect_recovery_image(bytes) when is_binary(bytes) do
     with true <- byte_size(bytes) <= @recovery_image_bytes_limit,
          true <- standalone_recovery_image?(bytes),
+         :ok <- load_persisted_term_modules(),
          {:ok, result} <- BackupCapture.inspect_image(bytes, &inspect_recovery_database/1) do
       {:ok, result}
     else
@@ -256,7 +260,8 @@ defmodule SymphonyElixir.WorkstreamStore do
 
   @impl true
   def init(opts) do
-    with {:ok, path} <- normalized_path(Keyword.fetch!(opts, :path)),
+    with :ok <- load_persisted_term_modules(),
+         {:ok, path} <- normalized_path(Keyword.fetch!(opts, :path)),
          {:ok, migrations} <- normalize_migrations(Keyword.get(opts, :migrations, @migrations)),
          :ok <- ensure_parent_directory(Path.dirname(path)),
          :ok <- ensure_database_file(path) do
@@ -1666,6 +1671,18 @@ defmodule SymphonyElixir.WorkstreamStore do
     {:ok, :erlang.binary_to_term(binary, [:safe])}
   rescue
     error -> {:error, {:term_decode_failed, error}}
+  end
+
+  defp load_persisted_term_modules do
+    # The module list comes from the installed application, never from a retained payload.
+    # Loading WorkstreamRun alone misses atoms owned by Linear, worker and review modules.
+    with result when result in [:ok, {:error, {:already_loaded, :symphony_elixir}}] <- Application.load(:symphony_elixir),
+         modules when is_list(modules) <- Application.spec(:symphony_elixir, :modules),
+         :ok <- :code.ensure_modules_loaded(modules) do
+      :ok
+    else
+      reason -> {:error, {:persisted_term_modules_unavailable, reason}}
+    end
   end
 
   defp standalone_recovery_image?(bytes) when byte_size(bytes) >= 100 do

@@ -23,6 +23,9 @@ requires the same persisted candidate-input marker; a pristine base cannot quali
 Its output records the actual candidate SHA, bundle prerequisite SHA, branch and
 checksum/size of an incremental Git bundle under protected Git metadata. This is
 candidate preparation, not trusted validation or authorization to publish/merge.
+The producer grants its existing worker group read access only to the transport
+directory (`0750`) and bundle (`0640`). The broker verifies that group and retains
+its empty capability set; no workspace or private operation-record permissions change.
 Existing runs retain their original stage definitions and commit ownership. See
 [local candidate commits](docs/local-candidate-commits.md).
 

@@ -1,5 +1,9 @@
 # Portable pilot deployment
 
+For the bounded, read-only comparison of active versus desired boot pins, see
+the [offline recovery preflight](../../docs/dev-242-boot-preflight.md). An aligned
+report remains dispatch-held and does not qualify a deployed restore.
+
 Native delegation uses a separate, opt-in contained-operation broker. Review
 [its installation and qualification card](../../docs/contained-worker-operations.md)
 before installing the control account or root service. Existing bootstrap and

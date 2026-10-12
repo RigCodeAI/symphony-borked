@@ -278,7 +278,21 @@ cleanup stays disabled (`merged_cleanup` is omitted or false).
    release, require a current containment receipt and `review_preparation_v1=true`.
    Check the actual preparation unit grants only its private leaf, hides the worker
    home and excludes GitHub/Linear credentials; source and sibling writes must fail.
-   Check that preparation returns the exact clean recorded head. Verify subscription
+   Check that preparation returns the exact clean recorded head. Candidate validation
+   invokes Docker in the coordinator's trusted validator process after candidate
+   transfer, not in the worker's model process. DEV-239 verifies that process can
+   use the pinned validation image and execute the actual approved Rig check with
+   network disabled, no host/credential mounts and the declared limits. The worker
+   must not gain Docker group/socket access. A job is capped at one CPU, 512 MiB
+   RAM, 128 PIDs and a 512 MiB writable `/tmp`; host capacity must additionally
+   cover the coordinator/daemon. Measure space for the pinned image, sealed source
+   layer, source/export and after-copy scratch, evidence and daemon metadata before
+   the demo. No fixed unmeasured disk-size claim qualifies the host. The shipped
+   [rig-local policy](../factory/policies/rig-local.yaml) pins
+   `python@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea`
+   and one architecture test; DEV-239 must approve its fit to the selected ticket
+   or supply the intended pinned policy/image. Images and dependencies must already
+   exist because the runner never pulls and execution has no network. Verify subscription
    readiness and observed effective settings for **DefaultCloud: gpt-6-luna,
    medium**, and **DefaultReview: gpt-6.1-sol, high**; both have Daybreak disabled,
    `approval_policy: never` and `sandbox: workspace-write`. Definitions in the
@@ -327,3 +341,40 @@ coordinator/broker/configuration package together, without adopting new-release
 runs into an old execution pin. Missing preparation capability must block review.
 Do not restore the old feedback owner for factory branches while any Symphony fix
 writer may remain live. Resume only after ownership and qualification are proven.
+
+### Combined alpha source package candidate
+
+The locally qualified source candidate is merged commit
+`818c59a1a9f93479cff2048ec343c3c6745e33cb`, including review service-completion
+support. It is packaged with the existing `cloud_io.py pack` helper:
+
+| Pin | Value |
+| --- | --- |
+| Archive SHA-256 | `2e6fcaef7ae03bd97d268e089b7f1e2420b9f8f76e7c567f4a3a16bb90bc11fb` |
+| Release object | `releases/818c59a1a9f93479cff2048ec343c3c6745e33cb.tar.gz` |
+| Candidate producer command | `a7bf9930b1e99665d598a30c94db43896d9056a3aaeaf28347d5a1a12a1a1ed9` |
+| Review preparation command | `e9484451418b48094ace5c5694ff396733c5e2929c0f5e65b35620ed2ec06a25` |
+| Executor policy | `87d9bc93c5db6b5c1afd01529a7dff35982798727a2b484ff71b527446f5643e` |
+
+[Package metadata](evidence/dev240/alpha-release-818c59a/package.json) and
+[all definition/policy pins](evidence/dev240/alpha-release-818c59a/pins.json)
+identify the exact candidate. The local source archive remains at
+`/private/tmp/dev240-alpha-release-818c59a/release.tar.gz`; it has not been uploaded
+or deployed. App IDs, key references, approved Rig policy/base/image and live
+machine/boot qualification references are protected rollout inputs supplied by
+their existing owners; the source archive contains no credentials.
+
+[Source qualification](evidence/dev240/alpha-release-818c59a/qualification.log)
+passed formatting, warnings-as-errors compilation, public specs and 172 focused
+core-flow tests. [Broker/transport tests](evidence/dev240/alpha-release-818c59a/broker-tests.log)
+passed 55 tests. The local toolchain is Linux ARM64; its compiled dependencies and
+Exqlite artifacts must not be copied as x86_64 VM binaries. Build the exact source
+with the target's qualified native toolchain before service activation.
+
+Release approval must name this exact source/archive and its matched broker,
+wrapper, producer, workflow and private configuration, with the existing native
+startup/activation path reviewed by the deployment owner. The current protected
+settings and prior release must be recorded before replacement. A successful local
+compile does not prove Docker validation, effective reviewer model execution or a
+live review/fix loop. Those remain step 3 and step 5 checks above. No cloud, budget,
+access or runtime setting was changed by preparing this package.

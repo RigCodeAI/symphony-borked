@@ -1,0 +1,15 @@
+# Source archive created from clean detached merged commit 818c59a.
+python3 factory/deploy/cloud_io.py pack . /private/tmp/dev240-alpha-release-818c59a/release.tar.gz
+
+# Archive extracted and copied to immutable local ARM64 toolchain image.
+# Docker container: dev240-alpha-combined; --cpus 2 --memory 4g --network none.
+# No supplied credentials; ERL_FLAGS=+S 2:2.
+cd /workspace/elixir
+mix format --check-formatted
+mix compile --warnings-as-errors
+mix specs.check
+mix test test/symphony_elixir/review_execution_test.exs test/symphony_elixir/review_result_test.exs test/symphony_elixir/review_definition_test.exs test/symphony_elixir/review_github_test.exs test/symphony_elixir/review_workstream_test.exs test/symphony_elixir/candidate_context_test.exs test/symphony_elixir/review_output_cleanup_test.exs test/symphony_elixir/worker_operation_test.exs test/symphony_elixir/candidate_transfer_test.exs test/symphony_elixir/local_candidate_commit_test.exs test/symphony_elixir/publisher_test.exs test/symphony_elixir/validation_check_test.exs test/symphony_elixir/factory_secret_name_migration_test.exs test/symphony_elixir/software_change_test.exs test/symphony_elixir/workstream_cancellation_test.exs --seed 240
+mix run --no-start /workspace/dev240-alpha-pins.exs
+
+# Lightweight host source tests on that same detached merged commit.
+python3 -m unittest factory.deploy.tests.test_worker_operation factory.deploy.tests.test_worker_operation_transport

@@ -42,6 +42,11 @@ publication and human wait remain this increment's stages.
 - Inline script SHA-256: `9b7f2d4ea6e70c3ca71642c13ba0a1cb88b16d1a2b35a27cb5317c28777072c5`.
 - Compact UTF-8 command argv SHA-256: `aeae2623255e9c74ec80718023f5bda386d87d5943ca3dd2e171967b15483da8`.
 
+The full current `origin/main` through `7a8a87ae295188ae830527d2d26205a51b9bb744`
+was merged at `7904a8d`. Two flow/test conflicts retain the exact qualified producer
+and this increment's downstream validation/publication stages. The archive/viewer,
+review, capacity, backup and cleanup changes were retained.
+
 These pin source preparation only. No broker package/config was installed or
 coordinator service activated by this owner.
 
@@ -77,6 +82,25 @@ Logs stayed under `/private/tmp/dev238-*.log`. They are local development diagno
 not trusted factory validation receipts. Broad `make all`/coverage/Dialyzer and live
 publication acceptance have not been run by this ticket owner. The local container
 is stopped after the granted focused pass; retained volumes support a later check.
+
+## Final merged candidate qualification
+
+The initial local checkpoint is `c1bcdc8`; `7904a8d` merges current main through
+`7a8a87a`. The final recheck passed 225 tests over publication/transport/archive,
+worker transfer, cancellation/restart, migration, workstream/Linear, and the merged
+producer, viewer, capacity, review-result and cleanup interfaces. Compile, specs,
+changed-file formatting, Credo warning/error checks and PR-body validation passed.
+The supported migration hashes match this final compiled service policy.
+
+The final delta queries all base branches for the task head, blocking a PR aimed at
+another base instead of hiding it behind a `main` filter. Completion also verifies
+the actual PR still contains the expected managed evidence table and permanent links.
+Both regressions passed. These checks remain contract/local integration proof.
+
+The newer PR 17 cleanup merge `5a6b228` is not part of this tested candidate. The
+coordinator explicitly requested a fixed candidate rather than repeatedly chasing
+main. No coordinator or broker deployment has been performed by this owner. Broad
+CI and the live acceptance matrix remain open after development PR publication.
 
 ## Material-risk review
 

@@ -13,7 +13,7 @@ defmodule SymphonyElixir.Factory.PinLinearSecretNames do
   @environment_name ~r/^[A-Z][A-Z0-9_]*$/
   @supported_policy %{
     lifecycle_sha256: "4738091da35b32648f515d973c1487984e35d2fbc4e83df8f8eed96c8f31ec18",
-    executor_sha256: "fbddf91b93c132b8499406eaccde3d4104c0de43c31ec9bb72ec440825a5b8fe",
+    executor_sha256: "fbaf6c23ad73b6f16bc30187308b72d6ab49c88d09af3c0e38af2681013854ca",
     validation_sha256: "33effc5b8c0181e8623a52ec0639a693422f74744d68edc0d0275127494307b9",
     gate_policy: "exit-status-v1",
     version: 1

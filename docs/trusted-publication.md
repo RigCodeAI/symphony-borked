@@ -123,11 +123,11 @@ The qualified producer is merged in DEV-237 PR 16 at
 `9b7f2d4ea6e70c3ca71642c13ba0a1cb88b16d1a2b35a27cb5317c28777072c5`;
 the protected command argv pin is
 `aeae2623255e9c74ec80718023f5bda386d87d5943ca3dd2e171967b15483da8`.
-This checkout incorporates that exact producer and shared instruction; its starting
-base is the earlier PR 9 source. Before coordinator activation, integrate the complete
-current merged archive/viewer dependency changes into the final release source and
-review/test that exact source package. A producer hash does not qualify a coordinator
-or worker-control deployment by itself.
+This checkout incorporates that exact producer and shared instruction. It started
+from PR 9 and now includes the complete current `main` through `7a8a87a`, including
+archive/viewer and the other merged factory slices. Before coordinator activation,
+review and test the exact final source package and preserve old run pins. A producer
+hash does not qualify a coordinator or worker-control deployment by itself.
 
 1. Wait for DEV-237's qualified commit-preparation command. Record the exact
    protected workstream revision and SHA-256 of the UTF-8 compact JSON command argv

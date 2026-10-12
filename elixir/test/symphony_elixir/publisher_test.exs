@@ -284,6 +284,26 @@ defmodule SymphonyElixir.PublisherTest do
     assert updated == "Human heading\r\n\r\n<!-- factory-evidence:start -->\nnew evidence\n<!-- factory-evidence:end -->\r\n\r\nHuman footer\r\n"
   end
 
+  test "completion rejects a remote PR whose evidence section changed after publication" do
+    c = fixture()
+    remote = start_remote()
+    Process.put(:publisher_test_remote, remote)
+
+    try do
+      assert {:ok, result} = Publisher.publish(c.run, c.publish_stage)
+      before = Agent.get(remote, & &1)
+      Agent.update(remote, &put_in(&1, [:pull_request, :body], "Human text without the required evidence table"))
+      assert {:error, :publication_evidence_section_changed} = Publisher.verify_completion(c.run, c.publish_stage, {:ok, result})
+      after_check = Agent.get(remote, & &1)
+      assert after_check.pushes == before.pushes
+      assert after_check.creates == before.creates
+      assert after_check.updates == before.updates
+    after
+      Process.delete(:publisher_test_remote)
+      Agent.stop(remote)
+    end
+  end
+
   defp fixture(opts \\ []) do
     root = Path.join(System.tmp_dir!(), "publisher-contract-#{System.unique_integer([:positive])}")
     seed = Path.join(root, "source")

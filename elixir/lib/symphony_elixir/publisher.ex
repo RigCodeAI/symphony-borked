@@ -107,6 +107,7 @@ defmodule SymphonyElixir.Publisher do
          %{number: number} <- result[:pr],
          {:ok, actual} <- transport.get_pr(config, number),
          :ok <- valid_pr(actual, result.branch, result.candidate_sha),
+         :ok <- valid_body(run, stage, proof, actual),
          {:ok, remote_sha} <- transport.branch_sha(config, result.branch),
          true <- remote_sha == result.candidate_sha,
          true <- actual.url == result.pr.url do
@@ -193,6 +194,7 @@ defmodule SymphonyElixir.Publisher do
          {:ok, pr} <- create_or_update(transport, config, run, stage, proof, current, opts),
          {:ok, actual} <- transport.get_pr(config, pr.number),
          :ok <- valid_pr(actual, branch, sha),
+         :ok <- valid_body(run, stage, proof, actual),
          {:ok, final_sha} <- transport.branch_sha(config, branch),
          true <- final_sha == sha,
          :ok <- recheck(run, stage, proof, opts) do
@@ -345,6 +347,16 @@ defmodule SymphonyElixir.Publisher do
   end
 
   defp valid_pr(_pr, _branch, _sha), do: {:error, :publication_remote_identity_mismatch}
+
+  defp valid_body(run, stage, proof, actual) do
+    with {:ok, section} <- summary(run, stage, proof),
+         {:ok, expected} <- managed_body(actual.body, section),
+         true <- expected == actual.body do
+      :ok
+    else
+      _ -> {:error, :publication_evidence_section_changed}
+    end
+  end
 
   defp publication_id(run, stage, proof), do: digest(Jason.encode!([run.id, stage.id, proof.manifest["candidate_sha"], proof.receipt]))
 

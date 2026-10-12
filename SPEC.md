@@ -2777,6 +2777,13 @@ immutable candidate context and link each new attempt to it; previous execution
 pins, attempts and receipts MUST NOT be rewritten. The context MUST bind verified
 prior publication/review attempts, exact PR identity, trusted current-main validation
 base and the separate prior published head used for direct-parent transfer lineage.
+For a repair, the candidate MUST have the exact prior published head as its sole
+direct parent, and the separate trusted validation base MUST be an ancestor of
+that candidate. An incompatible main advance MUST block; the service MUST NOT
+substitute the parent for the validation base. Protected producer inputs and their
+digest MUST bind the same context ID, parent and validation base, while legacy
+producer and receipt shapes remain unchanged. Publication MUST retain the context's
+exact authenticated PR identity, including when recovering an already pushed head.
 Signed validation identities MUST bind the new context. Cross-context receipts,
 context tampering or any main advance invalidate readiness; ancestry alone MUST NOT
 requalify a receipt for an old base. Legacy receipt identity shape remains unchanged.

@@ -1,10 +1,11 @@
 defmodule SymphonyElixir.CandidateTransfer do
   @moduledoc false
 
-  alias SymphonyElixir.{CandidateGit, PathSafety, WorkerOperation}
+  alias SymphonyElixir.{CandidateContext, CandidateGit, PathSafety, Validation, ValidationPolicy, WorkerOperation}
 
   @candidate_output "candidate-commit"
-  @producer_keys ~w(candidate_commit base_commit candidate_input_sha256 branch candidate_bundle bundle_sha256 bundle_bytes)
+  @legacy_producer_keys ~w(candidate_commit base_commit candidate_input_sha256 branch candidate_bundle bundle_sha256 bundle_bytes)
+  @context_producer_keys @legacy_producer_keys ++ ~w(candidate_context_id repair_parent_sha validation_base)
   @bundle_limit 64 * 1024 * 1024
   @candidate_file_limit 64 * 1024 * 1024
   @candidate_tree_limit 256 * 1024 * 1024
@@ -16,6 +17,7 @@ defmodule SymphonyElixir.CandidateTransfer do
   @candidate_input_limit 1_048_576
   @candidate_input_depth 16
   @candidate_input_collection 4_096
+  @candidate_history_depth_limit 3
   @command_timeout_ms 30_000
   @process_group_kill_grace_ms 1_000
   @max_command_output 65_536
@@ -35,11 +37,13 @@ defmodule SymphonyElixir.CandidateTransfer do
         with :ok <- candidate_validation_stage(validation_stage),
              :ok <- pinned_validation_stage(run, validation_stage),
              {:ok, producer} <- trusted_producer(run, field(validation_stage, :id)),
+             run <- producer.run,
+             control <- field(field(run, :execution) || %{}, :worker_control),
              {:ok, identity} <- validate_completed_worker(producer, control, worker_opts),
              {:ok, root} <- candidate_root(run),
              {:ok, workspace, tree_sha} <- existing_or_import(run, root, producer, identity, control, worker_opts),
-             {:ok, base_tree_sha} <- snapshot_base_tree(workspace, producer.metadata) do
-          marker = marker_for(run, producer, identity, tree_sha, base_tree_sha)
+             {:ok, boundary} <- snapshot_boundary(workspace, producer) do
+          marker = marker_for(run, producer, identity, tree_sha, boundary)
           {:ok, workspace, public_metadata(producer.metadata, marker)}
         end
 
@@ -132,24 +136,67 @@ defmodule SymphonyElixir.CandidateTransfer do
          :ok <- candidate_validation_stage(validation_stage),
          true <- @candidate_output in (field(validation_stage, :inputs) || []),
          :ok <- validate_producer_definition(stage, producer_stage_id, pinned_command_sha),
-         {:ok, attempt} <- latest_producer_attempt_before(run, attempts, producer_stage_id, validation_stage_id),
-         {:ok, metadata} <- producer_metadata(run, attempt),
-         {:ok, operation, identity} <- registered_operation(run, attempt),
-         :ok <- validate_metadata_against_run(run, metadata) do
-      {:ok,
-       %{
-         stage_id: producer_stage_id,
-         stage: stage,
-         attempt: attempt,
-         attempt_id: field(attempt, :id),
-         operation: operation,
-         identity: identity,
-         metadata: metadata
-       }}
+         {:ok, validation_index} <- validation_attempt_index(run, attempts, validation_stage_id),
+         validation_attempt <- Enum.at(attempts, validation_index),
+         validation_attempt_id <- if(is_map(validation_attempt), do: field(validation_attempt, :id), else: nil),
+         {:ok, attempt} <- latest_producer_attempt_at(run, attempts, producer_stage_id, validation_index),
+         :ok <- same_current_context(run, field(attempt, :id), validation_attempt_id),
+         {:ok, authorized_run} <- CandidateContext.view(run, validation_attempt_id),
+         {:ok, validation_identity} <- validation_identity(run, validation_attempt_id),
+         {:ok, context} <- authorized_candidate_context(authorized_run, validation_identity),
+         {:ok, metadata} <- producer_metadata(authorized_run, attempt),
+         {:ok, operation, identity} <- registered_operation(authorized_run, attempt),
+         :ok <- validate_metadata_against_run(authorized_run, metadata, context, validation_identity),
+         {:ok, history_seed} <- history_seed(authorized_run, context),
+         producer = %{
+           stage_id: producer_stage_id,
+           stage: stage,
+           attempt: attempt,
+           attempt_id: field(attempt, :id),
+           operation: operation,
+           identity: identity,
+           metadata: metadata,
+           run: authorized_run,
+           context: context,
+           validation_identity: validation_identity,
+           validation_attempt: validation_attempt,
+           history_seed: history_seed
+         } do
+      {:ok, producer}
     else
       false -> {:error, :candidate_transfer_producer_not_pinned}
       {:error, _} = error -> error
       _ -> {:error, :candidate_transfer_producer_unavailable}
+    end
+  end
+
+  defp same_current_context(run, producer_attempt_id, validation_attempt_id) when is_binary(validation_attempt_id) do
+    if CandidateContext.same_context?(run, producer_attempt_id, validation_attempt_id),
+      do: :ok,
+      else: {:error, :candidate_transfer_context_not_authorized}
+  end
+
+  defp same_current_context(run, producer_attempt_id, nil) do
+    with {:ok, producer_view} <- CandidateContext.view(run, producer_attempt_id),
+         {:ok, current_view} <- CandidateContext.view(run, nil),
+         true <- producer_view.candidate_context_id == current_view.candidate_context_id do
+      :ok
+    else
+      _ -> {:error, :candidate_transfer_context_not_authorized}
+    end
+  end
+
+  defp validation_identity(run, attempt_id) when is_binary(attempt_id),
+    do: CandidateContext.validation_context(run, attempt_id)
+
+  defp validation_identity(run, nil) do
+    with {:ok, view} <- CandidateContext.view(run, nil),
+         base when is_binary(base) <- field(view.execution, :validation_base),
+         identity = %{base_sha: base},
+         identity <- if(view.candidate_context_id, do: Map.put(identity, :candidate_context_id, view.candidate_context_id), else: identity) do
+      {:ok, identity}
+    else
+      _ -> {:error, :candidate_transfer_context_not_authorized}
     end
   end
 
@@ -177,9 +224,8 @@ defmodule SymphonyElixir.CandidateTransfer do
 
   defp command_digest(_command), do: nil
 
-  defp latest_producer_attempt_before(run, attempts, producer_stage_id, validation_stage_id) do
-    with {:ok, validation_index} <- validation_attempt_index(run, attempts, validation_stage_id),
-         producer_index <- producer_attempt_index(attempts, validation_index, producer_stage_id),
+  defp latest_producer_attempt_at(_run, attempts, producer_stage_id, validation_index) do
+    with producer_index <- producer_attempt_index(attempts, validation_index, producer_stage_id),
          true <- is_integer(producer_index),
          attempt when is_map(attempt) <- Enum.at(attempts, producer_index),
          :ok <- only_completed_checks_between(attempts, producer_index + 1, validation_index) do
@@ -188,6 +234,341 @@ defmodule SymphonyElixir.CandidateTransfer do
       {:error, _} = error -> error
       _ -> {:error, :candidate_transfer_producer_attempt_missing}
     end
+  end
+
+  defp authorized_candidate_context(run, validation_identity) do
+    id = field(validation_identity, :candidate_context_id)
+    selector = field(run, :current_candidate_context_id)
+    execution = field(run, :execution) || %{}
+
+    cond do
+      is_nil(id) and is_nil(selector) and is_nil(field(execution, :candidate_context_id)) and
+          is_nil(field(execution, :repair_parent_sha)) ->
+        {:ok, nil}
+
+      is_binary(id) and id == selector and valid_sha256?(id) ->
+        context = map_fetch(field(run, :candidate_contexts) || %{}, id)
+
+        with true <- is_map(context),
+             true <- field(context, :id) == id,
+             parent when is_binary(parent) <- field(context, :repair_parent_sha),
+             base when is_binary(base) <- field(context, :validation_base),
+             true <- valid_git_sha?(parent) and valid_git_sha?(base),
+             true <- field(execution, :candidate_context_id) == id,
+             true <- field(execution, :repair_parent_sha) == parent,
+             true <- field(execution, :validation_base) == base,
+             true <- field(validation_identity, :base_sha) == base do
+          {:ok, %{"id" => id, "repair_parent_sha" => parent, "validation_base" => base}}
+        else
+          _ -> {:error, :candidate_transfer_context_not_authorized}
+        end
+
+      true ->
+        {:error, :candidate_transfer_context_not_authorized}
+    end
+  end
+
+  defp valid_context_metadata?(metadata) do
+    valid_sha256?(metadata["candidate_context_id"]) and
+      valid_git_sha?(metadata["repair_parent_sha"]) and valid_git_sha?(metadata["validation_base"]) and
+      byte_size(metadata["candidate_commit"]) == byte_size(metadata["repair_parent_sha"]) and
+      byte_size(metadata["candidate_commit"]) == byte_size(metadata["validation_base"])
+  end
+
+  defp validate_context_metadata(metadata, nil, validation_identity) do
+    base = field(validation_identity, :base_sha)
+
+    if Enum.sort(Map.keys(metadata)) == Enum.sort(@legacy_producer_keys) and valid_git_sha?(base) and
+         metadata["base_commit"] == base and metadata["candidate_commit"] != base do
+      :ok
+    else
+      {:error, :candidate_transfer_base_or_branch_mismatch}
+    end
+  end
+
+  defp validate_context_metadata(metadata, context, validation_identity) when is_map(context) do
+    with true <- Enum.sort(Map.keys(metadata)) == Enum.sort(@context_producer_keys),
+         true <- metadata["candidate_context_id"] == context["id"],
+         true <- metadata["repair_parent_sha"] == context["repair_parent_sha"],
+         true <- metadata["validation_base"] == context["validation_base"],
+         true <- metadata["base_commit"] == context["repair_parent_sha"],
+         true <- field(validation_identity, :base_sha) == context["validation_base"],
+         true <- metadata["candidate_commit"] != context["repair_parent_sha"] do
+      :ok
+    else
+      _ -> {:error, :candidate_transfer_base_or_branch_mismatch}
+    end
+  end
+
+  defp history_seed(_run, nil), do: {:ok, nil}
+
+  defp history_seed(run, %{"id" => id}) when is_binary(id), do: history_seed(run, id, MapSet.new(), 0)
+
+  defp history_seed(_run, _context), do: {:error, :candidate_transfer_context_not_authorized}
+
+  defp history_seed(run, id, seen, depth) do
+    with true <- depth < @candidate_history_depth_limit,
+         false <- MapSet.member?(seen, id),
+         context when is_map(context) <- map_fetch(field(run, :candidate_contexts) || %{}, id),
+         true <- field(context, :id) == id,
+         true <- field(context, :run_id) == field(run, :id) and field(context, :task_id) == field(run, :task_id),
+         parent when is_binary(parent) <- field(context, :repair_parent_sha),
+         validation_base when is_binary(validation_base) <- field(context, :validation_base),
+         true <- valid_git_sha?(parent) and valid_git_sha?(validation_base),
+         source_context_id <- field(context, :source_context_id),
+         {:ok, source_context} <- historical_context(run, source_context_id),
+         {:ok, publication, published} <- historical_publication(run, context, source_context_id, parent),
+         {:ok, validation_stage, validation_attempt} <- historical_validation(run, publication, source_context_id),
+         :ok <- authenticate_historical_validation(run, validation_stage, validation_attempt, published, source_context),
+         {:ok, producer} <- historical_producer(run, validation_attempt, published, source_context, MapSet.put(seen, id), depth + 1),
+         {:ok, root} <- candidate_root(run),
+         path <- snapshot_path(root, run, producer.metadata),
+         {:ok, _tree_sha} <- verify_snapshot(run, root, producer, producer.identity, path),
+         :ok <- context_ancestry(path, validation_base, parent),
+         {:ok, marker} <- read_marker(path),
+         {:ok, boundary} <- marker_boundary(marker) do
+      {:ok,
+       %{
+         path: path,
+         metadata: producer.metadata,
+         marker: marker,
+         boundary: boundary,
+         validation_base: validation_base,
+         repair_parent_sha: parent,
+         source_context_id: source_context_id,
+         publication_attempt_id: field(context, :publication_attempt_id)
+       }}
+    else
+      false -> {:error, :candidate_transfer_context_history_invalid}
+      {:error, _} = error -> error
+      _ -> {:error, :candidate_transfer_context_history_invalid}
+    end
+  rescue
+    _ -> {:error, :candidate_transfer_context_history_invalid}
+  end
+
+  defp historical_context(_run, nil), do: {:ok, nil}
+
+  defp historical_context(run, id) when is_binary(id) do
+    context = map_fetch(field(run, :candidate_contexts) || %{}, id)
+
+    with true <- is_map(context),
+         true <- field(context, :id) == id,
+         true <- field(context, :run_id) == field(run, :id) and field(context, :task_id) == field(run, :task_id),
+         parent when is_binary(parent) <- field(context, :repair_parent_sha),
+         base when is_binary(base) <- field(context, :validation_base),
+         true <- valid_git_sha?(parent) and valid_git_sha?(base) do
+      {:ok, %{"id" => id, "repair_parent_sha" => parent, "validation_base" => base}}
+    else
+      _ -> {:error, :candidate_transfer_context_history_invalid}
+    end
+  end
+
+  defp historical_context(_run, _id), do: {:error, :candidate_transfer_context_history_invalid}
+
+  defp historical_publication(run, context, source_context_id, parent) do
+    publication_id = field(context, :publication_attempt_id)
+    publication = attempt_by_id(run, publication_id)
+    evidence = field(field(publication || %{}, :result) || %{}, :evidence) || %{}
+    pr = field(evidence, :pr)
+    expected_pr = field(context, :pr)
+
+    with true <- is_binary(publication_id) and is_map(publication),
+         true <- normalized(field(publication, :type)) == :publish,
+         true <- normalized(field(publication, :status)) == :completed and normalized(field(publication, :gate)) == :passed,
+         true <- field(publication, :candidate_context_id) == source_context_id,
+         true <- field(evidence, :candidate_sha) == parent,
+         true <- is_map(pr) and is_map(expected_pr),
+         true <- Enum.all?(~w(number url head_branch base_branch)a, &(field(pr, &1) == field(expected_pr, &1))),
+         true <- field(pr, :head_branch) == field(run, :branch) and field(pr, :base_branch) == "main",
+         validation_id when is_binary(validation_id) <- field(evidence, :validation_attempt_id),
+         {:ok, normalized_evidence} <- json_value(evidence) do
+      {:ok, publication, normalized_evidence}
+    else
+      _ -> {:error, :candidate_transfer_context_publication_invalid}
+    end
+  end
+
+  defp historical_validation(run, publication, source_context_id) do
+    evidence = field(field(publication, :result) || %{}, :evidence) || %{}
+    validation_id = field(evidence, :validation_attempt_id)
+    validation_attempt = attempt_by_id(run, validation_id)
+    stages = field(field(run, :definition) || %{}, :stages) || %{}
+    publication_stage = map_fetch(stages, field(publication, :stage))
+    validation_stage_id = field(field(publication_stage || %{}, :gate) || %{}, :validation_stage)
+    validation_stage = map_fetch(stages, validation_stage_id)
+
+    with true <- is_binary(validation_id) and is_map(validation_attempt),
+         true <- normalized(field(validation_attempt, :type)) == :check,
+         true <- field(validation_attempt, :stage) == validation_stage_id,
+         true <- normalized(field(validation_attempt, :status)) == :completed and normalized(field(validation_attempt, :gate)) == :passed,
+         true <- field(validation_attempt, :candidate_context_id) == source_context_id,
+         :ok <- candidate_validation_stage(validation_stage) do
+      {:ok, validation_stage, validation_attempt}
+    else
+      _ -> {:error, :candidate_transfer_context_validation_missing}
+    end
+  end
+
+  defp authenticate_historical_validation(run, validation_stage, validation_attempt, publication_evidence, source_context) do
+    result = field(validation_attempt, :result) || %{}
+    evidence = field(result, :evidence) || %{}
+    receipt = field(evidence, :receipt)
+    validation_id = field(validation_attempt, :id)
+    source_id = if source_context, do: source_context["id"], else: nil
+    source_base = if source_context, do: source_context["validation_base"], else: field(original_execution(run), :validation_base)
+
+    context = %{
+      task_id: field(run, :task_id),
+      run_id: field(run, :id),
+      attempt_id: validation_id,
+      base_sha: source_base
+    }
+
+    context = if source_id, do: Map.put(context, :candidate_context_id, source_id), else: context
+    expected_context = Jason.encode!(context) |> Jason.decode!()
+    archive = field(original_execution(run), :validation_archive)
+    policy = field(original_execution(run), :validation_policy)
+
+    with true <- is_binary(archive) and is_binary(source_base) and is_map(receipt),
+         {:ok, manifest} <- Validation.read_receipt(receipt, archive),
+         {:ok, _feedback} <- Validation.feedback(receipt, archive),
+         true <- manifest["candidate_sha"] == field(publication_evidence, :candidate_sha),
+         true <- manifest["base_sha"] == source_base,
+         true <- manifest["context"] == expected_context,
+         true <- manifest["complete"] == true and manifest["mode"] == "final",
+         true <- manifest["policy_digest"] == field(policy, :digest),
+         true <- manifest["policy_revision"] == field(policy, :revision),
+         true <- manifest["environment"] == field(policy, :environment) |> Jason.encode!() |> Jason.decode!(),
+         %{verdict: :passed} <- ValidationPolicy.gate(manifest, field(field(validation_stage, :gate) || %{}, :required)) do
+      :ok
+    else
+      _ -> {:error, :candidate_transfer_context_receipt_invalid}
+    end
+  rescue
+    _ -> {:error, :candidate_transfer_context_receipt_invalid}
+  end
+
+  defp historical_producer(run, validation_attempt, publication_evidence, source_context, seen, depth) do
+    execution = original_execution(run)
+    producer_stage_id = field(execution, :candidate_producer_stage)
+    attempts = field(run, :attempts) || []
+    stages = field(field(run, :definition) || %{}, :stages) || %{}
+    producer_stage = map_fetch(stages, producer_stage_id)
+    validation_index = Enum.find_index(attempts, &(field(&1, :id) == field(validation_attempt, :id)))
+    validation_identity = %{base_sha: if(source_context, do: source_context["validation_base"], else: field(execution, :validation_base))}
+    validation_identity = if source_context, do: Map.put(validation_identity, :candidate_context_id, source_context["id"]), else: validation_identity
+
+    with true <- is_binary(producer_stage_id) and is_integer(validation_index),
+         :ok <- validate_producer_definition(producer_stage, producer_stage_id, field(execution, :candidate_producer_command_sha256)),
+         {:ok, attempt} <- latest_producer_attempt_at(run, attempts, producer_stage_id, validation_index),
+         true <- field(attempt, :candidate_context_id) == if(source_context, do: source_context["id"], else: nil),
+         {:ok, metadata} <- historical_producer_metadata(run, attempt),
+         true <- metadata["candidate_commit"] == field(publication_evidence, :candidate_sha),
+         :ok <- validate_context_metadata(metadata, source_context, validation_identity),
+         true <- metadata["branch"] == "refs/heads/" <> field(run, :branch),
+         true <- metadata["candidate_bundle"] == relative_bundle_path(metadata["candidate_input_sha256"]),
+         {:ok, operation, identity} <- registered_operation(run, attempt),
+         {:ok, parent_history} <- history_seed_for_producer(run, metadata, seen, depth) do
+      {:ok,
+       %{
+         stage_id: producer_stage_id,
+         stage: producer_stage,
+         attempt: attempt,
+         attempt_id: field(attempt, :id),
+         operation: operation,
+         identity: identity,
+         metadata: metadata,
+         run: run,
+         context: source_context,
+         history_seed: parent_history
+       }}
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :candidate_transfer_context_producer_invalid}
+    end
+  end
+
+  defp history_seed_for_producer(run, metadata, seen, depth) do
+    case metadata["candidate_context_id"] do
+      nil -> {:ok, nil}
+      id when is_binary(id) -> history_seed(run, id, seen, depth)
+      _ -> {:error, :candidate_transfer_context_producer_invalid}
+    end
+  end
+
+  defp historical_producer_metadata(run, attempt) do
+    evidence = field(field(attempt, :result) || %{}, :evidence) || %{}
+    output = field(evidence, :output)
+
+    with true <- is_binary(output),
+         {:ok, metadata} <- Jason.decode(output),
+         :ok <- validate_producer_payload(metadata),
+         {:ok, _workspace} <- original_workspace(run) do
+      {:ok, metadata}
+    else
+      _ -> {:error, :candidate_transfer_context_producer_invalid}
+    end
+  end
+
+  defp context_ancestry(workspace, validation_base, parent) do
+    with true <- valid_git_sha?(validation_base) and valid_git_sha?(parent),
+         {:ok, parent_object} <- CandidateGit.run(workspace, ["rev-parse", "--verify", parent <> "^{commit}"]),
+         true <- String.trim(parent_object) == parent,
+         {:ok, base_object} <- CandidateGit.run(workspace, ["rev-parse", "--verify", validation_base <> "^{commit}"]),
+         true <- String.trim(base_object) == validation_base,
+         {:ok, _} <- CandidateGit.run(workspace, ["merge-base", "--is-ancestor", validation_base, parent]) do
+      :ok
+    else
+      _ -> {:error, :candidate_transfer_validation_base_not_ancestor}
+    end
+  end
+
+  defp verify_context_lineage(workspace, producer) do
+    if is_map(producer.context) do
+      with :ok <- context_ancestry(workspace, producer.metadata["validation_base"], producer.metadata["repair_parent_sha"]),
+           :ok <- context_ancestry(workspace, producer.metadata["validation_base"], producer.metadata["candidate_commit"]) do
+        :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  defp allowed_original_heads(metadata, producer) do
+    if valid_context_metadata?(metadata) and is_binary(metadata["candidate_context_id"]) do
+      original_base = field(original_execution(producer.run), :validation_base)
+
+      Enum.uniq([metadata["validation_base"], metadata["repair_parent_sha"], metadata["candidate_commit"], original_base])
+    else
+      [metadata["base_commit"], metadata["candidate_commit"]]
+    end
+  end
+
+  defp marker_boundary(marker) when is_map(marker) do
+    commit = field(marker, :shallow_base_commit)
+    tree = field(marker, :shallow_base_tree)
+
+    cond do
+      is_nil(commit) and is_nil(tree) -> {:ok, nil}
+      valid_git_sha?(commit) and valid_git_sha?(tree) -> {:ok, %{commit: commit, tree: tree}}
+      true -> {:error, :candidate_transfer_shallow_boundary_invalid}
+    end
+  end
+
+  defp marker_boundary(_marker), do: {:error, :candidate_transfer_shallow_boundary_invalid}
+
+  defp json_value(value) do
+    {:ok, Jason.encode!(value) |> Jason.decode!()}
+  rescue
+    _ -> {:error, :candidate_transfer_context_publication_invalid}
+  end
+
+  defp attempt_by_id(run, id) when is_binary(id), do: Enum.find(field(run, :attempts) || [], &(field(&1, :id) == id))
+  defp attempt_by_id(_run, _id), do: nil
+
+  defp original_execution(run) do
+    field(run, :candidate_execution_original) || field(run, :execution) || %{}
   end
 
   defp producer_attempt_index(attempts, validation_index, producer_stage_id) do
@@ -291,7 +672,10 @@ defmodule SymphonyElixir.CandidateTransfer do
   end
 
   defp validate_producer_payload(metadata) when is_map(metadata) do
-    if Enum.sort(Map.keys(metadata)) == Enum.sort(@producer_keys) and
+    keys = Enum.sort(Map.keys(metadata))
+    context_metadata = keys == Enum.sort(@context_producer_keys)
+
+    if (context_metadata or keys == Enum.sort(@legacy_producer_keys)) and
          valid_git_sha?(metadata["candidate_commit"]) and
          valid_git_sha?(metadata["base_commit"]) and
          byte_size(metadata["candidate_commit"]) == byte_size(metadata["base_commit"]) and
@@ -299,7 +683,8 @@ defmodule SymphonyElixir.CandidateTransfer do
          valid_sha256?(metadata["bundle_sha256"]) and
          is_integer(metadata["bundle_bytes"]) and metadata["bundle_bytes"] in 1..@bundle_limit and
          is_binary(metadata["branch"]) and valid_branch_ref?(metadata["branch"]) and
-         is_binary(metadata["candidate_bundle"]) do
+         is_binary(metadata["candidate_bundle"]) and
+         (not context_metadata or valid_context_metadata?(metadata)) do
       :ok
     else
       {:error, :candidate_transfer_producer_metadata_invalid}
@@ -328,15 +713,12 @@ defmodule SymphonyElixir.CandidateTransfer do
     end
   end
 
-  defp validate_metadata_against_run(run, metadata) do
-    execution = field(run, :execution) || %{}
-    base = field(execution, :validation_base)
+  defp validate_metadata_against_run(run, metadata, context, validation_identity) do
     branch = field(run, :branch)
 
-    with :ok <- validate_current_candidate_input(run, metadata),
-         true <-
-           valid_git_sha?(base) and metadata["base_commit"] == base and is_binary(branch) and
-             metadata["branch"] == "refs/heads/" <> branch and metadata["candidate_commit"] != base do
+    with :ok <- validate_current_candidate_input(run, metadata, context),
+         true <- is_binary(branch) and metadata["branch"] == "refs/heads/" <> branch,
+         :ok <- validate_context_metadata(metadata, context, validation_identity) do
       :ok
     else
       {:error, _} = error -> error
@@ -344,10 +726,11 @@ defmodule SymphonyElixir.CandidateTransfer do
     end
   end
 
-  defp validate_current_candidate_input(run, metadata) do
+  defp validate_current_candidate_input(run, metadata, context) do
     candidate = map_fetch(field(run, :outputs) || %{}, "candidate")
+    value = if context, do: %{"candidate" => candidate, "candidate_context" => context}, else: candidate
 
-    with {:ok, encoded} <- canonical_candidate_json(candidate),
+    with {:ok, encoded} <- canonical_candidate_json(value),
          true <- sha256(encoded) == metadata["candidate_input_sha256"] do
       :ok
     else
@@ -375,11 +758,13 @@ defmodule SymphonyElixir.CandidateTransfer do
   defp canonical_candidate_value(value, _depth) when is_integer(value), do: {:ok, Integer.to_string(value)}
 
   defp canonical_candidate_value(value, _depth) when is_binary(value) do
-    if ascii_string?(value), do: {:ok, Jason.encode!(value)}, else: {:error, :candidate_transfer_candidate_input_unsupported}
+    if String.valid?(value) and byte_size(value) <= @candidate_input_limit,
+      do: {:ok, python_ascii_json_string(value)},
+      else: {:error, :candidate_transfer_candidate_input_unsupported}
   end
 
   defp canonical_candidate_value(value, depth) when is_list(value) and length(value) <= @candidate_input_collection do
-    with {:ok, items} <- canonical_candidate_items(value, depth + 1, []) do
+    with {:ok, items} <- canonical_candidate_items(value, depth + 1, [], 0) do
       {:ok, ["[", Enum.intersperse(items, ","), "]"]}
     end
   end
@@ -390,7 +775,7 @@ defmodule SymphonyElixir.CandidateTransfer do
     if Enum.all?(keys, &(is_binary(&1) and ascii_string?(&1))) do
       keys
       |> Enum.sort()
-      |> canonical_candidate_pairs(value, depth + 1, [])
+      |> canonical_candidate_pairs(value, depth + 1, [], 0)
     else
       {:error, :candidate_transfer_candidate_input_unsupported}
     end
@@ -398,22 +783,60 @@ defmodule SymphonyElixir.CandidateTransfer do
 
   defp canonical_candidate_value(_value, _depth), do: {:error, :candidate_transfer_candidate_input_unsupported}
 
-  defp canonical_candidate_items([], _depth, items), do: {:ok, Enum.reverse(items)}
+  defp canonical_candidate_items([], _depth, items, _size), do: {:ok, Enum.reverse(items)}
 
-  defp canonical_candidate_items([value | rest], depth, items) do
+  defp canonical_candidate_items([value | rest], depth, items, size) do
     with {:ok, encoded} <- canonical_candidate_value(value, depth) do
-      canonical_candidate_items(rest, depth, [encoded | items])
+      next_size = size + IO.iodata_length(encoded) + if(items == [], do: 0, else: 1)
+
+      if next_size + 2 <= @candidate_input_limit,
+        do: canonical_candidate_items(rest, depth, [encoded | items], next_size),
+        else: {:error, :candidate_transfer_candidate_input_unsupported}
     end
   end
 
-  defp canonical_candidate_pairs([], _map, _depth, pairs), do: {:ok, ["{", Enum.intersperse(Enum.reverse(pairs), ","), "}"]}
+  defp canonical_candidate_pairs([], _map, _depth, pairs, _size), do: {:ok, ["{", Enum.intersperse(Enum.reverse(pairs), ","), "}"]}
 
-  defp canonical_candidate_pairs([key | rest], map, depth, pairs) do
+  defp canonical_candidate_pairs([key | rest], map, depth, pairs, size) do
     with {:ok, encoded_value} <- canonical_candidate_value(Map.fetch!(map, key), depth) do
-      pair = [Jason.encode!(key), ":", encoded_value]
-      canonical_candidate_pairs(rest, map, depth, [pair | pairs])
+      encoded_key = python_ascii_json_string(key)
+      pair = [encoded_key, ":", encoded_value]
+      next_size = size + IO.iodata_length(pair) + if(pairs == [], do: 0, else: 1)
+
+      if next_size + 2 <= @candidate_input_limit,
+        do: canonical_candidate_pairs(rest, map, depth, [pair | pairs], next_size),
+        else: {:error, :candidate_transfer_candidate_input_unsupported}
     end
   end
+
+  defp python_ascii_json_string(value) when is_binary(value) do
+    encoded =
+      value
+      |> String.to_charlist()
+      |> Enum.map(&python_ascii_codepoint/1)
+
+    [34, encoded, 34] |> IO.iodata_to_binary()
+  end
+
+  defp python_ascii_codepoint(?\"), do: "\\\""
+  defp python_ascii_codepoint(?\\), do: "\\\\"
+  defp python_ascii_codepoint(?\b), do: "\\b"
+  defp python_ascii_codepoint(?\f), do: "\\f"
+  defp python_ascii_codepoint(?\n), do: "\\n"
+  defp python_ascii_codepoint(?\r), do: "\\r"
+  defp python_ascii_codepoint(?\t), do: "\\t"
+  defp python_ascii_codepoint(codepoint) when codepoint < 0x20, do: "\\u" <> hex4(codepoint)
+  defp python_ascii_codepoint(codepoint) when codepoint < 0x7F, do: <<codepoint>>
+  defp python_ascii_codepoint(codepoint) when codepoint <= 0xFFFF, do: "\\u" <> hex4(codepoint)
+
+  defp python_ascii_codepoint(codepoint) when codepoint <= 0x10FFFF do
+    value = codepoint - 0x10000
+    high = 0xD800 + Bitwise.bsr(value, 10)
+    low = 0xDC00 + Bitwise.band(value, 0x3FF)
+    "\\u" <> hex4(high) <> "\\u" <> hex4(low)
+  end
+
+  defp hex4(codepoint), do: codepoint |> Integer.to_string(16) |> String.downcase() |> String.pad_leading(4, "0")
 
   defp ascii_string?(value) when is_binary(value) do
     String.valid?(value) and Enum.all?(:binary.bin_to_list(value), &(&1 < 128))
@@ -459,7 +882,7 @@ defmodule SymphonyElixir.CandidateTransfer do
 
       {:error, :enoent} ->
         import_result =
-          with :ok <- verify_original_workspace(run, producer.metadata),
+          with :ok <- verify_original_workspace(run, producer),
                {:ok, bundle} <- WorkerOperation.candidate_bundle(control, identity, producer.metadata, worker_opts),
                :ok <- verify_bundle_bytes(bundle, producer.metadata) do
             import_snapshot(run, root, final_path, producer, identity, bundle)
@@ -494,11 +917,13 @@ defmodule SymphonyElixir.CandidateTransfer do
 
   defp verify_bundle_bytes(_bundle, _metadata), do: {:error, :candidate_transfer_bundle_invalid}
 
-  defp verify_original_workspace(run, metadata) do
+  defp verify_original_workspace(run, producer) do
+    metadata = producer.metadata
+
     with {:ok, workspace} <- original_workspace(run),
          {:ok, head} <- CandidateGit.run(workspace, ["rev-parse", "--verify", "HEAD^{commit}"]),
          {:ok, status} <- CandidateGit.run(workspace, ["status", "--porcelain=v1", "--untracked-files=all"]),
-         true <- head in [metadata["base_commit"], metadata["candidate_commit"]],
+         true <- String.trim(head) in allowed_original_heads(metadata, producer),
          true <- status == "" do
       :ok
     else
@@ -530,7 +955,9 @@ defmodule SymphonyElixir.CandidateTransfer do
 
   defp import_temporary(git, temporary, final_path, run, producer, identity, bundle) do
     try do
-      CandidateGit.with_snapshot(field(run, :workspace), fn source_git ->
+      source_workspace = if producer.context, do: producer.history_seed.path, else: field(run, :workspace)
+
+      CandidateGit.with_snapshot(source_workspace, fn source_git ->
         import_into_temporary(git, temporary, source_git, final_path, run, producer, identity, bundle)
       end)
     rescue
@@ -548,18 +975,19 @@ defmodule SymphonyElixir.CandidateTransfer do
 
     with :ok <- copy_git_metadata(source_git, git_dir),
          :ok <- File.chmod(git_dir, 0o700),
-         {:ok, base_tree_sha} <- prepare_shallow_base(git, git_dir, temporary, producer.metadata),
+         {:ok, boundary} <- prepare_import_history(git, git_dir, temporary, producer),
          :ok <- File.write(bundle_path, bundle, [:binary, :exclusive]),
          :ok <- File.chmod(bundle_path, 0o600),
          :ok <- verify_bundle(git, git_dir, temporary, bundle_path, producer.metadata),
          :ok <- fetch_bundle(git, git_dir, temporary, bundle_path, producer.metadata),
          :ok <- verify_imported_commits(git, git_dir, temporary, producer.metadata),
+         :ok <- verify_context_lineage(temporary, producer),
          :ok <- verify_candidate_tree_budget(git, git_dir, temporary, producer.metadata),
          {:ok, tree_sha} <- checkout_candidate(git, git_dir, temporary, producer.metadata),
          :ok <- File.rm(bundle_path),
          :ok <- ensure_clean_candidate(git, git_dir, temporary, producer.metadata, tree_sha),
-         :ok <- verify_shallow_boundary(temporary, producer.metadata),
-         :ok <- write_marker(temporary, marker_for(run, producer, identity, tree_sha, base_tree_sha)),
+         :ok <- verify_expected_boundary(temporary, boundary),
+         :ok <- write_marker(temporary, marker_for(run, producer, identity, tree_sha, boundary)),
          :ok <- rename_snapshot(temporary, final_path) do
       {:ok, final_path, tree_sha}
     else
@@ -567,6 +995,27 @@ defmodule SymphonyElixir.CandidateTransfer do
       _ -> {:error, :candidate_transfer_import_failed}
     end
   end
+
+  defp prepare_import_history(git, git_dir, workspace, %{context: nil} = producer) do
+    with {:ok, boundary} <- prepare_shallow_base(git, git_dir, workspace, producer.metadata) do
+      {:ok, boundary}
+    end
+  end
+
+  defp prepare_import_history(_git, _git_dir, workspace, %{context: context, history_seed: seed} = producer)
+       when is_map(context) and is_map(seed) do
+    with :ok <- private_boundary_mode(workspace, seed.boundary),
+         :ok <- verify_expected_boundary(workspace, seed.boundary),
+         :ok <- context_ancestry(workspace, producer.metadata["validation_base"], producer.metadata["repair_parent_sha"]) do
+      {:ok, seed.boundary}
+    end
+  end
+
+  defp prepare_import_history(_git, _git_dir, _workspace, _producer),
+    do: {:error, :candidate_transfer_context_history_invalid}
+
+  defp private_boundary_mode(_workspace, nil), do: :ok
+  defp private_boundary_mode(workspace, _boundary), do: File.chmod(Path.join([workspace, ".git", "shallow"]), 0o600)
 
   defp copy_git_metadata(source_git, destination) do
     case File.cp_r(source_git, destination) do
@@ -598,7 +1047,7 @@ defmodule SymphonyElixir.CandidateTransfer do
          :ok <- only_pinned_shallow_boundary(shallow_path, base),
          :ok <- File.write(shallow_path, base <> "\n", [:binary]),
          :ok <- File.chmod(shallow_path, 0o600) do
-      {:ok, base_tree}
+      {:ok, %{commit: base, tree: base_tree}}
     else
       _ -> {:error, :candidate_transfer_base_object_invalid}
     end
@@ -622,15 +1071,9 @@ defmodule SymphonyElixir.CandidateTransfer do
     end
   end
 
-  defp verify_shallow_boundary(workspace, metadata) do
-    path = Path.join([workspace, ".git", "shallow"])
-    base = metadata["base_commit"]
-
-    with {:ok, uid} <- effective_uid(),
-         {:ok, %File.Stat{type: :regular, size: size, mode: mode, links: 1, uid: ^uid}} <- File.lstat(path),
-         true <- size <= @shallow_file_limit and Bitwise.band(mode, 0o777) == 0o600,
-         {:ok, contents} <- File.read(path),
-         [^base] <- String.split(contents, "\n", trim: true) do
+  defp verify_expected_boundary(workspace, expected) do
+    with {:ok, actual} <- read_snapshot_boundary(workspace),
+         true <- actual == expected do
       :ok
     else
       _ -> {:error, :candidate_transfer_shallow_boundary_invalid}
@@ -800,11 +1243,11 @@ defmodule SymphonyElixir.CandidateTransfer do
          {:ok, root} <- candidate_root(run),
          final_path <- snapshot_path(root, run, producer.metadata),
          {:ok, marker} <- read_marker(final_path),
-         {:ok, base_tree_sha} <- snapshot_base_tree(final_path, producer.metadata),
-         true <- marker_matches_producer?(marker, run, producer, base_tree_sha),
+         {:ok, boundary} <- snapshot_boundary(final_path, producer),
+         true <- marker_matches_producer?(marker, run, producer, boundary),
          :ok <- validate_snapshot_path(root, final_path),
-         :ok <- verify_shallow_boundary(final_path, producer.metadata),
-         :ok <- verify_snapshot_tree(final_path, producer.metadata, marker["tree_sha"]) do
+         :ok <- verify_snapshot_tree(final_path, producer.metadata, marker["tree_sha"]),
+         :ok <- verify_context_lineage(final_path, producer) do
       {:ok, final_path}
     else
       {:error, _} = error -> error
@@ -814,11 +1257,11 @@ defmodule SymphonyElixir.CandidateTransfer do
 
   defp verify_snapshot(run, root, producer, identity, path) do
     with {:ok, marker} <- read_marker(path),
-         {:ok, base_tree_sha} <- snapshot_base_tree(path, producer.metadata),
-         true <- marker == marker_for(run, producer, identity, marker["tree_sha"], base_tree_sha),
+         {:ok, boundary} <- snapshot_boundary(path, producer),
+         true <- marker == marker_for(run, producer, identity, marker["tree_sha"], boundary),
          :ok <- validate_snapshot_path(root, path),
-         :ok <- verify_shallow_boundary(path, producer.metadata),
-         :ok <- verify_snapshot_tree(path, producer.metadata, marker["tree_sha"]) do
+         :ok <- verify_snapshot_tree(path, producer.metadata, marker["tree_sha"]),
+         :ok <- verify_context_lineage(path, producer) do
       {:ok, marker["tree_sha"]}
     else
       {:error, _} = error -> error
@@ -850,24 +1293,64 @@ defmodule SymphonyElixir.CandidateTransfer do
       "operation_id" => producer.attempt_id,
       "worker_identity" => identity,
       "tree_sha" => tree_sha,
-      "shallow_base_commit" => producer.metadata["base_commit"],
-      "shallow_base_tree" => base_tree_sha
+      "shallow_base_commit" => if(base_tree_sha, do: base_tree_sha.commit),
+      "shallow_base_tree" => if(base_tree_sha, do: base_tree_sha.tree)
     })
   end
 
-  defp marker_matches_producer?(marker, run, producer, base_tree_sha) do
+  defp marker_matches_producer?(marker, run, producer, boundary) do
     identity = producer.identity
-    expected = marker_for(run, producer, identity, marker["tree_sha"], base_tree_sha)
+    expected = marker_for(run, producer, identity, marker["tree_sha"], boundary)
     marker == expected
   end
 
-  defp snapshot_base_tree(path, metadata) do
-    with {:ok, tree} <- CandidateGit.run(path, ["rev-parse", "--verify", metadata["base_commit"] <> "^{tree}"]),
-         tree <- String.trim(tree),
-         true <- valid_git_sha?(tree) do
-      {:ok, tree}
+  defp snapshot_boundary(path, producer) do
+    with {:ok, actual} <- read_snapshot_boundary(path),
+         :ok <- expected_snapshot_boundary(actual, producer) do
+      {:ok, actual}
     else
-      _ -> {:error, :candidate_transfer_base_tree_invalid}
+      {:error, _} = error -> error
+      _ -> {:error, :candidate_transfer_shallow_boundary_invalid}
+    end
+  end
+
+  defp expected_snapshot_boundary(actual, %{context: nil, metadata: metadata}) do
+    if is_map(actual) and actual.commit == metadata["base_commit"],
+      do: :ok,
+      else: {:error, :candidate_transfer_shallow_boundary_invalid}
+  end
+
+  defp expected_snapshot_boundary(actual, %{context: context, history_seed: seed}) when is_map(context) and is_map(seed) do
+    if actual == seed.boundary, do: :ok, else: {:error, :candidate_transfer_shallow_boundary_invalid}
+  end
+
+  defp expected_snapshot_boundary(_actual, _producer), do: {:error, :candidate_transfer_shallow_boundary_invalid}
+
+  defp read_snapshot_boundary(workspace) do
+    path = Path.join([workspace, ".git", "shallow"])
+
+    case File.lstat(path) do
+      {:error, :enoent} ->
+        {:ok, nil}
+
+      {:ok, %File.Stat{type: :regular, size: size, mode: mode, links: 1, uid: uid}} when size <= @shallow_file_limit ->
+        with {:ok, expected_uid} <- effective_uid(),
+             true <- uid == expected_uid and Bitwise.band(mode, 0o777) == 0o600,
+             {:ok, contents} <- File.read(path),
+             [commit] <- String.split(contents, "\n", trim: true),
+             true <- valid_git_sha?(commit),
+             {:ok, resolved_commit} <- CandidateGit.run(workspace, ["rev-parse", "--verify", commit <> "^{commit}"]),
+             true <- String.trim(resolved_commit) == commit,
+             {:ok, resolved_tree} <- CandidateGit.run(workspace, ["rev-parse", "--verify", commit <> "^{tree}"]),
+             tree <- String.trim(resolved_tree),
+             true <- valid_git_sha?(tree) do
+          {:ok, %{commit: commit, tree: tree}}
+        else
+          _ -> {:error, :candidate_transfer_shallow_boundary_invalid}
+        end
+
+      _ ->
+        {:error, :candidate_transfer_shallow_boundary_invalid}
     end
   end
 
@@ -1201,7 +1684,7 @@ defmodule SymphonyElixir.CandidateTransfer do
   end
 
   defp public_metadata(metadata, marker) do
-    %{
+    legacy = %{
       candidate_commit: metadata["candidate_commit"],
       base_commit: metadata["base_commit"],
       branch: metadata["branch"],
@@ -1210,6 +1693,16 @@ defmodule SymphonyElixir.CandidateTransfer do
       bundle_bytes: metadata["bundle_bytes"],
       producer_attempt_id: marker["producer_attempt_id"]
     }
+
+    if is_binary(metadata["candidate_context_id"]) do
+      Map.merge(legacy, %{
+        candidate_context_id: metadata["candidate_context_id"],
+        repair_parent_sha: metadata["repair_parent_sha"],
+        validation_base: metadata["validation_base"]
+      })
+    else
+      legacy
+    end
   end
 
   defp within?(path, root), do: String.starts_with?(path, root <> "/")
@@ -1227,8 +1720,8 @@ defmodule SymphonyElixir.CandidateTransfer do
 
   defp field(_map, _key), do: nil
 
-  defp normalized(value) when value in [:check, :completed, :passed, :ok, :candidate_validation], do: value
-  defp normalized(value) when value in ["check", "completed", "passed", "ok", "candidate_validation"], do: String.to_existing_atom(value)
+  defp normalized(value) when value in [:check, :publish, :completed, :passed, :ok, :candidate_validation], do: value
+  defp normalized(value) when value in ["check", "publish", "completed", "passed", "ok", "candidate_validation"], do: String.to_existing_atom(value)
   defp normalized(_value), do: nil
 
   defp sha256(value), do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)

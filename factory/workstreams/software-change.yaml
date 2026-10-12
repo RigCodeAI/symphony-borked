@@ -30,7 +30,20 @@ stages:
               inputs = json.loads(os.environ["WORKSTREAM_INPUTS_JSON"])
               candidate = inputs["candidate"]
               assert isinstance(candidate, dict) and candidate.get("thread_id"), "missing candidate input"
-              digest = hashlib.sha256(json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+              candidate_context = inputs.get("candidate_context")
+              if candidate_context is not None:
+                  assert isinstance(candidate_context, dict), "invalid candidate context claims"
+                  assert set(candidate_context) == {"id", "repair_parent_sha", "validation_base"}, "invalid candidate context claims"
+                  assert isinstance(candidate_context["id"], str) and re.fullmatch(r"[0-9a-f]{64}", candidate_context["id"]), "invalid candidate context id"
+                  for name in ("repair_parent_sha", "validation_base"):
+                      assert (
+                          isinstance(candidate_context[name], str)
+                          and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", candidate_context[name])
+                      ), "invalid candidate context Git SHA"
+                  digest_input = {"candidate": candidate, "candidate_context": candidate_context}
+              else:
+                  digest_input = candidate
+              digest = hashlib.sha256(json.dumps(digest_input, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
               marker = "Factory-Candidate: " + digest
               root = pathlib.Path.cwd().resolve()
               gitdir = root / ".git"
@@ -43,6 +56,16 @@ stages:
                   result = subprocess.run(argv + list(args), env=env, text=True, capture_output=True, timeout=25)
                   assert result.returncode == 0, "Git command failed: " + args[0] + ": " + result.stderr.strip()
                   return result.stdout.strip()
+              def is_ancestor(ancestor, descendant):
+                  result = subprocess.run(
+                      argv + ["merge-base", "--is-ancestor", ancestor, descendant],
+                      env=env,
+                      text=True,
+                      capture_output=True,
+                      timeout=25,
+                  )
+                  assert result.returncode in (0, 1), "Git ancestry check failed: " + result.stderr.strip()
+                  return result.returncode == 0
               names = git("config", "--file", str(gitdir / "config"), "--no-includes", "--name-only", "--list").splitlines()
               safe = re.compile(r"(?:core\.(?:repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|hookspath|fsmonitor)|commit\.gpgsign|user\.(?:name|email)|extensions\.objectformat|remote\..+\.(?:url|fetch|pushurl)|branch\..+\.(?:remote|merge))")
               assert all(safe.fullmatch(name) for name in names), "unsupported Git configuration"
@@ -51,7 +74,24 @@ stages:
               assert pathlib.Path(git("rev-parse", "--show-toplevel")).resolve() == root, "wrong root"
               branch = git("symbolic-ref", "--quiet", "HEAD")
               assert branch.startswith("refs/heads/"), "local branch required"
+              head_before = git("rev-parse", "--verify", "HEAD^{commit}")
               prepared = marker in git("show", "--no-patch", "--format=%B", "HEAD").splitlines()
+              if candidate_context is not None:
+                  repair_parent = candidate_context["repair_parent_sha"]
+                  validation_base = candidate_context["validation_base"]
+                  assert (
+                      git("rev-parse", "--verify", repair_parent + "^{commit}") == repair_parent
+                  ), "repair parent is not an existing commit"
+                  assert (
+                      git("rev-parse", "--verify", validation_base + "^{commit}") == validation_base
+                  ), "validation base is not an existing commit"
+                  assert is_ancestor(validation_base, repair_parent), "validation base is not an ancestor of repair parent"
+                  if prepared and head_before != repair_parent:
+                      parents = git("rev-list", "--parents", "-n", "1", "HEAD").split()
+                      assert len(parents) == 2 and parents[1] == repair_parent, "prepared candidate parent mismatch"
+                  else:
+                      prepared = False
+                      assert head_before == repair_parent, "repair parent does not match branch head"
               if git("status", "--porcelain=v1"):
                   assert not prepared, "prepared candidate changed"
                   git("add", "--all", "--", ".")
@@ -61,7 +101,13 @@ stages:
                   assert prepared, "no candidate changes"
               assert not git("status", "--porcelain=v1"), "dirty candidate checkout"
               head = git("rev-parse", "--verify", "HEAD^{commit}")
-              base = git("rev-parse", "--verify", "HEAD^1^{commit}")
+              if candidate_context is not None:
+                  parents = git("rev-list", "--parents", "-n", "1", head).split()
+                  assert len(parents) == 2 and parents[1] == repair_parent, "candidate commit parent mismatch"
+                  assert is_ancestor(validation_base, head), "validation base is not an ancestor of candidate"
+                  base = repair_parent
+              else:
+                  base = git("rev-parse", "--verify", "HEAD^1^{commit}")
               bundle_dir = gitdir / "factory-candidates"
               bundle_dir.mkdir(mode=0o700, exist_ok=True)
               bundle = bundle_dir / (digest + ".bundle")
@@ -70,7 +116,18 @@ stages:
               git("bundle", "verify", str(bundle))
               assert git("bundle", "list-heads", str(bundle)) == head + " HEAD", "bundle head mismatch"
               data = bundle.read_bytes()
-              print(json.dumps({"candidate_commit": head, "base_commit": base, "candidate_input_sha256": digest, "branch": branch, "candidate_bundle": str(bundle.relative_to(root)), "bundle_sha256": hashlib.sha256(data).hexdigest(), "bundle_bytes": len(data)}, sort_keys=True))
+              metadata = {
+                  "candidate_commit": head,
+                  "base_commit": base,
+                  "candidate_input_sha256": digest,
+                  "branch": branch,
+                  "candidate_bundle": str(bundle.relative_to(root)),
+                  "bundle_sha256": hashlib.sha256(data).hexdigest(),
+                  "bundle_bytes": len(data),
+              }
+              if candidate_context is not None:
+                  metadata.update({"candidate_context_id": candidate_context["id"], "repair_parent_sha": repair_parent, "validation_base": validation_base})
+              print(json.dumps(metadata, sort_keys=True))
           except (AssertionError, KeyError, ValueError, OSError, subprocess.SubprocessError) as error:
               print("LOCAL_COMMIT_FAILED: " + str(error), file=sys.stderr)
               sys.exit(1)

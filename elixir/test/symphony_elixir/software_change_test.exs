@@ -26,10 +26,10 @@ defmodule SymphonyElixir.SoftwareChangeTest do
     commit_script = List.last(commit_command)
 
     assert Base.encode16(:crypto.hash(:sha256, commit_script), case: :lower) ==
-             "9b7f2d4ea6e70c3ca71642c13ba0a1cb88b16d1a2b35a27cb5317c28777072c5"
+             "d002fa5e6c5d65a73749de067109d020d55d148d9b3e7d6addb1acecd19811d0"
 
     assert Base.encode16(:crypto.hash(:sha256, Jason.encode!(commit_command)), case: :lower) ==
-             "aeae2623255e9c74ec80718023f5bda386d87d5943ca3dd2e171967b15483da8"
+             "a7bf9930b1e99665d598a30c94db43896d9056a3aaeaf28347d5a1a12a1a1ed9"
 
     workspace = Path.join(root, "clone")
     File.mkdir_p!(workspace)
@@ -108,6 +108,9 @@ defmodule SymphonyElixir.SoftwareChangeTest do
     {head, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace)
     assert metadata["candidate_commit"] == String.trim(head)
     assert metadata["base_commit"] == String.trim(base)
+
+    assert MapSet.new(Map.keys(metadata)) ==
+             MapSet.new(~w(candidate_commit base_commit candidate_input_sha256 branch candidate_bundle bundle_sha256 bundle_bytes))
 
     assert metadata["candidate_input_sha256"] ==
              Base.encode16(

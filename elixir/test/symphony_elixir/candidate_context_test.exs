@@ -74,6 +74,8 @@ defmodule SymphonyElixir.CandidateContextTest do
     assert restored_view.candidate_context_id == authorized.current_candidate_context_id
     assert restored_view.execution[:validation_base] == "base-main"
     assert restored_view.execution[:repair_parent_sha] == "head-0"
+    assert {:ok, restored_context} = CandidateContext.evidence_context(restored, "implement-1")
+    assert restored_context.candidate_context_id == authorized.current_candidate_context_id
     assert CandidateContext.same_context?(restored, "implement-1", "implement-1")
 
     database = Path.join([c.root, "state", "factory.sqlite3"])
@@ -86,7 +88,77 @@ defmodule SymphonyElixir.CandidateContextTest do
     assert {:ok, durable_view} = CandidateContext.view(durable, "implement-1")
     assert durable_view.candidate_context_id == authorized.current_candidate_context_id
     assert durable_view.execution[:repair_parent_sha] == "head-0"
+    assert {:ok, durable_context} = CandidateContext.evidence_context(durable, "implement-1")
+    assert durable_context == restored_context
     assert :ok = GenServer.stop(reopened)
+  end
+
+  test "evidence contexts stay bound to historical attempts after the selector advances", c do
+    run = published_review(c.root, c.key)
+    assert {:ok, legacy_before} = CandidateContext.evidence_context(run, "review-result-1")
+    assert legacy_before.candidate_context_id == nil
+    assert legacy_before.validation_base == "base-original"
+    assert legacy_before.repair_parent_sha == nil
+
+    assert {:ok, first} = CandidateContext.authorize_repair(run, current_review(run, c.key))
+    first_repair = repair_attempt(first, "implement-1")
+    assert {:ok, first_context_before} = CandidateContext.evidence_context(first_repair, "implement-1")
+    assert first_context_before.candidate_context_id == first.current_candidate_context_id
+
+    advanced = advance_context(first_repair, c.key)
+    unchanged = advanced
+
+    assert {:ok, legacy_after} = CandidateContext.evidence_context(advanced, "review-result-1")
+    assert legacy_after == legacy_before
+    assert {:ok, second_review_context} = CandidateContext.evidence_context(advanced, "review-result-2")
+    assert second_review_context.candidate_context_id == first.current_candidate_context_id
+    assert {:ok, first_context_after} = CandidateContext.evidence_context(advanced, "implement-1")
+    assert first_context_after == first_context_before
+    assert {:error, :candidate_context_not_authorized} = CandidateContext.view(advanced, "implement-1")
+    assert advanced == unchanged
+
+    second_repair = repair_attempt(advanced, "implement-2")
+    assert {:ok, second_context} = CandidateContext.evidence_context(second_repair, "implement-2")
+    assert second_context.candidate_context_id == advanced.current_candidate_context_id
+
+    assert {:error, :candidate_context_not_authorized} =
+             CandidateContext.evidence_context(update_attempt_context(second_repair, "implement-2", nil), "implement-2")
+
+    assert {:error, :candidate_context_not_authorized} =
+             CandidateContext.evidence_context(
+               update_attempt_context(second_repair, "implement-2", first.current_candidate_context_id),
+               "implement-2"
+             )
+  end
+
+  test "evidence context rejects missing attempts and altered current lineage", c do
+    run = published_review(c.root, c.key)
+    assert {:ok, authorized} = CandidateContext.authorize_repair(run, current_review(run, c.key))
+    repair = repair_attempt(authorized, "implement-1")
+    context_id = authorized.current_candidate_context_id
+
+    assert {:error, :candidate_attempt_missing} = CandidateContext.evidence_context(repair, "missing")
+
+    assert {:error, :candidate_context_not_authorized} =
+             CandidateContext.evidence_context(
+               put_in(repair, [:attempts, Access.at(2), :candidate_context_id], "unknown"),
+               "implement-1"
+             )
+
+    altered = [
+      %{repair | current_candidate_context_id: String.duplicate("f", 64)},
+      update_in(repair, [:candidate_contexts, context_id, :seal], fn _ -> String.duplicate("0", 64) end),
+      update_attempt_context(repair, "implement-1", nil),
+      put_in(repair, [:attempts, Access.at(0), :result, :evidence, "candidate_sha"], "changed-head"),
+      put_in(repair, [:attempts, Access.at(1), :result, :evidence, "head_sha"], "changed-head"),
+      put_in(repair, [:execution, :validation_base], "changed-base"),
+      put_in(repair, [:definition, :definitions, "reviewer", :sha256], "changed-definition"),
+      put_in(repair, [:policy, :validation_sha256], "changed-policy")
+    ]
+
+    for changed <- altered do
+      assert {:error, :candidate_context_not_authorized} = CandidateContext.evidence_context(changed, "implement-1")
+    end
   end
 
   test "execution, context, seal, and current-context selector tampering fail closed", c do
@@ -278,6 +350,68 @@ defmodule SymphonyElixir.CandidateContextTest do
     ]
 
     %{run | attempts: run.attempts ++ attempts, current_attempt_id: id}
+  end
+
+  defp update_attempt_context(run, id, context_id) do
+    attempts =
+      Enum.map(run.attempts, fn
+        %{id: ^id} = attempt -> Map.put(attempt, :candidate_context_id, context_id)
+        attempt -> attempt
+      end)
+
+    %{run | attempts: attempts}
+  end
+
+  defp advance_context(run, key) do
+    source_context_id = run.current_candidate_context_id
+
+    publication = %{
+      id: "publish-2",
+      stage: "publish",
+      type: :publish,
+      ordinal: length(run.attempts) + 1,
+      status: :completed,
+      gate: :passed,
+      candidate_context_id: source_context_id,
+      result: %{
+        status: :ok,
+        evidence: %{
+          "candidate_sha" => "head-1",
+          "pr" => %{
+            "number" => 240,
+            "url" => "https://github.com/rigai/symphony/pull/240",
+            "head_branch" => "cycle/dev-240",
+            "base_branch" => "main"
+          }
+        }
+      }
+    }
+
+    review_attempt = %{
+      id: "review-result-2",
+      stage: "review-result",
+      type: :check,
+      ordinal: length(run.attempts) + 2,
+      status: :completed,
+      gate: :passed,
+      gate_detail: %{verified: true},
+      candidate_context_id: source_context_id,
+      result: %{status: :ok, evidence: %{}}
+    }
+
+    run = %{run | attempts: run.attempts ++ [publication, review_attempt], current_attempt_id: review_attempt.id}
+    review = signed_review(run, "review-result", review_attempt.id, key, %{"head_sha" => "head-1", "review_id" => 24_001})
+
+    attempts =
+      Enum.map(run.attempts, fn
+        %{id: "review-result-2"} = attempt -> put_in(attempt, [:result, :evidence], review)
+        attempt -> attempt
+      end)
+
+    run = %{run | attempts: attempts}
+
+    {:ok, authorized} = CandidateContext.authorize_repair(run, review)
+    authorized
   end
 
   defp normalize_json(value), do: value |> Jason.encode!() |> Jason.decode!()

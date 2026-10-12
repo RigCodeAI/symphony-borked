@@ -173,10 +173,9 @@ defmodule SymphonyElixir.WorkstreamCapacityTest do
       end
     end
 
-    start_supervised!(
-      {AgentRuntimeSupervisor, name: supervisor, orchestrator_name: coordinator, task_supervisor_name: tasks, workstream_store_path: c.store, stage_executor: executor, max_concurrent_agents: 2},
-      id: supervisor
-    )
+    names = [name: supervisor, orchestrator_name: coordinator, task_supervisor_name: tasks]
+    options = [workstream_store_path: c.store, stage_executor: executor, max_concurrent_agents: 2]
+    start_supervised!({AgentRuntimeSupervisor, names ++ options}, id: supervisor)
 
     %{coordinator: coordinator, tasks: tasks}
   end

@@ -241,10 +241,12 @@ defmodule SymphonyElixir.DurableChildHandoffTest do
   test "stopping a parent cancels its live child worker without restarting the coordinator", context do
     owner = self()
     ordinary_executor = stage_executor(owner)
+
     executor = fn stage, definition, run, opts ->
       if stage.id == "implement" do
         File.write!(Path.join(run.workspace, "live-worker.txt"), "retained fixture work\n")
         send(owner, {:live_child_worker, run.id, run.current_attempt_id, self()})
+
         receive do
           :fixture_finish -> {:ok, %{candidate: "fixture candidate"}}
         end
@@ -252,6 +254,7 @@ defmodule SymphonyElixir.DurableChildHandoffTest do
         ordinary_executor.(stage, definition, run, opts)
       end
     end
+
     canceller = fn run, operation, pid ->
       send(owner, {:owned_child_cancel, run.id, operation.id, pid})
       :terminated
@@ -283,12 +286,15 @@ defmodule SymphonyElixir.DurableChildHandoffTest do
     assert :ok = Orchestrator.reconcile_workstreams(recovered.coordinator)
     assert_receive {:owned_child_cancel, ^child_id, ^child_attempt, ^child_pid}
     assert_receive {:DOWN, ^child_monitor, :process, ^child_pid, _reason}
-    stopped_child = await(fn ->
-      case lookup_run(recovered, child_id) do
-        %{status: :stopped, cancellation: %{termination: :terminated}} = run -> run
-        _ -> nil
-      end
-    end)
+
+    stopped_child =
+      await(fn ->
+        case lookup_run(recovered, child_id) do
+          %{status: :stopped, cancellation: %{termination: :terminated}} = run -> run
+          _ -> nil
+        end
+      end)
+
     assert stopped_child.operations[child_attempt].status == :canceled
     assert Process.whereis(recovered.coordinator) == coordinator_pid
     assert is_map(GenServer.call(recovered.coordinator, :snapshot))

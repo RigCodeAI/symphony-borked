@@ -2,8 +2,8 @@
 
 Status: source integration on merged PR22 (`4b33f5d5e99032fe1cd06e6070108faa7008e145`),
 including cleanup, capture and typed output retention APIs. The final selected pass
-contains 105 tests with zero failures across child contracts, durable execution,
-Store, cleanup and capture. Compilation with warnings treated as errors, formatting
+contains 111 tests with zero failures across child contracts, durable execution,
+Store, cleanup, capture and held recovery. Compilation with warnings treated as errors, formatting
 and public-function specs pass in the qualified isolated Docker runtime. The positive
 runtime proof-to-resume contract passes with real SQLite and immutable local bytes,
 using synthetic GitHub and remote-upload receipts. This is not live Coverage Factory qualification,
@@ -52,6 +52,10 @@ at the child wait prevents child dispatch even if restart
 occurs before child cancellation; recovery requests cancellation through the existing
 operation adapter. Unknown termination remains unresolved. Evidence and output
 identities are retained; this increment does not delete workspaces or close PRs.
+The cancellation regression keeps a supervised child PID alive, stops its parent
+through the isolated owner harness and verifies cancellation without restarting
+the coordinator. It retains local work; remote termination and native Linear delivery
+remain separate qualification boundaries.
 
 Child completion is recorded as an observation. It cannot alone satisfy the parent's
 stage or create a coverage claim. DEV-241 provides

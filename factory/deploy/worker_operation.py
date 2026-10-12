@@ -8,7 +8,9 @@ root-written release file before it can exec the requested command.
 
 from __future__ import annotations
 
+import base64
 import contextlib
+from collections import OrderedDict
 import fcntl
 import hashlib
 import json
@@ -57,7 +59,11 @@ TERMINATION_PROOF_KEYS = (
 )
 _UNIT_RE = re.compile(r"^factory-operation-[0-9a-f]{64}\.service$")
 _HEX_32_RE = re.compile(r"^[0-9a-f]{32}$")
+_HEX_40_RE = re.compile(r"^[0-9a-f]{40}$")
 _HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
+MAX_CANDIDATE_BUNDLE_BYTES = 64 * 1024 * 1024
+CANDIDATE_BUNDLE_CHUNK_BYTES = 64 * 1024
+MAX_CANDIDATE_BUNDLE_CACHE_ENTRIES = 16
 
 
 class OperationError(RuntimeError):
@@ -416,6 +422,8 @@ class OperationController:
         machine_id_path: str = "/etc/machine-id",
         boot_id_path: str = "/proc/sys/kernel/random/boot_id",
         expected_machine_id: str | None = None,
+        service_revision: str | None = None,
+        candidate_producer_command_sha256: str | None = None,
         worker_user: str = "factory-worker",
         worker_group: str = "factory-worker",
         expected_owner_uid: int = 0,
@@ -425,6 +433,7 @@ class OperationController:
         self.manager = manager
         self.records_dir = Path(records_dir).absolute()
         self.operation_dir = Path(operation_dir).absolute()
+        self.workspace_root_path = Path(workspace_root).absolute()
         self.workspace_root = Path(workspace_root).resolve()
         self.wrapper_path = os.path.abspath(wrapper_path)
         self.worker_home = os.path.abspath(worker_home)
@@ -432,11 +441,17 @@ class OperationController:
         self.machine_id_path = machine_id_path
         self.boot_id_path = boot_id_path
         self.expected_machine_id = (expected_machine_id or "").replace("-", "").lower()
+        self.service_revision = service_revision or ""
+        self.candidate_producer_command_sha256 = candidate_producer_command_sha256 or ""
         self.worker_user = worker_user
         self.worker_group = worker_group
         self.expected_owner_uid = expected_owner_uid
         self.operation_timeout = operation_timeout
         self.stop_timeout = stop_timeout
+        self._candidate_bundle_cache: OrderedDict[
+            tuple[tuple[Any, ...], tuple[int, ...]], None
+        ] = OrderedDict()
+        self._candidate_bundle_cache_lock = threading.Lock()
 
     def capabilities(self) -> dict[str, Any]:
         facts = self.manager.capabilities() if hasattr(self.manager, "capabilities") else {}
@@ -681,6 +696,467 @@ class OperationController:
                 state = "running" if record.get("release_written") else "held"
                 return self._status_result(checked, state, record)
             return self._status_result(checked, "unknown", record)
+
+    def candidate_bundle(
+        self,
+        identity: Mapping[str, Any],
+        input_sha256: str,
+        offset: int,
+        expected_sha256: str,
+        expected_bytes: int,
+    ) -> dict[str, Any]:
+        """Read one bounded chunk from an exact, successful candidate producer run."""
+
+        checked = self._validate_identity_shape(identity)
+        if not self.candidate_bundle_available:
+            raise OperationUnavailable("candidate bundle transport is not configured")
+        if not isinstance(input_sha256, str) or not _HEX_64_RE.fullmatch(input_sha256):
+            raise OperationValidationError("candidate input identity is invalid")
+        if not isinstance(expected_sha256, str) or not _HEX_64_RE.fullmatch(expected_sha256):
+            raise OperationValidationError("candidate bundle digest is invalid")
+        if (type(expected_bytes) is not int or not 1 <= expected_bytes <= MAX_CANDIDATE_BUNDLE_BYTES
+                or type(offset) is not int or offset < 0 or offset > expected_bytes
+                or (offset != expected_bytes and offset % CANDIDATE_BUNDLE_CHUNK_BYTES != 0)):
+            raise OperationValidationError("candidate bundle bounds are invalid")
+
+        with self._locked_records():
+            _record_path, record = self._record_for_identity_with_path(checked)
+            if (record is None or not self._identity_equal(record.get("identity"), checked)
+                    or record.get("state") != "terminated" or not self._valid_termination_proof(record)):
+                raise OperationUnavailable("candidate producer operation is unavailable")
+            proof = record["termination_proof"]
+            if proof.get("exec_main_code") != "exited" or proof.get("exec_main_status") != 0:
+                raise OperationUnavailable("candidate producer operation did not succeed")
+
+            manifest = self._read_operation_manifest(checked, record)
+            argv = manifest.get("argv")
+            if not self._trusted_candidate_producer_argv(argv, input_sha256):
+                raise OperationUnavailable("operation is not the trusted candidate producer")
+            workspace = manifest.get("workspace")
+            opened_snapshot, bundle_fd, candidates_fd, filename = self._open_candidate_bundle(
+                workspace,
+                input_sha256,
+            )
+            try:
+                self._assert_candidate_file_stable(
+                    candidates_fd, filename, bundle_fd, opened_snapshot
+                )
+                if opened_snapshot[5] != expected_bytes:
+                    self._invalidate_candidate_bundle_cache(
+                        self._candidate_bundle_cache_base_key(
+                            checked, input_sha256, expected_sha256, expected_bytes
+                        )
+                    )
+                    raise OperationUnavailable("candidate bundle metadata does not match")
+                cache_base = self._candidate_bundle_cache_base_key(
+                    checked, input_sha256, expected_sha256, expected_bytes
+                )
+                verified = self._candidate_bundle_cache_lookup(cache_base, opened_snapshot)
+                if verified:
+                    bundle_bytes, bundle_sha256 = expected_bytes, expected_sha256
+                else:
+                    bundle_bytes, bundle_sha256 = self._inspect_candidate_bundle(
+                        bundle_fd,
+                        opened_snapshot,
+                        expected_bytes=expected_bytes,
+                        expected_sha256=expected_sha256,
+                    )
+                chunk_size = min(CANDIDATE_BUNDLE_CHUNK_BYTES, bundle_bytes - offset)
+                chunk = os.pread(bundle_fd, chunk_size, offset) if hasattr(os, "pread") else self._read_at(
+                    bundle_fd, offset, chunk_size
+                )
+                if len(chunk) != chunk_size:
+                    raise OperationUnavailable("candidate bundle changed while reading")
+                self._assert_candidate_file_stable(candidates_fd, filename, bundle_fd, opened_snapshot)
+                if not verified:
+                    self._candidate_bundle_cache_store(cache_base, opened_snapshot)
+            finally:
+                os.close(bundle_fd)
+                os.close(candidates_fd)
+
+        return {
+            "operation_id": checked["operation_id"],
+            "candidate_input_sha256": input_sha256,
+            "bundle_sha256": bundle_sha256,
+            "bundle_bytes": bundle_bytes,
+            "offset": offset,
+            "data_base64": base64.b64encode(chunk).decode("ascii"),
+            "eof": offset + len(chunk) == bundle_bytes,
+        }
+
+    @staticmethod
+    def _candidate_bundle_cache_base_key(
+        identity: Mapping[str, str],
+        input_sha256: str,
+        expected_sha256: str,
+        expected_bytes: int,
+    ) -> tuple[Any, ...]:
+        return (
+            tuple(identity[key] for key in IDENTITY_KEYS),
+            input_sha256,
+            expected_sha256,
+            expected_bytes,
+        )
+
+    def _candidate_bundle_cache_lookup(
+        self,
+        base_key: tuple[Any, ...],
+        snapshot: tuple[int, ...],
+    ) -> bool:
+        key = (base_key, snapshot)
+        with self._candidate_bundle_cache_lock:
+            if key in self._candidate_bundle_cache:
+                self._candidate_bundle_cache.move_to_end(key)
+                return True
+            changed_keys = [
+                cached_key for cached_key in self._candidate_bundle_cache
+                if cached_key[0] == base_key
+            ]
+            for cached_key in changed_keys:
+                del self._candidate_bundle_cache[cached_key]
+        if changed_keys:
+            raise OperationUnavailable("candidate bundle changed after verification")
+        return False
+
+    def _candidate_bundle_cache_store(
+        self,
+        base_key: tuple[Any, ...],
+        snapshot: tuple[int, ...],
+    ) -> None:
+        key = (base_key, snapshot)
+        with self._candidate_bundle_cache_lock:
+            self._candidate_bundle_cache[key] = None
+            self._candidate_bundle_cache.move_to_end(key)
+            while len(self._candidate_bundle_cache) > MAX_CANDIDATE_BUNDLE_CACHE_ENTRIES:
+                self._candidate_bundle_cache.popitem(last=False)
+
+    def _invalidate_candidate_bundle_cache(self, base_key: tuple[Any, ...]) -> None:
+        with self._candidate_bundle_cache_lock:
+            stale_keys = [
+                cached_key for cached_key in self._candidate_bundle_cache
+                if cached_key[0] == base_key
+            ]
+            for cached_key in stale_keys:
+                del self._candidate_bundle_cache[cached_key]
+
+    @property
+    def candidate_bundle_available(self) -> bool:
+        return bool(
+            _HEX_40_RE.fullmatch(self.service_revision)
+            and _HEX_64_RE.fullmatch(self.candidate_producer_command_sha256)
+        )
+
+    def _trusted_candidate_producer_argv(self, argv: Any, input_sha256: str) -> bool:
+        """Match the root-configured inline producer and bind it to these inputs."""
+        if (not isinstance(argv, list) or len(argv) != 6
+                or argv[0] != "/usr/bin/env"
+                or not isinstance(argv[1], str)
+                or not argv[1].startswith("WORKSTREAM_INPUTS_JSON=")
+                or not self.candidate_bundle_available):
+            return False
+        try:
+            inputs = json.loads(
+                argv[1][len("WORKSTREAM_INPUTS_JSON="):],
+                object_pairs_hook=_unique_json_object,
+                parse_constant=_reject_json_constant,
+            )
+            candidate = inputs["candidate"]
+            if not isinstance(candidate, dict) or not candidate.get("thread_id"):
+                return False
+            command_argv = argv[2:]
+            command_digest = hashlib.sha256(
+                json.dumps(
+                    command_argv,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest()
+            input_digest = hashlib.sha256(
+                json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+        except (KeyError, TypeError, ValueError, UnicodeError, RecursionError):
+            return False
+        return (
+            command_argv[:3] == ["/usr/bin/python3", "-I", "-c"]
+            and command_digest == self.candidate_producer_command_sha256
+            and input_digest == input_sha256
+        )
+
+    def _read_operation_manifest(
+        self,
+        identity: Mapping[str, str],
+        record: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Read the root-owned immutable descriptor using no-follow directory opens."""
+        root_fd = -1
+        operation_fd = -1
+        descriptor_fd = -1
+        try:
+            root_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            root_fd = self._open_absolute_directory(self.operation_dir)
+            self._check_open_directory(root_fd, owner_uid=self.expected_owner_uid, private=True)
+            operation_name = hashlib.sha256(identity["operation_id"].encode("utf-8")).hexdigest()
+            operation_fd = os.open(operation_name, root_flags, dir_fd=root_fd)
+            self._check_open_directory(
+                operation_fd,
+                owner_uid=self.expected_owner_uid,
+                exact_mode=0o755,
+                private=True,
+            )
+            descriptor_fd = os.open(
+                "manifest.json",
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0),
+                dir_fd=operation_fd,
+            )
+            before = os.fstat(descriptor_fd)
+            if (not stat.S_ISREG(before.st_mode) or before.st_uid != self.expected_owner_uid
+                    or stat.S_IMODE(before.st_mode) != 0o644 or before.st_nlink != 1
+                    or before.st_size > 64 * 1024):
+                raise OperationUnavailable("operation descriptor is unsafe")
+            chunks = bytearray()
+            while len(chunks) <= 64 * 1024:
+                block = os.read(descriptor_fd, min(16 * 1024, 64 * 1024 + 1 - len(chunks)))
+                if not block:
+                    break
+                chunks.extend(block)
+            after = os.fstat(descriptor_fd)
+            path_info = os.stat("manifest.json", dir_fd=operation_fd, follow_symlinks=False)
+            if (len(chunks) > 64 * 1024 or not self._same_file_snapshot(before, after)
+                    or not self._same_file_snapshot(before, path_info)):
+                raise OperationUnavailable("operation descriptor changed while reading")
+            try:
+                manifest = json.loads(
+                    bytes(chunks).decode("utf-8"),
+                    object_pairs_hook=_unique_json_object,
+                )
+            except (UnicodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
+                raise OperationUnavailable("operation descriptor is corrupt") from exc
+        except OperationError:
+            raise
+        except OSError as exc:
+            raise OperationUnavailable("operation descriptor is unavailable") from exc
+        finally:
+            for descriptor in (descriptor_fd, operation_fd, root_fd):
+                if descriptor >= 0:
+                    os.close(descriptor)
+
+        expected_keys = {
+            "version", "operation_id", "request_sha256", "argv", "workspace", "release_file", "environment",
+        }
+        if (not isinstance(manifest, dict) or set(manifest) != expected_keys
+                or manifest.get("version") != PROTOCOL_VERSION
+                or manifest.get("operation_id") != identity["operation_id"]
+                or manifest.get("request_sha256") != identity["request_sha256"]
+                or record.get("request_sha256") != identity["request_sha256"]
+                or manifest.get("release_file") != str(self._release_path(identity["operation_id"]))
+                or not isinstance(manifest.get("environment"), dict)):
+            raise OperationUnavailable("operation descriptor does not match its identity")
+        try:
+            request = self._validate_request({
+                "operation_id": manifest["operation_id"],
+                "argv": manifest["argv"],
+                "workspace": manifest["workspace"],
+            })
+        except (OperationValidationError, KeyError, TypeError) as exc:
+            raise OperationUnavailable("operation descriptor request is invalid") from exc
+        if _sha256_json(request) != identity["request_sha256"]:
+            raise OperationUnavailable("operation descriptor digest does not match")
+        return {**manifest, "argv": request["argv"], "workspace": request["workspace"]}
+
+    def _open_candidate_bundle(
+        self,
+        workspace: Any,
+        input_sha256: str,
+    ) -> tuple[tuple[int, ...], int, int, str]:
+        """Open the canonical worker output beneath its workspace without following links."""
+        if not isinstance(workspace, str) or not os.path.isabs(workspace):
+            raise OperationUnavailable("candidate workspace is invalid")
+        root_fd = workspace_fd = git_fd = candidates_fd = file_fd = -1
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            root_fd = self._open_absolute_directory(self.workspace_root_path)
+            self._check_open_directory(root_fd, owner_uid=self.expected_owner_uid, private=True)
+            try:
+                relative_parts = Path(workspace).relative_to(self.workspace_root).parts
+            except ValueError as exc:
+                raise OperationUnavailable("candidate workspace is outside the configured root") from exc
+            if not relative_parts or any(part in ("", ".", "..") for part in relative_parts):
+                raise OperationUnavailable("candidate workspace is invalid")
+            current_fd = root_fd
+            opened: list[int] = []
+            for index, part in enumerate(relative_parts):
+                child = os.open(part, directory_flags, dir_fd=current_fd)
+                opened.append(child)
+                if index == len(relative_parts) - 1:
+                    self._check_open_directory(child, owner_uid=self._worker_uid(), private=True)
+                else:
+                    self._check_open_directory(
+                        child,
+                        allowed_owners={self.expected_owner_uid, self._worker_uid()},
+                        private=True,
+                    )
+                current_fd = child
+            workspace_fd = current_fd
+            git_fd = os.open(".git", directory_flags, dir_fd=workspace_fd)
+            self._check_open_directory(git_fd, owner_uid=self._worker_uid(), private=True)
+            candidates_fd = os.open("factory-candidates", directory_flags, dir_fd=git_fd)
+            self._check_open_directory(
+                candidates_fd,
+                owner_uid=self._worker_uid(),
+                exact_mode=0o700,
+                private=True,
+            )
+            filename = f"{input_sha256}.bundle"
+            file_fd = os.open(
+                filename,
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0),
+                dir_fd=candidates_fd,
+            )
+            info = os.fstat(file_fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != self._worker_uid()
+                    or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600
+                    or not 1 <= info.st_size <= MAX_CANDIDATE_BUNDLE_BYTES):
+                raise OperationUnavailable("candidate bundle file is unsafe")
+            by_name = os.stat(filename, dir_fd=candidates_fd, follow_symlinks=False)
+            if not self._same_file_object(info, by_name):
+                raise OperationUnavailable("candidate bundle changed while opening")
+            result_fd = file_fd
+            result_directory_fd = candidates_fd
+            result_snapshot = self._file_snapshot(info)
+            file_fd = -1
+            candidates_fd = -1
+            return result_snapshot, result_fd, result_directory_fd, filename
+        except OperationError:
+            raise
+        except (OSError, ValueError) as exc:
+            raise OperationUnavailable("candidate bundle is unavailable") from exc
+        finally:
+            for descriptor in (file_fd, candidates_fd, git_fd, workspace_fd, root_fd):
+                if descriptor >= 0:
+                    os.close(descriptor)
+            for descriptor in locals().get("opened", []):
+                if descriptor != workspace_fd:
+                    with contextlib.suppress(OSError):
+                        os.close(descriptor)
+
+    def _inspect_candidate_bundle(
+        self,
+        descriptor: int,
+        opened_snapshot: tuple[int, ...],
+        *,
+        expected_bytes: int,
+        expected_sha256: str,
+    ) -> tuple[int, str]:
+        before = os.fstat(descriptor)
+        if self._file_snapshot(before) != opened_snapshot or before.st_size != expected_bytes:
+            raise OperationUnavailable("candidate bundle metadata does not match")
+        digest = hashlib.sha256()
+        offset = 0
+        while offset < expected_bytes:
+            block = os.pread(descriptor, min(1024 * 1024, expected_bytes - offset), offset) if hasattr(os, "pread") else self._read_at(
+                descriptor,
+                offset,
+                min(1024 * 1024, expected_bytes - offset),
+            )
+            if not block:
+                raise OperationUnavailable("candidate bundle is truncated")
+            digest.update(block)
+            offset += len(block)
+        after = os.fstat(descriptor)
+        actual_sha256 = digest.hexdigest()
+        if (self._file_snapshot(after) != opened_snapshot or actual_sha256 != expected_sha256
+                or offset != expected_bytes):
+            raise OperationUnavailable("candidate bundle digest does not match")
+        return expected_bytes, actual_sha256
+
+    def _assert_candidate_file_stable(
+        self,
+        directory_fd: int,
+        filename: str,
+        descriptor: int,
+        expected_snapshot: tuple[int, ...],
+    ) -> None:
+        try:
+            opened = os.fstat(descriptor)
+            path_info = os.stat(filename, dir_fd=directory_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise OperationUnavailable("candidate bundle changed while reading") from exc
+        if (self._file_snapshot(opened) != expected_snapshot
+                or self._file_snapshot(path_info) != expected_snapshot
+                or not stat.S_ISREG(path_info.st_mode)):
+            raise OperationUnavailable("candidate bundle changed while reading")
+
+    @staticmethod
+    def _file_snapshot(info: os.stat_result) -> tuple[int, ...]:
+        return (
+            info.st_dev,
+            info.st_ino,
+            info.st_mode,
+            info.st_uid,
+            info.st_nlink,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        )
+
+    @classmethod
+    def _same_file_snapshot(cls, before: os.stat_result, after: os.stat_result) -> bool:
+        return cls._file_snapshot(before) == cls._file_snapshot(after)
+
+    @staticmethod
+    def _same_file_object(left: os.stat_result, right: os.stat_result) -> bool:
+        return left.st_dev == right.st_dev and left.st_ino == right.st_ino
+
+    def _check_open_directory(
+        self,
+        descriptor: int,
+        *,
+        owner_uid: int | None = None,
+        allowed_owners: set[int] | None = None,
+        exact_mode: int | None = None,
+        private: bool,
+    ) -> None:
+        info = os.fstat(descriptor)
+        if not stat.S_ISDIR(info.st_mode):
+            raise OperationUnavailable("candidate directory is unsafe")
+        allowed = allowed_owners if allowed_owners is not None else ({owner_uid} if owner_uid is not None else None)
+        if allowed is not None and info.st_uid not in allowed:
+            raise OperationUnavailable("candidate directory ownership is unsafe")
+        mode = stat.S_IMODE(info.st_mode)
+        if exact_mode is not None and mode != exact_mode:
+            raise OperationUnavailable("candidate directory permissions are unsafe")
+        if private and mode & 0o022:
+            raise OperationUnavailable("candidate directory permissions are unsafe")
+
+    def _worker_uid(self) -> int:
+        try:
+            return pwd.getpwnam(self.worker_user).pw_uid
+        except (KeyError, OSError) as exc:
+            raise OperationUnavailable("worker account is unavailable") from exc
+
+    @staticmethod
+    def _open_absolute_directory(path: Path) -> int:
+        if not path.is_absolute() or any(component in ("", ".", "..") for component in path.parts[1:]):
+            raise OperationUnavailable("configured directory path is not canonical")
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open("/", flags)
+        try:
+            for component in path.parts[1:]:
+                child = os.open(component, flags, dir_fd=descriptor)
+                os.close(descriptor)
+                descriptor = child
+            return descriptor
+        except OSError:
+            os.close(descriptor)
+            raise
+
+    @staticmethod
+    def _read_at(descriptor: int, offset: int, length: int) -> bytes:
+        os.lseek(descriptor, offset, os.SEEK_SET)
+        return os.read(descriptor, length)
 
     def stop(self, identity: Mapping[str, Any]) -> dict[str, Any]:
         checked = self._validate_identity_shape(identity)
@@ -1507,6 +1983,19 @@ def _normalize_exec_main_code(value: str) -> str:
 
 def _canonical_json(value: Any) -> bytes:
     return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"invalid JSON constant: {value}")
 
 
 def _sha256_json(value: Any) -> str:

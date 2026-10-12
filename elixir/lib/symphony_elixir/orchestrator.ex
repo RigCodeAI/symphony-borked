@@ -117,6 +117,14 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, accept_workstream_cancellation(state, ref, run_id, attempt_id, outcome)}
   end
 
+  def handle_info(:observe_stopped_publications, state) do
+    {:noreply, observe_stopped_publications(state)}
+  end
+
+  def handle_info({ref, {:stopped_publication, run_id, attempt_id, result}}, state) when is_reference(ref) do
+    {:noreply, accept_stopped_publication(state, ref, run_id, attempt_id, result)}
+  end
+
   def handle_info({:workstream_result, run_id, attempt_id, pid, result}, state) do
     {:noreply, accept_workstream_result(state, run_id, attempt_id, pid, result)}
   end
@@ -1597,6 +1605,33 @@ defmodule SymphonyElixir.Orchestrator do
     {:reply, :ok, state}
   end
 
+  def handle_call({:workstream_publication_check, run_id, attempt_id, pid, artifacts}, {caller, _tag}, state) do
+    {:reply, publication_owner(state, run_id, attempt_id, pid, caller, artifacts), state}
+  end
+
+  def handle_call({:workstream_publication_intent, run_id, attempt_id, pid, artifacts, intent}, {caller, _tag}, state) do
+    with :ok <- publication_owner(state, run_id, attempt_id, pid, caller, artifacts),
+         run = durable_run(state, run_id),
+         true <- valid_publication_intent?(run, intent) do
+      operation = run.operations[attempt_id]
+
+      case operation[:publication_intent] do
+        nil ->
+          updated = put_in(run.operations[attempt_id][:publication_intent], intent)
+          state = commit_workstream(state, updated, attempt_id <> "/publication-intent-v1", %{kind: :publication_intent, intent: intent})
+          {:reply, :ok, state}
+
+        ^intent ->
+          {:reply, :ok, state}
+
+        _ ->
+          {:reply, {:error, :publication_intent_changed}, state}
+      end
+    else
+      _ -> {:reply, {:error, :publication_no_longer_owned}, state}
+    end
+  end
+
   @impl true
   def handle_call(:snapshot, _from, state) do
     state = refresh_runtime_config(state)
@@ -2219,6 +2254,9 @@ defmodule SymphonyElixir.Orchestrator do
           Code.ensure_loaded!(SymphonyElixir.ValidationPolicy)
           Code.ensure_loaded!(SymphonyElixir.Validation)
           Code.ensure_loaded!(SymphonyElixir.ValidationCommand)
+          Code.ensure_loaded!(SymphonyElixir.Publisher)
+          Code.ensure_loaded!(SymphonyElixir.PublisherGithub)
+          Code.ensure_loaded!(SymphonyElixir.CandidateTransfer)
 
           with {:ok, store} <- WorkstreamStore.start_link(path: path, owner: self()),
                {:ok, runs} <- WorkstreamStore.load(store) do
@@ -2228,7 +2266,7 @@ defmodule SymphonyElixir.Orchestrator do
 
             :ok = Evidence.recover!(store, runs)
             {:ok, store_path} = SymphonyElixir.PathSafety.canonicalize(path)
-            durable = %{store: store, store_path: store_path, runs: Map.new(runs, &{&1.id, &1}), workers: %{}, cancellations: %{}, opts: opts}
+            durable = %{store: store, store_path: store_path, runs: Map.new(runs, &{&1.id, &1}), workers: %{}, cancellations: %{}, publications: %{}, opts: opts}
             {:ok, %{state | workstreams: durable, polling_enabled: false}}
           end
         end
@@ -2341,8 +2379,9 @@ defmodule SymphonyElixir.Orchestrator do
                 :validation_policy,
                 :validation_archive,
                 :validation_scratch,
+                :validation_candidates,
                 :validation_base
-              ] and is_binary(value)) or (key == :worker_control and is_map(value)) or
+              ] and is_binary(value)) or (key in [:worker_control, :publisher] and is_map(value)) or
                (key == :secret_environment_names and is_list(value) and Enum.all?(value, &is_binary/1))
            end),
          {:ok, definition, workspace} <- WorkstreamRunner.prepare(path, inputs, opts),
@@ -2384,6 +2423,31 @@ defmodule SymphonyElixir.Orchestrator do
         {:error, :private_evidence_config_unavailable}
     end
   end
+
+  defp publication_owner(state, run_id, attempt_id, pid, caller, artifacts) do
+    run = durable_run(state, run_id)
+    worker = state.workstreams && state.workstreams.workers[attempt_id]
+
+    allowed =
+      not is_nil(run) and not is_nil(worker) and caller == pid and worker.pid == pid and run.status in [:executing, :reconciling] and
+        run.current_attempt_id == attempt_id and run.definition.stages[run.stage_id].type == :publish and
+        run.artifacts == artifacts and not linear_stopped?(state, run)
+
+    if allowed, do: :ok, else: {:error, :publication_no_longer_owned}
+  end
+
+  defp valid_publication_intent?(run, intent) when is_map(intent) do
+    keys = [:branch, :candidate_sha, :publication_id, :validation_attempt_id, :evidence_revision]
+    validation_id = run.definition.stages[run.stage_id].gate.validation_stage
+    attempt = run.attempts |> Enum.reverse() |> Enum.find(&(&1.stage == validation_id))
+
+    Enum.sort(Map.keys(intent)) == Enum.sort(keys) and intent[:branch] == SymphonyElixir.Publisher.branch(run) and
+      is_binary(intent[:candidate_sha]) and Regex.match?(~r/^[a-f0-9]{40}([a-f0-9]{24})?$/, intent.candidate_sha) and
+      Enum.all?([intent[:publication_id], intent[:evidence_revision]], &(is_binary(&1) and Regex.match?(~r/^[a-f0-9]{64}$/, &1))) and
+      is_map(attempt) and attempt.status == :completed and attempt.gate == :passed and attempt.id == intent[:validation_attempt_id]
+  end
+
+  defp valid_publication_intent?(_run, _intent), do: false
 
   defp commit_workstream(state, run, event_id, event) do
     send(self(), :linear_process)
@@ -2576,17 +2640,90 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp cancellation_down(state, ref) do
     case Enum.find(state.workstreams.cancellations, fn {_id, task} -> task.ref == ref end) do
-      {id, _task} -> {:handled, update_in(state.workstreams.cancellations, &Map.delete(&1, id))}
-      nil -> :unhandled
+      {id, _task} ->
+        {:handled, update_in(state.workstreams.cancellations, &Map.delete(&1, id))}
+
+      nil ->
+        case Enum.find(state.workstreams.publications, fn {_id, task} -> task[:ref] == ref end) do
+          {id, _task} ->
+            Process.send_after(self(), :observe_stopped_publications, 60_000)
+            {:handled, put_in(state.workstreams.publications[id], %{retry_at: System.monotonic_time(:millisecond) + 60_000})}
+
+          nil ->
+            :unhandled
+        end
     end
   end
 
   defp reconcile_stopped_workstreams(%{workstreams: nil} = state), do: state
 
   defp reconcile_stopped_workstreams(state) do
+    state =
+      Enum.reduce(state.workstreams.runs, state, fn {_id, run}, acc ->
+        if run.status == :stopped, do: reconcile_stopped_workstream(acc, run), else: acc
+      end)
+
+    observe_stopped_publications(state)
+  end
+
+  defp observe_stopped_publications(%{workstreams: nil} = state), do: state
+
+  defp observe_stopped_publications(state) do
     Enum.reduce(state.workstreams.runs, state, fn {_id, run}, acc ->
-      if run.status == :stopped, do: reconcile_stopped_workstream(acc, run), else: acc
+      if run.status == :stopped do
+        Enum.reduce(Enum.filter(run.operations, fn {_id, operation} -> is_binary(operation[:id]) and is_map(operation[:publication_intent]) end), acc, fn {_attempt_id, operation}, current ->
+          observation = operation[:publication_observation]
+          now = System.monotonic_time(:millisecond)
+          previous = current.workstreams.publications[operation.id]
+          due = is_nil(previous) or (is_integer(previous[:retry_at]) and previous.retry_at <= now)
+
+          if not is_nil(operation[:publication_intent]) and (is_nil(observation) or observation.status in [:pending, :mismatched]) and due do
+            task =
+              Task.Supervisor.async_nolink(current.task_supervisor, fn ->
+                result = SymphonyElixir.Publisher.observe_stopped(run, operation)
+                {:stopped_publication, run.id, operation.id, result}
+              end)
+
+            put_in(current.workstreams.publications[operation.id], %{ref: task.ref, pid: task.pid})
+          else
+            current
+          end
+        end)
+      else
+        acc
+      end
     end)
+  end
+
+  defp accept_stopped_publication(%{workstreams: nil} = state, _ref, _run_id, _attempt_id, _result), do: state
+
+  defp accept_stopped_publication(state, ref, run_id, attempt_id, result) do
+    case state.workstreams.publications[attempt_id] do
+      %{ref: ^ref} ->
+        Process.demonitor(ref, [:flush])
+        state = put_in(state.workstreams.publications[attempt_id], %{retry_at: System.monotonic_time(:millisecond) + 60_000})
+        Process.send_after(self(), :observe_stopped_publications, 60_000)
+        run = durable_run(state, run_id)
+
+        case result do
+          {:ok, observation} when not is_nil(run) ->
+            operation = run.operations[attempt_id]
+
+            if run.status == :stopped and not is_nil(operation) and operation[:publication_observation] != observation do
+              updated = put_in(run.operations[attempt_id][:publication_observation], observation)
+              suffix = :crypto.hash(:sha256, :erlang.term_to_binary(observation)) |> Base.encode16(case: :lower)
+              commit_workstream(state, updated, attempt_id <> "/publication-observed/" <> suffix, %{kind: :stopped_publication_observed, observation: observation})
+            else
+              state
+            end
+
+          _ ->
+            state
+        end
+
+      _ ->
+        state
+    end
   end
 
   defp reconcile_stopped_workstream(state, run) do
@@ -2695,7 +2832,7 @@ defmodule SymphonyElixir.Orchestrator do
         put_in(state.workstreams.workers[run.current_attempt_id], %{pid: worker, ref: ref, run_id: run.id})
       end
     else
-      reconciler = Keyword.get(state.workstreams.opts, :workstream_reconciler, fn _run, _operation -> :unknown end)
+      reconciler = Keyword.get(state.workstreams.opts, :workstream_reconciler, &SymphonyElixir.Publisher.reconcile/2)
       outcome = reconciler.(run, operation)
 
       updated =
@@ -2703,6 +2840,7 @@ defmodule SymphonyElixir.Orchestrator do
           {:completed, result} -> WorkstreamRun.finish_stage(run, result)
           :terminated when operation.type == :agent -> WorkstreamRun.retry_transport(run)
           :not_applied -> WorkstreamRun.retry_transport(run)
+          :retry_safe when operation.type == :publish -> WorkstreamRun.retry_transport(run)
           other -> WorkstreamRun.uncertain(run, other)
         end
 

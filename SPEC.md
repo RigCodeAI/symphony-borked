@@ -2602,3 +2602,54 @@ variable names to remove from local or SSH Codex child environments. They MUST b
 with existing exclusions, MUST NOT forward values, and MUST NOT weaken publisher/check
 credential isolation. Qualification receipts exclude raw server diagnostics, credential
 values, account IDs and reset-credit IDs; preserve bounded diagnostic codes instead.
+
+## 22. Trusted Rig candidate publication
+
+Version-1 workstreams MAY declare a fixed service-owned `publish` stage with
+`id`, `inputs`, `outputs` and an inline gate. The gate contains `validation_stage`,
+`required`, `success` and `failure: blocked`; the referenced upstream stage MUST
+use candidate validation and its output MUST be among the publication inputs.
+Definitions cannot supply publisher commands, credentials or their own verdict.
+The synchronous local runner MUST reject publication without durable ownership.
+
+Before every remote mutation, the service MUST authenticate the exact saved final
+validation receipt, recompute both inline gates against the current clean candidate
+and pinned policy, and verify immutable permanent archival for that validation attempt.
+Development, missing, failed, forged, incomplete and stale evidence MUST block.
+Later conversation events MUST NOT invalidate an already verified immutable evidence
+revision; the latest incomplete bundle does not qualify as archival proof.
+
+The coordinator MUST persist the stage operation before execution and the exact safe
+publication intent before the first remote write. It MUST recheck current task ownership
+before further writes. A stopped run MUST remain stopped while read-only reconciliation
+records any already accepted branch/PR outcome; unchanged pending observations MUST NOT
+produce repeated durable events. Publication
+identity is bound to run, stage, candidate and validation receipt; a deterministic
+task branch is preserved across retries and fixes. Pushes MUST target the exact
+validated SHA with an expected-head lease. Restart, duplicate completion and lost
+remote responses MUST reconcile the existing branch/PR rather than create a new PR.
+Closed, ambiguous or unexpectedly changed remote state MUST block. Completion MUST
+confirm the actual GitHub PR and branch SHA, not accept agent prose.
+
+For contained workers, the coordinator MUST consume only a bundle from the exact
+terminated successful service commit-preparation operation. The read-only worker RPC
+MUST derive its path from a protected operation descriptor and authenticated input
+identity, require a root-pinned producer command digest, and bound/check chunk size,
+total bytes and checksum. It MUST reject arbitrary paths, running/failed/unrelated
+operations and symlink substitution without executing candidate code as root. A
+separate coordinator-owned snapshot MUST bound metadata copying and imported tree/file
+sizes and verify candidate SHA and parent/base before
+validation or publication, preserving the worker's original clone.
+
+Publisher App/private-key credentials MUST stay outside agent and validator processes,
+mounts and cloud metadata reach. Publication uses a selected-repository GitHub App
+installation for RigCodeAI/rig; no PAT fallback, automatic review, protection changes
+or merge is authorized by this stage. Preserve the repository template and all human
+PR text outside the managed evidence section. The GitHub body API lacks atomic compare-
+and-swap: observed body changes MUST block the update, and the remaining final PATCH
+race MUST be reported as a deployment limitation.
+
+Publish a durable PR link back to the Linear conversation and evidence links in the PR.
+Human GitHub merge remains a separate boundary. Contract tests and source capability
+MUST NOT be described as live Linear/GCP/GitHub acceptance. See
+[trusted publication](docs/trusted-publication.md) for the operator plan and limits.

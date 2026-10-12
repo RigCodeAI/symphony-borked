@@ -157,6 +157,12 @@ remain separate verified boundaries.
 Trusted candidate validation is available locally through the pinned-policy runner and
 inline stage gates. See [trusted validation](docs/trusted-validation.md) for development/final commands, evidence and limits.
 
+DEV-238 adds a service-owned publication stage: exact trusted validation plus permanent
+archival must pass before the coordinator pushes a candidate or creates/reuses its Rig PR.
+See [trusted publication](docs/trusted-publication.md) for App permissions, replay behavior
+and the live acceptance boundary. This source increment does not claim an installed App
+or a completed Linear-to-PR deployment.
+
 ## Upstream and license
 
 This fork builds on [OpenAI Symphony](https://github.com/openai/symphony).

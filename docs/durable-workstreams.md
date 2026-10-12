@@ -98,7 +98,9 @@ use Erlang external terms with safe decoding and pinned service-policy digests. 
 agent/check evidence is normalized to JSON data so callback-specific BEAM atoms cannot
 prevent recovery in a fresh process. Use the
 coordinator report for readable inspection. Stop the coordinator before direct database
-inspection or backup; use SQLite's backup API for any later online backup integration.
+inspection or direct external backup. The optional
+[local owner capture](dev-242-capture-barrier.md) holds both database owners and
+uses their existing connections; its source passed the focused owner/recovery tests.
 Never copy a live database without its journal or discard it to resolve a startup error.
 Versioned migrations run transactionally; failed/unsupported migrations fail startup and
 leave previously committed records recoverable. Keep the database through workspace cleanup.

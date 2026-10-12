@@ -88,6 +88,12 @@ GCS archive receipts. Durable capture, restart replay and native Linear links ar
 locally tested against merged main; live qualification remains pending. See [private task evidence](docs/private-evidence.md) for configuration,
 retention and the current acceptance boundary.
 
+DEV-242 adds source for a private local capture of the workstream and Evidence
+databases at a quiet boundary. Its [owner capture contract](docs/dev-242-capture-barrier.md)
+passed compilation and 85 focused tests on the PR #18 baseline; merged cleanup
+integration passed 49 focused tests. Deployed restore, fencing and freshness
+monitoring remain pending.
+
 DEV-235 adds [named cloud-agent routing and safe reassignment](docs/dev-235-agent-mapping.md)
 to the existing coordinator. Both additional apps are installed with DEV-only access;
 route activation and native multi-app acceptance remain pending. Existing human waits

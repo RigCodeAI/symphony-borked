@@ -78,54 +78,32 @@ approved revision, or is compatible with current service policy. Do not use
 this report to copy files into a live service or dispatch a replacement worker.
 The report omits configuration values, application rows and raw parser errors.
 
-## Required owner barrier/API proposal
+## Required owner capture barrier
 
-Implementation of this section needs coordinator, WorkstreamStore and Evidence
-owner release. No API below is implemented by this slice.
+The [capture source and qualification plan](../../docs/dev-242-capture-barrier.md)
+replaces the earlier illustrative prepare/finish API. It is grounded in merged
+PR #18's publication intent, cancellation and direct Evidence writers. It names
+the local increment and released shared-file seams. That source passed compilation
+and 85 focused tests; this verifier cannot invoke it or consume its separate manifest.
 
-Proposed owner interface: `prepare_capture(capture_id, expected_config_revision)`
-returns the held inventory, schema/policy pins, delivery cutoff and in-flight
-operation IDs. Owner-only `snapshot_for_capture(capture_id, approved_path)`
-returns a checksum plus its store/outbox watermark. `finish_capture(capture_id,
-verified_manifest_digest)` releases the hold after verified publication;
-`abort_capture(capture_id)` records failure and releases it without publishing a
-usable capture. Repeated IDs must reuse their original outcome, not take another
-snapshot or reapply an external action. Paths come from a fixed operator plan,
-never agent input. These interfaces extend the current owners.
+The first source increment admits only quiet durable boundaries, holds both
+database owners, and snapshots through their existing SQLite connections. It
+rejects active or uncertain publication, cancellation, Linear and cleanup work.
+Completion is recorded after both local copies are verified. It does not keep
+the owners held during remote upload, and it does not claim restoration is ready.
 
-1. The single coordinator starts an idempotent capture ID and holds dispatch,
-   stage transitions and all producers that can write either store. Persist
-   incoming delivery IDs before acknowledgement, with a declared capture cutoff;
-   events beyond it need a separately recoverable queue or provider reconciliation.
-   Record held/in-flight operations instead of assuming worker termination.
-2. Under those owners, drain the workstream evidence outbox and flush the evidence
-   store. Record the outbox/event watermarks and run/stage/operation identities.
-   Both stores must remain unchanged until their snapshots finish. A table count
-   or independent per-file integrity check is not this barrier.
-3. Have the existing connection owner produce its SQLite snapshot, or keep both
-   owners stopped/quiesced while the existing helper captures them. Preserve the
-   exclusive-writer policy. Do not copy live SQLite/journal files or introduce
-   another scheduler. Snapshot requests must be idempotent and use fixed private
-   operator-owned destinations outside issue workspaces.
-4. Extend the capture record to hash every required file: database schemas and
-   paths, public settings, effective workflow, nonsecret credential reference
-   pins, exact service/release/policy identities, and archive-bundle manifests.
-   Bind them to the capture ID/cutoff and both-store watermarks. Verify remote
-   readback and publish the completed capture record last. Failure must not
-   release a partially verified capture as usable. Keep secret payloads separate.
-5. Before restore, establish that the old coordinator cannot return as a writer,
-   discover/reconcile worker-ledger identities, and fence or prove termination
-   before replacement. Reconcile **post-capture** provider events, PRs, reviews
-   and other external operations by their original IDs. A shared DB snapshot
-   does not roll back remote side effects or prove they were never applied.
-6. Restore behind a dispatch hold with compatible policy; ask the application
-   owners to validate opaque payloads, pinned definitions, waits, counters,
-   parent/child links and evidence outbox consistency. Verify retained archive
-   bundles and stable authenticated URLs. Only then release one exact continuation.
+Full recovery still needs a remotely verified capture record binding public
+settings, effective workflow/nonsecret references, exact service/policy pins and
+permanent archive manifests. Before restoring, fence the old coordinator and
+reconcile worker identities and post-capture provider events, PRs and reviews by
+their original operation IDs. Restore behind a dispatch hold, validate the saved
+payloads, waits, counters and parent/child artifacts through their application
+owners, then release one exact continuation. A database snapshot does not roll
+back an external side effect.
 
-DEV-238 publication and DEV-241 cleanup remain independent owners; DEV-240 adds
-review reconciliation when available. This verifier grants none of their actions.
-GCP recreation, freshness alerts and the full deployed rehearsal remain pending.
+DEV-239 validation, DEV-241 cleanup, DEV-240 review and DEV-243 child contracts
+remain their owners' responsibilities. This verifier grants none of their
+actions. GCP recreation, freshness alerts and the deployed rehearsal remain pending.
 
 ## Local test/demo
 

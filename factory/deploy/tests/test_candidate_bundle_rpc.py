@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import base64
+import ctypes
+import grp
 import hashlib
 import json
 import os
 import pwd
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -307,6 +311,120 @@ class CandidateBundleRpcTests(unittest.TestCase):
         )
         return broker._dispatch_rpc(request)
 
+    @unittest.skipUnless(sys.platform == "linux" and os.geteuid() == 0,
+                         "requires Linux root with capabilities to create a separate worker fixture")
+    def test_real_producer_bundle_through_broker_with_empty_capability_bound(self):
+        capabilities = next(line.split()[1] for line in Path("/proc/self/status").read_text().splitlines()
+                            if line.startswith("CapEff:"))
+        required = sum(1 << bit for bit in (0, 1, 6, 7, 8))  # Fixture setup only; child drops all caps.
+        if int(capabilities, 16) & required != required:
+            self.skipTest("fixture setup requires CHOWN, DAC_OVERRIDE, SETGID, SETUID and SETPCAP")
+        worker = pwd.getpwnam("nobody")
+        self.root.chmod(0o755)
+        self.controller.worker_user = worker.pw_name
+        self.controller.worker_group = grp.getgrgid(worker.pw_gid).gr_name
+        self.bundle_path.unlink()
+        for path in (self.workspace, self.workspace / ".git", self.candidates):
+            os.chown(path, worker.pw_uid, worker.pw_gid)
+
+        def run_worker(argv):
+            return subprocess.run(
+                argv, cwd=self.workspace, check=True, capture_output=True, text=True,
+                user=worker.pw_uid, group=worker.pw_gid, extra_groups=[], umask=0o077,
+                env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent",
+                     "WORKSTREAM_INPUTS_JSON": self.inputs_json},
+            )
+
+        run_worker(["git", "init", "--quiet", "--initial-branch=cycle/bundle-test"])
+        source = self.workspace / "candidate"
+        source.write_text("base\n")
+        os.chown(source, worker.pw_uid, worker.pw_gid)
+        run_worker(["git", "add", "candidate"])
+        run_worker(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                    "commit", "--quiet", "-m", "base"])
+        source.write_text("candidate\n")
+        self.command_argv = load_shipped_local_commit_command()
+        self.controller.candidate_producer_command_sha256 = compact_utf8_command_sha256(self.command_argv)
+        result = json.loads(run_worker(self.command_argv).stdout)
+        self.assertEqual(self.candidates.stat().st_mode & 0o777, 0o750)
+        self.assertEqual(self.bundle_path.stat().st_mode & 0o777, 0o640)
+        self.bundle_bytes = self.bundle_path.read_bytes()
+        self.assertEqual(result["bundle_sha256"], hashlib.sha256(self.bundle_bytes).hexdigest())
+        linked = self.workspace / ".git" / "linked-bundle"
+        os.link(self.bundle_path, linked)
+        with self.assertRaises(subprocess.CalledProcessError) as rejected:
+            run_worker(self.command_argv)
+        self.assertIn("unsafe bundle file", rejected.exception.stderr)
+        linked.unlink()
+        secret = self.workspace / ".git" / "worker-private"
+        secret.write_bytes(b"private worker data")
+        os.chown(secret, worker.pw_uid, worker.pw_gid)
+        secret.chmod(0o600)
+        self.argv = ["/usr/bin/env", f"WORKSTREAM_INPUTS_JSON={self.inputs_json}", *self.command_argv]
+        self.identity = self.install_operation(argv=self.argv)
+        record_path = self.controller._record_path(self.operation_id)
+        record_before = record_path.read_bytes()
+
+        def probe(private):
+            read_fd, write_fd = os.pipe()
+            pid = os.fork()
+            if pid == 0:
+                os.close(read_fd)
+                try:
+                    os.setgroups([worker.pw_gid])
+                    libc = ctypes.CDLL(None, use_errno=True)
+                    for capability in range(64):
+                        # Drop every supported bounding capability before effective/permitted caps.
+                        result = libc.prctl(24, capability, 0, 0, 0)
+                        if result != 0 and ctypes.get_errno() != 22:
+                            raise OSError(ctypes.get_errno(), "capability bounding drop failed")
+                    class Header(ctypes.Structure):
+                        _fields_ = [("version", ctypes.c_uint32), ("pid", ctypes.c_int)]
+                    class Data(ctypes.Structure):
+                        _fields_ = [("effective", ctypes.c_uint32), ("permitted", ctypes.c_uint32),
+                                    ("inheritable", ctypes.c_uint32)]
+                    header, data = Header(0x20080522, 0), (Data * 2)()
+                    self.assertEqual(libc.capset(ctypes.byref(header), ctypes.byref(data)), 0)
+                    self.assertEqual(libc.prctl(38, 1, 0, 0, 0), 0)  # NoNewPrivileges
+                    status = Path("/proc/self/status").read_text()
+                    for name in ("CapEff", "CapPrm", "CapBnd"):
+                        self.assertIn(name + ":\t0000000000000000", status)
+                    if private:
+                        with self.assertRaises(engine.OperationUnavailable) as caught:
+                            self.fetch()
+                        self.assertIsInstance(caught.exception.__cause__, PermissionError)
+                        self.assertEqual(caught.exception.__cause__.errno, 13)
+                    else:
+                        reply = self.fetch()
+                        self.assertEqual(base64.b64decode(reply["data_base64"]), self.bundle_bytes)
+                        self.assertTrue(reply["eof"])
+                        with self.assertRaises(PermissionError):
+                            os.open(self.bundle_path, os.O_WRONLY)
+                        with self.assertRaises(PermissionError):
+                            secret.read_bytes()
+                    report = {"ok": True}
+                except BaseException as error:
+                    report = {"error": repr(error)}
+                os.write(write_fd, json.dumps(report).encode())
+                os.close(write_fd)
+                os._exit(0)
+            os.close(write_fd)
+            report = json.loads(os.read(read_fd, 16384))
+            os.close(read_fd)
+            _, status = os.waitpid(pid, 0)
+            self.assertEqual(status, 0)
+            self.assertEqual(report, {"ok": True})
+
+        self.candidates.chmod(0o700)
+        self.bundle_path.chmod(0o600)
+        probe(private=True)  # Reproduce DEV-257 under the service's actual privilege boundary.
+        self.candidates.chmod(0o750)
+        self.bundle_path.chmod(0o640)
+        probe(private=False)
+        self.assertEqual(record_path.read_bytes(), record_before)
+        self.assertEqual(self.records.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(record_path.stat().st_mode & 0o777, 0o600)
+
     def test_reads_fixed_chunks_and_replays_offsets_exactly(self):
         first = self.fetch()
         expected_first = self.bundle_bytes[:transport.CANDIDATE_BUNDLE_CHUNK_BYTES]
@@ -370,7 +488,10 @@ class CandidateBundleRpcTests(unittest.TestCase):
         self.controller._candidate_bundle_cache.clear()
         self.fetch()
         changed = bytes([self.bundle_bytes[0] ^ 0xFF]) + self.bundle_bytes[1:]
+        before = self.bundle_path.stat()
         self.write_bundle(changed)
+        # Fast same-size rewrites can share a timestamp tick on the Docker filesystem.
+        os.utime(self.bundle_path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000))
         with self.assertRaises(engine.OperationUnavailable):
             self.fetch(offset=transport.CANDIDATE_BUNDLE_CHUNK_BYTES)
         self.assertFalse(self.controller._candidate_bundle_cache)
@@ -578,6 +699,26 @@ class CandidateBundleRpcTests(unittest.TestCase):
         git_dir.symlink_to(saved_git_dir, target_is_directory=True)
         with self.assertRaises(engine.OperationUnavailable):
             self.fetch()
+
+    def test_group_access_requires_configured_group_and_never_write_or_world_access(self):
+        for mode in (0o660, 0o644):
+            self.bundle_path.chmod(mode)
+            with self.assertRaises(engine.OperationUnavailable):
+                self.fetch()
+        self.bundle_path.chmod(0o640)
+        for mode in (0o770, 0o755):
+            self.candidates.chmod(mode)
+            with self.assertRaises(engine.OperationUnavailable):
+                self.fetch()
+        self.candidates.chmod(0o750)
+        with patch.object(self.controller, "_worker_gid", return_value=os.getgid() + 1):
+            with self.assertRaises(engine.OperationUnavailable):
+                self.fetch()  # Directory group mismatch.
+            self.candidates.chmod(0o700)
+            with self.assertRaises(engine.OperationUnavailable):
+                self.fetch()  # Bundle group mismatch, private legacy directory.
+        self.bundle_path.chmod(0o600)
+        self.assertEqual(self.fetch()["bundle_bytes"], len(self.bundle_bytes))
 
     def test_rejects_invalid_rpc_fields_and_disables_unpinned_capability(self):
         valid = self.request()

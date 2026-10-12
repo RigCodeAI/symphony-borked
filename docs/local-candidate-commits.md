@@ -59,6 +59,20 @@ before the output is emitted. `base_commit` is the bundle prerequisite, not a su
 for the repository's approved validation base. The bundle resides under the model's
 protected Git metadata. No model-selected snapshot path is accepted.
 
+After verifying the bundle, the trusted producer grants read access to its existing
+worker group: `0750` on `.git/factory-candidates` and `0640` on that bundle only.
+Both objects must retain the producer's UID/GID; the file must be regular with one
+hard link. Permission updates use no-follow file descriptors. The broker already
+belongs to `factory-worker` and retains its empty capability bounding set. Its reader
+checks the configured worker group, exact modes, ownership, no-follow paths, stable
+file identity, size and checksum after exact successful operation/termination checks.
+No group write or world access is granted. Workspace directories and private broker
+records keep their permissions. Legacy `0700`/`0600` bundles remain accepted when
+already readable; deployment does not automatically change old artifacts or run pins.
+This changes the pinned producer command and workstream definition. Deploy matching
+pins and regenerate through an authorized producer run; an old private bundle alone
+is not made readable by upgrading the broker.
+
 A consumer must bind the output to the pinned successful service check and its exact
 terminated worker operation, retrieve through an authorized bounded channel, verify
 bytes/checksum, and import into a controlled coordinator checkout of the prerequisite.
@@ -89,6 +103,12 @@ From the repository root, run the broker and transport regressions:
 ```bash
 python3 -m unittest factory.deploy.tests.test_candidate_bundle_rpc factory.deploy.tests.test_worker_operation factory.deploy.tests.test_worker_operation_transport
 ```
+
+The bundle RPC suite includes a Linux root regression that runs the real producer as
+a separate worker UID, then invokes broker dispatch with all effective, permitted and
+bounding capabilities dropped. It reproduces the old `EACCES`, proves the new read,
+and rejects bundle writes and unrelated private-file reads. It skips when Linux/root
+or the fixture setup capabilities are unavailable; such a skip is not verification.
 
 Live verification uses a dedicated disposable Rig clone with push disabled, the approved
 contained worker, an isolated journal outside the clone, real agent/check operations,

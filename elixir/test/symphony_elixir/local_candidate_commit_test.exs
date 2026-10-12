@@ -52,6 +52,8 @@ defmodule SymphonyElixir.LocalCandidateCommitTest do
     bundle = Path.join(c.workspace, result["candidate_bundle"])
     assert result["bundle_sha256"] == :crypto.hash(:sha256, File.read!(bundle)) |> Base.encode16(case: :lower)
     assert result["bundle_bytes"] == File.stat!(bundle).size
+    assert Bitwise.band(File.stat!(bundle).mode, 0o777) == 0o640
+    assert Bitwise.band(File.stat!(Path.dirname(bundle)).mode, 0o777) == 0o750
     assert git(c.workspace, ["bundle", "list-heads", bundle]) == head <> " HEAD"
     {_output, missing} = System.cmd("git", ["cat-file", "-e", head <> "^{commit}"], cd: receiver, stderr_to_stdout: true)
     assert missing != 0

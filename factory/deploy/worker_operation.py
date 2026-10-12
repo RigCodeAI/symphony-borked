@@ -1088,9 +1088,15 @@ class OperationController:
             self._check_open_directory(
                 candidates_fd,
                 owner_uid=self._worker_uid(),
-                exact_mode=0o700,
                 private=True,
             )
+            directory_info = os.fstat(candidates_fd)
+            directory_mode = stat.S_IMODE(directory_info.st_mode)
+            # Only the configured worker group may receive bundle read access.
+            # Retain private legacy artifacts for callers already able to read them.
+            if (directory_mode not in (0o700, 0o750)
+                    or (directory_mode == 0o750 and directory_info.st_gid != self._worker_gid())):
+                raise OperationUnavailable("candidate directory permissions are unsafe")
             filename = f"{input_sha256}.bundle"
             file_fd = os.open(
                 filename,
@@ -1100,7 +1106,8 @@ class OperationController:
             )
             info = os.fstat(file_fd)
             if (not stat.S_ISREG(info.st_mode) or info.st_uid != self._worker_uid()
-                    or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600
+                    or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) not in (0o600, 0o640)
+                    or (stat.S_IMODE(info.st_mode) == 0o640 and info.st_gid != self._worker_gid())
                     or not 1 <= info.st_size <= MAX_CANDIDATE_BUNDLE_BYTES):
                 raise OperationUnavailable("candidate bundle file is unsafe")
             by_name = os.stat(filename, dir_fd=candidates_fd, follow_symlinks=False)
@@ -2048,7 +2055,7 @@ class OperationController:
         if existing != self._review_owner_record(review_preparation):
             raise OperationUnavailable("review workspace ownership binding is unavailable")
 
-    def _review_worker_gid(self) -> int:
+    def _worker_gid(self) -> int:
         try:
             return grp.getgrnam(self.worker_group).gr_gid
         except KeyError as exc:
@@ -2062,7 +2069,7 @@ class OperationController:
         if not parent.exists() and not parent.is_symlink():
             try:
                 os.mkdir(parent, 0o710)
-                os.chown(parent, self.expected_owner_uid, self._review_worker_gid())
+                os.chown(parent, self.expected_owner_uid, self._worker_gid())
                 os.chmod(parent, 0o710)
                 self._sync_directory(root)
             except FileExistsError:
@@ -2074,7 +2081,7 @@ class OperationController:
         except OSError as exc:
             raise OperationUnavailable("review preparation directory is unavailable") from exc
         if (not stat.S_ISDIR(parent_info.st_mode) or parent_info.st_uid != self.expected_owner_uid
-                or parent_info.st_gid != self._review_worker_gid()
+                or parent_info.st_gid != self._worker_gid()
                 or stat.S_IMODE(parent_info.st_mode) != 0o710):
             raise OperationUnavailable("review preparation directory ownership is unsafe")
 
@@ -2095,7 +2102,7 @@ class OperationController:
         except OSError as exc:
             raise OperationUnavailable("review preparation leaf is unavailable") from exc
         if (not stat.S_ISDIR(leaf_info.st_mode) or leaf_info.st_uid != self.expected_owner_uid
-                or leaf_info.st_gid != self._review_worker_gid()
+                or leaf_info.st_gid != self._worker_gid()
                 or stat.S_IMODE(leaf_info.st_mode) != 0o770):
             raise OperationUnavailable("review preparation leaf ownership is unsafe")
         return True
@@ -2107,7 +2114,7 @@ class OperationController:
         if not self._assert_review_preparation_leaf(review_preparation, required=False):
             try:
                 os.mkdir(leaf, 0o770)
-                os.chown(leaf, self.expected_owner_uid, self._review_worker_gid())
+                os.chown(leaf, self.expected_owner_uid, self._worker_gid())
                 os.chmod(leaf, 0o770)
             except FileExistsError:
                 pass

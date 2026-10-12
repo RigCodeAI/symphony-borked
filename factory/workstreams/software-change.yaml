@@ -25,7 +25,7 @@ stages:
         - -I
         - -c
         - |
-          import hashlib, json, os, pathlib, re, subprocess, sys
+          import hashlib, json, os, pathlib, re, stat, subprocess, sys
           try:
               inputs = json.loads(os.environ["WORKSTREAM_INPUTS_JSON"])
               candidate = inputs["candidate"]
@@ -116,6 +116,15 @@ stages:
               git("bundle", "verify", str(bundle))
               assert git("bundle", "list-heads", str(bundle)) == head + " HEAD", "bundle head mismatch"
               data = bundle.read_bytes()
+              for path, mode, flags in ((bundle_dir, 0o750, os.O_DIRECTORY), (bundle, 0o640, 0)):
+                  fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | flags)
+                  try:
+                      info = os.fstat(fd)
+                      assert info.st_uid == os.getuid() and info.st_gid == os.getgid(), "bundle ownership mismatch"
+                      assert flags or (stat.S_ISREG(info.st_mode) and info.st_nlink == 1), "unsafe bundle file"
+                      os.fchmod(fd, mode)
+                  finally:
+                      os.close(fd)
               metadata = {
                   "candidate_commit": head,
                   "base_commit": base,

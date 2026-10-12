@@ -64,6 +64,11 @@ terminated worker operation, retrieve through an authorized bounded channel, ver
 bytes/checksum, and import into a controlled coordinator checkout of the prerequisite.
 Then it must verify the candidate head, branch and source before trusted validation.
 The coordinator's unchanged seed clone cannot stand in for the worker candidate.
+Candidate transfer reads the registered systemd identity from the completed operation's
+`external_process`; `worker` identifies the coordinator's local Elixir task. Legacy
+records may supply the remote identity in `worker` only when `external_process` is absent
+or nil. A present invalid identity blocks transfer, and exact attempt, stage, completion
+and fresh remote termination checks still apply.
 DEV-238 owns automated bundle retrieval and publication-side consumption; the producer
 alone does not prove automated transport, validation, archival or publication.
 

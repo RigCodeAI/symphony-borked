@@ -15,6 +15,7 @@ import sys
 import tempfile
 import threading
 import time
+import textwrap
 import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -30,6 +31,29 @@ RELEASE_SHA256 = "d" * 64
 MACHINE_ID = "a" * 32
 BOOT_ID = "1" * 32
 INVOCATION_ID = "b" * 32
+
+
+def load_shipped_local_commit_command() -> list[str]:
+    workstream_path = Path(__file__).resolve().parents[3] / "factory/workstreams/software-change.yaml"
+    source = workstream_path.read_text(encoding="utf-8")
+    local_commit = source.index("  - id: local-commit\n")
+    command_start = source.index("      command:\n", local_commit) + len("      command:\n")
+    command_end = source.index("      timeout_ms:", command_start)
+    command_lines = source[command_start:command_end].splitlines(keepends=True)
+    if command_lines[:4] != [
+        "        - /usr/bin/python3\n",
+        "        - -I\n",
+        "        - -c\n",
+        "        - |\n",
+    ]:
+        raise AssertionError("shipped local-commit command shape changed")
+    script = textwrap.dedent("".join(command_lines[4:]))
+    return ["/usr/bin/python3", "-I", "-c", script]
+
+
+def compact_utf8_command_sha256(command_argv: list[str]) -> str:
+    raw = json.dumps(command_argv, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
 
 
 class HeldWrapperCommandTest(unittest.TestCase):
@@ -404,6 +428,196 @@ class WorkerOperationTransportTests(unittest.TestCase):
         )
         self.assertNotEqual(result, 0)
         self.assertEqual(json.loads(output.getvalue()), {"error": "invalid_command"})
+
+    def test_prepare_request_rejects_nul_and_non_utf8_arguments(self):
+        request = {
+            "operation_id": "run-transport/prepare/1",
+            "argv": ["/usr/bin/env", "ARG=value"],
+            "workspace": "/srv/factory/workspace",
+        }
+        for argument in ("ARG=bad\x00value", "ARG=\ud800"):
+            with self.subTest(argument=repr(argument)), self.assertRaises(transport.ProtocolError):
+                transport.validate_prepare_request({**request, "argv": [request["argv"][0], argument]})
+
+    def test_forced_ssh_forwards_only_bounded_candidate_wrapper_shape(self):
+        command_argv = load_shipped_local_commit_command()
+        self.assertGreater(len(command_argv[3].encode("utf-8")), transport.MAX_ARGUMENT_BYTES)
+        inputs_json = json.dumps(
+            {"candidate": {"thread_id": "task-transport", "revision": "main"}},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        request = {
+            "operation_id": "run-transport/local-commit/1",
+            "argv": ["/usr/bin/env", f"WORKSTREAM_INPUTS_JSON={inputs_json}", *command_argv],
+            "workspace": "/srv/factory/contained-workspaces/run-transport",
+        }
+        envelope = {
+            "action": "prepare",
+            "request": request,
+            "expected_release": {"service_revision": REVISION, "release_sha256": RELEASE_SHA256},
+        }
+        encoded = transport.encode_ssh_command("rpc", envelope)
+
+        kind, forwarded = transport.parse_ssh_original_command(encoded)
+
+        self.assertEqual(kind, "rpc")
+        self.assertEqual(forwarded["request"], request)
+        with self.assertRaises(transport.ProtocolError):
+            transport.validate_rpc_request(envelope)
+
+        ordinary = json.loads(json.dumps(envelope))
+        ordinary["request"]["argv"] = ["/usr/bin/env", "ARG=" + "x" * 4093]
+        with self.assertRaises(transport.ProtocolError):
+            transport.parse_ssh_original_command(transport.encode_ssh_command("rpc", ordinary))
+
+        oversized = json.loads(json.dumps(envelope))
+        oversized_script_bytes = transport.MAX_CANDIDATE_PRODUCER_SCRIPT_BYTES + 1
+        oversized_script = command_argv[3] + "x" * (
+            oversized_script_bytes - len(command_argv[3].encode("utf-8"))
+        )
+        oversized["request"]["argv"][5] = oversized_script
+        with self.assertRaises(transport.ProtocolError):
+            transport.parse_ssh_original_command(transport.encode_ssh_command("rpc", oversized))
+
+    def test_root_socket_revalidates_candidate_producer_pin_before_manager_start(self):
+        command_argv = load_shipped_local_commit_command()
+        command_pin = compact_utf8_command_sha256(command_argv)
+        inputs_json = json.dumps(
+            {"candidate": {"thread_id": "task-transport", "revision": "main"}},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        candidate_argv = [
+            "/usr/bin/env",
+            f"WORKSTREAM_INPUTS_JSON={inputs_json}",
+            *command_argv,
+        ]
+
+        def dispatch(candidate_pin: str | None, argv: list[str]):
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                records = root / "records"
+                operation_root = root / "operations"
+                workspace_root = root / "workspaces"
+                worker_home = root / "worker-home"
+                broker_directory = root / "broker"
+                for path, mode in (
+                    (records, 0o700),
+                    (operation_root, 0o755),
+                    (workspace_root, 0o755),
+                    (worker_home, 0o700),
+                    (broker_directory, 0o750),
+                ):
+                    path.mkdir(mode=mode)
+                    path.chmod(mode)
+                workspace = workspace_root / "candidate"
+                workspace.mkdir(mode=0o755)
+                machine_file = root / "machine-id"
+                machine_file.write_text(MACHINE_ID + "\n", encoding="ascii")
+                boot_file = root / "boot-id"
+                boot_file.write_text(BOOT_ID + "\n", encoding="ascii")
+
+                class StartManager:
+                    start_timeout = 0.5
+
+                    def __init__(self):
+                        self.starts = []
+                        self.unit = None
+                        self.properties = None
+
+                    def start(self, unit, _wrapper, _descriptor_path, properties):
+                        self.starts.append(unit)
+                        self.unit = unit
+                        self.properties = dict(properties)
+
+                    def inspect(self, unit):
+                        if unit != self.unit:
+                            return None
+                        return engine.UnitSnapshot(
+                            load_state="loaded",
+                            invocation_id=INVOCATION_ID,
+                            control_group=f"/system.slice/{unit}",
+                            active_state="active",
+                            sub_state="running",
+                            result="",
+                            exec_main_code="none",
+                            exec_main_status=0,
+                            main_pid=4242,
+                            user="factory-worker",
+                            group="factory-worker",
+                            syslog_identifier=self.properties["SyslogIdentifier"],
+                            supplementary_groups="",
+                        )
+
+                    def cgroup_populated(self, _control_group):
+                        return 1
+
+                manager = StartManager()
+                controller = engine.OperationController(
+                    manager,
+                    records_dir=str(records),
+                    operation_dir=str(operation_root),
+                    workspace_root=str(workspace_root),
+                    wrapper_path="/bin/true",
+                    worker_home=str(worker_home),
+                    machine_id_path=str(machine_file),
+                    boot_id_path=str(boot_file),
+                    expected_machine_id=MACHINE_ID,
+                    service_revision=REVISION,
+                    candidate_producer_command_sha256=candidate_pin,
+                    worker_user="factory-worker",
+                    worker_group="factory-worker",
+                    expected_owner_uid=os.getuid(),
+                    operation_timeout=0.5,
+                )
+                broker = self.make_broker(broker_directory, controller)
+                thread = self.start_broker(broker)
+                account = SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid(), pw_dir=str(worker_home))
+                group = SimpleNamespace(gr_gid=os.getgid())
+                request = {
+                    "operation_id": "run-transport/local-commit/1",
+                    "argv": argv,
+                    "workspace": str(workspace),
+                }
+                envelope = {
+                    "action": "prepare",
+                    "request": request,
+                    "expected_release": {"service_revision": REVISION, "release_sha256": RELEASE_SHA256},
+                }
+                output = io.BytesIO()
+                try:
+                    with patch("factory.deploy.worker_operation.pwd.getpwnam", return_value=account), \
+                            patch("factory.deploy.worker_operation.grp.getgrnam", return_value=group):
+                        status = transport.ssh_client_main(
+                            environment={"SSH_ORIGINAL_COMMAND": transport.encode_ssh_command("rpc", envelope)},
+                            output_stream=output,
+                            socket_path=broker.socket_path,
+                            expected_socket_uid=os.getuid(),
+                            expected_socket_gid=os.getgid(),
+                            expected_directory_uid=os.getuid(),
+                            expected_directory_gid=os.getgid(),
+                        )
+                    return status, json.loads(output.getvalue()), manager.starts
+                finally:
+                    self.stop_broker(broker, thread)
+
+        valid_status, valid_response, valid_starts = dispatch(command_pin, candidate_argv)
+        self.assertEqual(valid_status, 0)
+        self.assertIn("ok", valid_response)
+        self.assertEqual(len(valid_starts), 1)
+
+        altered_argv = list(candidate_argv)
+        altered_argv[5] += " # altered"
+        altered_status, altered_response, altered_starts = dispatch(command_pin, altered_argv)
+        self.assertNotEqual(altered_status, 0)
+        self.assertEqual(altered_response, {"error": "invalid_request"})
+        self.assertEqual(altered_starts, [])
+
+        unpinned_status, unpinned_response, unpinned_starts = dispatch(None, candidate_argv)
+        self.assertNotEqual(unpinned_status, 0)
+        self.assertEqual(unpinned_response, {"error": "invalid_request"})
+        self.assertEqual(unpinned_starts, [])
 
     def test_review_preparation_rpc_has_bounded_large_command_and_bound_operation_ids(self):
         request = {

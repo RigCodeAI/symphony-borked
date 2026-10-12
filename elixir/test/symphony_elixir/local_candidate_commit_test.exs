@@ -70,6 +70,36 @@ defmodule SymphonyElixir.LocalCandidateCommitTest do
     assert git(c.workspace, ["rev-parse", "HEAD"]) == head
   end
 
+  test "remote runner grants the larger bound only to its saved producer stage and digest", c do
+    stage = c.definition.stages["local-commit"]
+    pin = :crypto.hash(:sha256, Jason.encode!(stage.gate.command)) |> Base.encode16(case: :lower)
+
+    control = %{
+      "host" => "worker-a",
+      "machine_id" => String.duplicate("a", 32),
+      "service_revision" => String.duplicate("a", 40),
+      "release_sha256" => String.duplicate("b", 64),
+      "argv" => ["/opt/rig/bin/codex", "app-server"]
+    }
+
+    execution = Map.merge(c.run.execution, %{candidate_producer_stage: stage.id, candidate_producer_command_sha256: pin})
+    run = %{c.run | id: "local", execution: execution}
+    opts = [workspace_root: c.root, worker_control: control]
+
+    # No callback: stop after both command and request validation, before any RPC.
+    result = WorkstreamRunner.execute_stage(stage, c.definition, run, opts)
+    assert {:error, :worker_registration_callback_required} = result
+
+    for {check, execution} <- [
+          {%{stage | id: "ordinary-check"}, execution},
+          {stage, Map.delete(execution, :candidate_producer_command_sha256)},
+          {stage, Map.put(execution, :candidate_producer_command_sha256, String.duplicate("a", 64))}
+        ] do
+      assert {:error, :invalid_worker_check_command} =
+               WorkstreamRunner.execute_stage(check, c.definition, %{run | execution: execution}, opts)
+    end
+  end
+
   test "an authorized repair commits on its exact parent and replays the same marker", c do
     parent = git(c.workspace, ["rev-parse", "HEAD"])
     context = candidate_context(parent, parent)

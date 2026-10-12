@@ -13,6 +13,11 @@ For the file-defined local agent → executable gate, use
 definitions and runs synchronously without starting tracker polling. The
 existing `WORKFLOW.md` service remains compatible.
 
+The contained candidate commit check permits an inline script up to 8 KiB only
+when its command matches the saved service producer digest and the broker's
+protected digest. Ordinary arguments retain their 4 KiB limit. See
+[local candidate commits](../docs/local-candidate-commits.md) for tests and rollout.
+
 Durable stopped runs retain their attempt and operation identities. Trusted termination
 confirmation cancels both records together; restart repairs older confirmed stops without
 repeating external cancellation. Unknown termination continues to reserve capacity. See

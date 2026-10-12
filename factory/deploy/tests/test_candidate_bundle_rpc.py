@@ -8,6 +8,7 @@ import pwd
 from pathlib import Path
 import shutil
 import tempfile
+import textwrap
 import unittest
 from unittest.mock import patch
 
@@ -25,6 +26,30 @@ RELEASE_SHA256 = "e" * 64
 def digest_json(value: object) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    ).hexdigest()
+
+
+def load_shipped_local_commit_command() -> list[str]:
+    workstream_path = Path(__file__).resolve().parents[3] / "factory/workstreams/software-change.yaml"
+    source = workstream_path.read_text(encoding="utf-8")
+    local_commit = source.index("  - id: local-commit\n")
+    command_start = source.index("      command:\n", local_commit) + len("      command:\n")
+    command_end = source.index("      timeout_ms:", command_start)
+    command_lines = source[command_start:command_end].splitlines(keepends=True)
+    if command_lines[:4] != [
+        "        - /usr/bin/python3\n",
+        "        - -I\n",
+        "        - -c\n",
+        "        - |\n",
+    ]:
+        raise AssertionError("shipped local-commit command shape changed")
+    script = textwrap.dedent("".join(command_lines[4:]))
+    return ["/usr/bin/python3", "-I", "-c", script]
+
+
+def compact_utf8_command_sha256(command_argv: list[str]) -> str:
+    return hashlib.sha256(
+        json.dumps(command_argv, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     ).hexdigest()
 
 
@@ -96,6 +121,80 @@ class CandidateBundleRpcTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_root_request_accepts_the_shipped_pinned_local_commit_command(self):
+        command_argv = load_shipped_local_commit_command()
+        script_size = len(command_argv[3].encode("utf-8"))
+        self.assertGreater(script_size, 4096)
+        self.assertLessEqual(script_size, engine.MAX_CANDIDATE_PRODUCER_SCRIPT_BYTES)
+        self.controller.candidate_producer_command_sha256 = compact_utf8_command_sha256(command_argv)
+        inputs_json = json.dumps({"candidate": self.candidate}, sort_keys=True, separators=(",", ":"))
+        request = {
+            "operation_id": "run-100/local-commit/1",
+            "argv": ["/usr/bin/env", f"WORKSTREAM_INPUTS_JSON={inputs_json}", *command_argv],
+            "workspace": str(self.workspace),
+        }
+
+        validated = self.controller._validate_request(request)
+
+        self.assertEqual(validated["argv"][5], command_argv[3])
+
+    def test_large_script_exception_requires_the_exact_root_pinned_candidate_command(self):
+        command_argv = load_shipped_local_commit_command()
+        self.controller.candidate_producer_command_sha256 = compact_utf8_command_sha256(command_argv)
+        inputs_json = json.dumps({"candidate": self.candidate}, sort_keys=True, separators=(",", ":"))
+        argv = ["/usr/bin/env", f"WORKSTREAM_INPUTS_JSON={inputs_json}", *command_argv]
+        request = {
+            "operation_id": "run-100/local-commit/1",
+            "argv": argv,
+            "workspace": str(self.workspace),
+        }
+
+        altered = list(argv)
+        altered[5] += " # changed"
+        with self.subTest(reason="altered command"):
+            with self.assertRaises(engine.OperationValidationError):
+                self.controller._validate_request({**request, "argv": altered})
+
+        self.controller.candidate_producer_command_sha256 = ""
+        with self.subTest(reason="candidate command is unpinned"):
+            with self.assertRaises(engine.OperationValidationError):
+                self.controller._validate_request(request)
+
+        ordinary_argv = ["/usr/bin/env", "ARG=" + "x" * 4093]
+        with self.subTest(reason="ordinary 4097-byte argument"):
+            with self.assertRaises(engine.OperationValidationError):
+                self.controller._validate_request({**request, "argv": ordinary_argv})
+
+    def test_pinned_candidate_script_limit_is_8192_utf8_bytes(self):
+        command_argv = load_shipped_local_commit_command()
+        script = command_argv[3]
+        inputs_json = json.dumps({"candidate": self.candidate}, sort_keys=True, separators=(",", ":"))
+
+        at_limit_padding_bytes = engine.MAX_CANDIDATE_PRODUCER_SCRIPT_BYTES - len(script.encode("utf-8"))
+        at_limit = script + "é" * (at_limit_padding_bytes // 2) + "x" * (at_limit_padding_bytes % 2)
+        self.assertEqual(len(at_limit.encode("utf-8")), engine.MAX_CANDIDATE_PRODUCER_SCRIPT_BYTES)
+        at_limit_command = [*command_argv[:3], at_limit]
+        self.controller.candidate_producer_command_sha256 = compact_utf8_command_sha256(at_limit_command)
+        at_limit_request = {
+            "operation_id": "run-100/local-commit/1",
+            "argv": ["/usr/bin/env", f"WORKSTREAM_INPUTS_JSON={inputs_json}", *at_limit_command],
+            "workspace": str(self.workspace),
+        }
+        self.controller._validate_request(at_limit_request)
+
+        over_limit_padding_bytes = engine.MAX_CANDIDATE_PRODUCER_SCRIPT_BYTES + 1 - len(script.encode("utf-8"))
+        over_limit = script + "é" * (over_limit_padding_bytes // 2) + "x" * (over_limit_padding_bytes % 2)
+        self.assertEqual(len(over_limit.encode("utf-8")), engine.MAX_CANDIDATE_PRODUCER_SCRIPT_BYTES + 1)
+        over_limit_command = [*command_argv[:3], over_limit]
+        self.controller.candidate_producer_command_sha256 = compact_utf8_command_sha256(over_limit_command)
+        over_limit_request = {
+            "operation_id": "run-100/local-commit/1",
+            "argv": ["/usr/bin/env", f"WORKSTREAM_INPUTS_JSON={inputs_json}", *over_limit_command],
+            "workspace": str(self.workspace),
+        }
+        with self.assertRaises(engine.OperationValidationError):
+            self.controller._validate_request(over_limit_request)
 
     def write_bundle(self, data: bytes) -> None:
         self.bundle_path.write_bytes(data)

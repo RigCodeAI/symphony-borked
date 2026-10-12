@@ -21,6 +21,15 @@ system executables and a clean Git environment. Hooks, signing, prompts and netw
 protocols are disabled. Linked/shared metadata, metadata symlinks, detached HEAD,
 missing candidate input and unsupported Git configuration block the gate.
 
+Remote check and launch validation allow this exact service-pinned producer's
+inline script up to 8 KiB. The runner supplies the saved producer command digest
+only for its pinned stage; the root worker broker independently checks its
+protected digest. Ordinary arguments remain limited to 4 KiB. This allowance
+does not change the producer body, input identity or repair ancestry checks.
+The SSH parser can forward the bounded fixed wrapper envelope; the root socket
+parser requires the protected producer digest before dispatch, and the operation
+controller verifies it again before preparation. Forwarding does not authorize execution.
+
 The service stages nonignored changes and creates one commit with a fixed author and
 `Factory-Candidate` marker derived from the saved implementation result. Repeating
 the same check on a clean checkout succeeds only with that marker; a clean base or
@@ -67,6 +76,13 @@ import into a receiver that did not already contain the candidate commit. Run fr
 
 ```bash
 mise exec -- mix test test/symphony_elixir/local_candidate_commit_test.exs test/symphony_elixir/software_change_test.exs
+mise exec -- mix test test/symphony_elixir/worker_operation_test.exs
+```
+
+From the repository root, run the broker and transport regressions:
+
+```bash
+python3 -m unittest factory.deploy.tests.test_candidate_bundle_rpc factory.deploy.tests.test_worker_operation factory.deploy.tests.test_worker_operation_transport
 ```
 
 Live verification uses a dedicated disposable Rig clone with push disabled, the approved
@@ -77,3 +93,8 @@ recorded separately; this document does not assert deployment.
 New definitions apply only to new runs. Old questions, waits, attempts, stop tombstones
 and uncommitted changes retain their original pins and history. Do not repin an old run
 or answer a stale question to force it through this new pipeline.
+
+The command-bound fix changes the executor fingerprint. Deploy a matched coordinator
+and broker release with the existing producer digest, then use an explicitly supported
+new-run or recovery path. A previously blocked run must keep its original pins and
+failure receipt. Local remote-validation tests do not qualify live recovery.

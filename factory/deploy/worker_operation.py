@@ -68,6 +68,7 @@ _REVIEW_ORDINAL_RE = re.compile(r"^[1-9][0-9]{0,8}$")
 MAX_CANDIDATE_BUNDLE_BYTES = 64 * 1024 * 1024
 CANDIDATE_BUNDLE_CHUNK_BYTES = 64 * 1024
 MAX_CANDIDATE_BUNDLE_CACHE_ENTRIES = 16
+MAX_CANDIDATE_PRODUCER_SCRIPT_BYTES = 8192
 MAX_REVIEW_PREPARATION_SCRIPT_BYTES = 16 * 1024
 _REVIEW_OPERATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*$")
 _REVIEW_IDENTITY_KEYS = frozenset({
@@ -893,13 +894,24 @@ class OperationController:
             and _HEX_64_RE.fullmatch(self.candidate_producer_command_sha256)
         )
 
-    def _trusted_candidate_producer_argv(self, argv: Any, input_sha256: str) -> bool:
-        """Match the root-configured inline producer and bind it to these inputs."""
-        if (not isinstance(argv, list) or len(argv) != 6
+    def _candidate_producer_command_is_pinned(self, argv: Any) -> bool:
+        """Match the exact root-pinned local candidate producer wrapper."""
+        if (not self.candidate_bundle_available or not isinstance(argv, list) or len(argv) != 6
                 or argv[0] != "/usr/bin/env"
                 or not isinstance(argv[1], str)
                 or not argv[1].startswith("WORKSTREAM_INPUTS_JSON=")
-                or not self.candidate_bundle_available):
+                or argv[2:5] != ["/usr/bin/python3", "-I", "-c"]
+                or not isinstance(argv[5], str)
+                or "\0" in argv[5]):
+            return False
+        try:
+            return _sha256_command(argv[2:]) == self.candidate_producer_command_sha256
+        except (TypeError, ValueError, UnicodeError, RecursionError):
+            return False
+
+    def _trusted_candidate_producer_argv(self, argv: Any, input_sha256: str) -> bool:
+        """Match the root-configured inline producer and bind it to these inputs."""
+        if not self._candidate_producer_command_is_pinned(argv):
             return False
         try:
             inputs = json.loads(
@@ -932,15 +944,6 @@ class OperationController:
                     "candidate": candidate,
                     "candidate_context": candidate_context,
                 }
-            command_argv = argv[2:]
-            command_digest = hashlib.sha256(
-                json.dumps(
-                    command_argv,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    ensure_ascii=False,
-                ).encode("utf-8")
-            ).hexdigest()
             input_digest = hashlib.sha256(
                 json.dumps(
                     input_value,
@@ -951,11 +954,7 @@ class OperationController:
             ).hexdigest()
         except (KeyError, TypeError, ValueError, UnicodeError, RecursionError):
             return False
-        return (
-            command_argv[:3] == ["/usr/bin/python3", "-I", "-c"]
-            and command_digest == self.candidate_producer_command_sha256
-            and input_digest == input_sha256
-        )
+        return input_digest == input_sha256
 
     def _read_operation_manifest(
         self,
@@ -1601,6 +1600,7 @@ class OperationController:
         argv_value = request["argv"]
         if not isinstance(argv_value, list) or not argv_value or len(argv_value) > 128:
             raise OperationValidationError("argv must be a nonempty list with at most 128 items")
+        command_is_pinned_candidate = self._candidate_producer_command_is_pinned(argv_value)
         command_is_pinned_review = self._review_command_is_pinned(argv_value)
         if command_is_pinned_review and not allow_protected_review:
             raise OperationValidationError("review preparation requires its protected RPC action")
@@ -1620,6 +1620,8 @@ class OperationController:
             maximum_argument_size = (
                 MAX_REVIEW_PREPARATION_SCRIPT_BYTES
                 if review_command_pinned and index == 5
+                else MAX_CANDIDATE_PRODUCER_SCRIPT_BYTES
+                if command_is_pinned_candidate and index == 5
                 else 4096
             )
             if encoded_size > maximum_argument_size or total > 32768:

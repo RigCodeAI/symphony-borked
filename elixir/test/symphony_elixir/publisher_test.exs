@@ -1,5 +1,5 @@
 defmodule SymphonyElixir.PublisherTest do
-  use ExUnit.Case, async: false
+  use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.{Evidence, Publisher, Validation, ValidationPolicy, WorkstreamRun, WorkstreamStore}
 
@@ -439,6 +439,269 @@ defmodule SymphonyElixir.PublisherTest do
 
   defp context_bytes(value), do: value |> Jason.encode!() |> Jason.decode!() |> :erlang.term_to_binary([:deterministic])
   defp context_digest(value), do: value |> context_bytes() |> digest()
+
+  test "archive arrival wakes the real coordinator without restart or manual reconciliation" do
+    c = fixture(verified_upload: false)
+    runtime = publication_runtime(c)
+    initial = await_run(runtime, &(&1.status == :reconciling))
+    first_id = initial.current_attempt_id
+    assert %{pushes: 0, creates: 0, updates: 0} = Agent.get(runtime.remote, & &1)
+
+    {:ok, [view]} = Evidence.task(Evidence.task_key(c.run.task_id), c.evidence_server)
+    write_upload_receipt(Path.join(c.root, "evidence"), view)
+    receipt_path = Path.join([c.root, "evidence", "receipts", view.revision <> ".json"])
+    receipt = receipt_path |> File.read!() |> Jason.decode!()
+    File.write!(receipt_path, Jason.encode!(%{receipt | "manifest_sha256" => String.duplicate("0", 64)}))
+    pending = await_run(runtime, &(&1.status == :reconciling and &1.transport_retries >= 1))
+    assert %{pushes: 0, creates: 0, updates: 0} = Agent.get(runtime.remote, & &1)
+    assert pending.operations[pending.current_attempt_id].reconciliation == ":validation_not_permanently_archived"
+
+    write_upload_receipt(Path.join(c.root, "evidence"), view)
+    complete = await_run(runtime, &(&1.status == :complete))
+    assert complete.id == initial.id
+    assert complete.workspace == initial.workspace
+    assert complete.branch == initial.branch
+    assert complete.policy == initial.policy
+    assert complete.definitions == initial.definitions
+    assert complete.artifacts["task"] == initial.artifacts["task"]
+    assert hd(complete.attempts) == c.validation_attempt
+    assert %{pushes: 1, creates: 1, updates: 0, branch_sha: sha} = Agent.get(runtime.remote, & &1)
+    assert sha == c.candidate_sha
+    assert Enum.all?(complete.operations, fn {_, op} -> op.side_effect_id == first_id end)
+    intent = complete.operations[List.last(complete.attempts).id].publication_intent
+    assert intent.candidate_sha == c.candidate_sha
+    assert intent.branch == Publisher.branch(initial)
+    assert intent.validation_attempt_id == c.validation_attempt.id
+  end
+
+  test "a native stop during archive wait prevents retry and remains stopped after restart" do
+    c = fixture(verified_upload: false)
+    runtime = publication_runtime(c, publication_archive_retry_delay_ms: 200)
+    waiting = await_run(runtime, &(&1.status == :reconciling))
+
+    # Model an already persisted native stop while the native adapter is busy.
+    # The timer must go through the real owner stop/cancellation path.
+    :sys.replace_state(runtime.coordinator, fn state ->
+      %{state | linear: %{job: :busy, tasks: %{c.run.task_id => %{run_id: c.run.id, status: :stopped}}}}
+    end)
+
+    stopped = await_run(runtime, &(&1.status == :stopped))
+    assert stopped.transport_retries == 0
+    assert stopped.current_attempt_id == waiting.current_attempt_id
+    {:ok, [view]} = Evidence.task(Evidence.task_key(c.run.task_id), c.evidence_server)
+    write_upload_receipt(Path.join(c.root, "evidence"), view)
+    send(runtime.coordinator, {:publication_archive_wait, waiting.id, waiting.current_attempt_id, 0})
+    assert {:ok, %{status: :stopped}} = Orchestrator.workstream_state(runtime.coordinator, c.run.id)
+    restart_publication_runtime(runtime)
+    assert {:ok, %{status: :stopped, transport_retries: 0}} = Orchestrator.workstream_state(runtime.coordinator, c.run.id)
+    assert %{pushes: 0, creates: 0, updates: 0} = Agent.get(runtime.remote, & &1)
+  end
+
+  test "stale attempt, wait count and duplicate wake-ups cannot advance the current operation" do
+    c = fixture(verified_upload: false)
+    runtime = publication_runtime(c, publication_archive_retry_delay_ms: 500)
+    first = await_run(runtime, &(&1.status == :reconciling))
+    current = await_run(runtime, &(&1.status == :reconciling and &1.transport_retries == 1))
+    assert first.current_attempt_id != current.current_attempt_id
+
+    for _ <- 1..3 do
+      send(runtime.coordinator, {:publication_archive_wait, current.id, first.current_attempt_id, 1})
+      send(runtime.coordinator, {:publication_archive_wait, current.id, current.current_attempt_id, 0})
+      send(runtime.coordinator, {:publication_archive_wait, "unrelated", current.current_attempt_id, 1})
+    end
+
+    assert {:ok, ^current} = Orchestrator.workstream_state(runtime.coordinator, current.id)
+    assert %{pushes: 0, creates: 0, updates: 0} = Agent.get(runtime.remote, & &1)
+  end
+
+  test "archive wake-up reattaches a still-live original worker before replacement" do
+    c = fixture(verified_upload: false)
+    parent = self()
+
+    executor = fn stage, _definition, run, opts ->
+      result = Publisher.publish(run, stage, opts)
+
+      if run.transport_retries == 0 do
+        coordinator = :persistent_term.get({__MODULE__, :runtime_coordinator})
+        send(coordinator, {:workstream_result, run.id, run.current_attempt_id, self(), result})
+        send(parent, {:original_publisher, self()})
+
+        receive do
+          :release_receipt -> result
+        end
+      else
+        result
+      end
+    end
+
+    runtime = publication_runtime(c, stage_executor: executor, auto_advance: false)
+    :persistent_term.put({__MODULE__, :runtime_coordinator}, Process.whereis(runtime.coordinator))
+    on_exit(fn -> :persistent_term.erase({__MODULE__, :runtime_coordinator}) end)
+    :sys.replace_state(runtime.coordinator, fn state -> put_in(state.workstreams.opts[:auto_advance], true) end)
+    send(runtime.coordinator, :advance_workstreams)
+    assert_receive {:original_publisher, worker}, 2_000
+
+    waiting =
+      await_run(runtime, fn run ->
+        run.status == :reconciling and Map.get(run.operations[run.current_attempt_id], :archive_wait_polls, 0) >= 2
+      end)
+
+    assert Process.alive?(worker)
+    assert waiting.transport_retries == 0
+    assert length(waiting.attempts) == 2
+    assert Task.Supervisor.children(runtime.tasks) == [worker]
+
+    {:ok, [view]} = Evidence.task(Evidence.task_key(c.run.task_id), c.evidence_server)
+    write_upload_receipt(Path.join(c.root, "evidence"), view)
+    send(worker, :release_receipt)
+    complete = await_run(runtime, &(&1.status == :complete))
+    assert complete.transport_retries == 1
+    assert %{pushes: 1, creates: 1} = Agent.get(runtime.remote, & &1)
+  end
+
+  test "coordinator restart restores a pending archive wake-up without resetting its count" do
+    c = fixture(verified_upload: false)
+    runtime = publication_runtime(c, publication_archive_retry_delay_ms: 200)
+    pending = await_run(runtime, &(&1.status == :reconciling and &1.transport_retries == 1))
+    restart_publication_runtime(runtime)
+    {:ok, [view]} = Evidence.task(Evidence.task_key(c.run.task_id), c.evidence_server)
+    write_upload_receipt(Path.join(c.root, "evidence"), view)
+    complete = await_run(runtime, &(&1.status == :complete))
+    assert complete.transport_retries >= 2
+    side_effect_id = pending.operations[pending.current_attempt_id].side_effect_id
+    assert complete.operations[pending.current_attempt_id].side_effect_id == side_effect_id
+    assert Enum.sum(Enum.map(complete.operations, fn {_, operation} -> Map.get(operation, :archive_wait_polls, 0) end)) >= 2
+    assert %{pushes: 1, creates: 1} = Agent.get(runtime.remote, & &1)
+  end
+
+  test "archive polling stops at its durable bound, including after coordinator restart" do
+    c = fixture(verified_upload: false)
+    ready = %{c.run | status: :ready} |> WorkstreamRun.start_stage()
+    run = WorkstreamRun.uncertain(ready, :validation_not_permanently_archived)
+    run = put_in(run.operations[run.current_attempt_id][:archive_wait_polls], 29)
+    runtime = publication_runtime(%{c | run: run}, initial_run: run)
+    exhausted = await_run(runtime, &(&1.status == :reconciling and &1.transport_retries == 1))
+    event_id = exhausted.current_attempt_id <> "/archive-wait-exhausted"
+    await_value(fn -> match?({:ok, _}, WorkstreamStore.event(:sys.get_state(runtime.coordinator).workstreams.store, event_id)) end)
+    restart_publication_runtime(runtime)
+    assert {:ok, ^exhausted} = Orchestrator.workstream_state(runtime.coordinator, run.id)
+    send(runtime.coordinator, {:publication_archive_wait, run.id, exhausted.current_attempt_id, 30})
+    assert {:ok, ^exhausted} = Orchestrator.workstream_state(runtime.coordinator, run.id)
+    assert %{pushes: 0, creates: 0, updates: 0} = Agent.get(runtime.remote, & &1)
+  end
+
+  test "archive messages do not retry other uncertain publication outcomes" do
+    c = fixture(verified_upload: false)
+    executor = fn _stage, _definition, _run, _opts -> {:uncertain, :publication_outcome_unknown} end
+    runtime = publication_runtime(c, stage_executor: executor)
+    waiting = await_run(runtime, &(&1.status == :reconciling))
+    send(runtime.coordinator, {:publication_archive_wait, waiting.id, waiting.current_attempt_id, 0})
+    assert {:ok, ^waiting} = Orchestrator.workstream_state(runtime.coordinator, waiting.id)
+    assert %{pushes: 0, creates: 0} = Agent.get(runtime.remote, & &1)
+  end
+
+  test "changed service policy blocks an archive wake-up before another publisher starts" do
+    c = fixture(verified_upload: false)
+    runtime = publication_runtime(c, publication_archive_retry_delay_ms: 200)
+    waiting = await_run(runtime, &(&1.status == :reconciling))
+
+    :sys.replace_state(runtime.coordinator, fn state ->
+      put_in(state.workstreams.runs[waiting.id].policy.executor_sha256, String.duplicate("0", 64))
+    end)
+
+    blocked = await_run(runtime, &(&1.status == :policy_blocked))
+    assert blocked.transport_retries == 0
+    assert blocked.current_attempt_id == waiting.current_attempt_id
+    assert %{pushes: 0, creates: 0} = Agent.get(runtime.remote, & &1)
+  end
+
+  test "capture holds defer archive wake-up without consuming the durable budget" do
+    c = fixture(verified_upload: false)
+    runtime = publication_runtime(c, publication_archive_retry_delay_ms: 100)
+    waiting = await_run(runtime, &(&1.status == :reconciling))
+    :sys.replace_state(runtime.coordinator, fn state -> put_in(state.workstreams.capture, %{id: "test-hold"}) end)
+    send(runtime.coordinator, {:publication_archive_wait, waiting.id, waiting.current_attempt_id, 0})
+    assert {:ok, ^waiting} = Orchestrator.workstream_state(runtime.coordinator, waiting.id)
+    {:ok, [view]} = Evidence.task(Evidence.task_key(c.run.task_id), c.evidence_server)
+    write_upload_receipt(Path.join(c.root, "evidence"), view)
+    :sys.replace_state(runtime.coordinator, fn state -> put_in(state.workstreams.capture, nil) end)
+    assert await_run(runtime, &(&1.status == :complete)).transport_retries == 1
+    assert %{pushes: 1, creates: 1} = Agent.get(runtime.remote, & &1)
+  end
+
+  defp publication_runtime(c, extra \\ []) do
+    remote = start_remote()
+    :persistent_term.put({__MODULE__, :runtime_remote}, remote)
+
+    on_exit(fn ->
+      :persistent_term.erase({__MODULE__, :runtime_remote})
+      if Process.alive?(remote), do: Agent.stop(remote)
+    end)
+
+    db = Path.join(c.root, "runtime.sqlite")
+    run = Keyword.get(extra, :initial_run, %{c.run | status: :ready, phase: :queued})
+    with_store(db, fn store -> :ok = WorkstreamStore.commit(store, run, "seed", %{kind: :test_fixture}) end)
+    suffix = System.unique_integer([:positive])
+    coordinator = Module.concat(__MODULE__, "Coordinator#{suffix}")
+    tasks = Module.concat(__MODULE__, "Tasks#{suffix}")
+    executor = fn stage, _definition, run, opts -> Publisher.publish(run, stage, opts) end
+
+    opts =
+      Keyword.merge(
+        [
+          name: Module.concat(__MODULE__, "Runtime#{suffix}"),
+          orchestrator_name: coordinator,
+          task_supervisor_name: tasks,
+          workstream_store_path: db,
+          stage_executor: executor,
+          publication_archive_retry_delay_ms: 100
+        ],
+        extra
+      )
+
+    start_supervised!({SymphonyElixir.AgentRuntimeSupervisor, opts})
+    %{coordinator: coordinator, tasks: tasks, remote: remote, id: run.id}
+  end
+
+  defp await_run(runtime, predicate) do
+    await_value(fn ->
+      {:ok, run} = Orchestrator.workstream_state(runtime.coordinator, runtime.id)
+      if predicate.(run), do: run
+    end)
+  end
+
+  defp await_value(fun, tries \\ 500)
+  defp await_value(_fun, 0), do: flunk("publication state did not converge")
+
+  defp await_value(fun, tries) do
+    case fun.() do
+      value when value in [nil, false] ->
+        Process.sleep(10)
+        await_value(fun, tries - 1)
+
+      value ->
+        value
+    end
+  end
+
+  defp restart_publication_runtime(runtime) do
+    old = Process.whereis(runtime.coordinator)
+    ref = Process.monitor(old)
+    Process.exit(old, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^old, :killed}
+
+    await_value(fn ->
+      pid = Process.whereis(runtime.coordinator)
+
+      if is_pid(pid) and pid != old do
+        try do
+          match?({:ok, _}, Orchestrator.workstream_state(pid, runtime.id))
+        catch
+          :exit, _ -> false
+        end
+      end
+    end)
+  end
 
   defp fixture(opts \\ []) do
     root = Path.join(System.tmp_dir!(), "publisher-contract-#{System.unique_integer([:positive])}")
@@ -904,7 +1167,7 @@ defmodule SymphonyElixir.PublisherTest.Transport do
   end
 
   defp state do
-    agent = Process.get(:publisher_test_remote)
+    agent = Process.get(:publisher_test_remote) || :persistent_term.get({SymphonyElixir.PublisherTest, :runtime_remote}, nil)
     Map.put(Agent.get(agent, & &1), :agent, agent)
   end
 
@@ -929,7 +1192,7 @@ defmodule SymphonyElixir.PublisherTest.Transport do
   end
 
   defp increment(key) do
-    agent = Process.get(:publisher_test_remote)
+    agent = Process.get(:publisher_test_remote) || :persistent_term.get({SymphonyElixir.PublisherTest, :runtime_remote}, nil)
     Agent.update(agent, &Map.update!(&1, key, fn value -> value + 1 end))
   end
 end

@@ -25,6 +25,8 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.Linear.Coordinator, as: LinearCoordinator
 
+  @publication_archive_wait_limit 30
+  @publication_archive_retry_delay_ms 10_000
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
   # Slightly above the dashboard render interval so "checking now…" can render.
@@ -214,6 +216,40 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info({ref, {:merged_cleanup, token, result}}, state) when is_reference(ref),
     do: {:noreply, accept_merged_cleanup(state, ref, token, result)}
+
+  def handle_info({:publication_archive_wait, run_id, attempt_id, polls} = message, state) do
+    run = durable_run(state, run_id)
+
+    cond do
+      not current_archive_wait?(run, attempt_id, polls) ->
+        {:noreply, state}
+
+      capture_held?(state) ->
+        send_archive_wait(state, message)
+        {:noreply, state}
+
+      linear_stopped?(state, run) ->
+        {:noreply, stop_linear_workstream(state, run)}
+
+      not WorkstreamRun.compatible_policy?(run) ->
+        {:noreply, block_workstream_policy(state, run)}
+
+      not child_dispatch_allowed?(state, run) ->
+        {:noreply, schedule_archive_wait(state, run)}
+
+      polls >= @publication_archive_wait_limit ->
+        {:noreply, schedule_archive_wait(state, run)}
+
+      true ->
+        operation = run.operations[attempt_id]
+        updated = put_in(run.operations[attempt_id][:archive_wait_polls], Map.get(operation, :archive_wait_polls, 0) + 1)
+        state = commit_workstream(state, updated, attempt_id <> "/archive-wait/#{polls + 1}", %{kind: :publication_archive_wait, poll: polls + 1})
+        state = reconcile_workstream_operation(state, updated)
+        state = schedule_archive_wait(state, durable_run(state, run_id))
+        send(self(), :advance_workstreams)
+        {:noreply, state}
+    end
+  end
 
   def handle_info(:advance_workstreams, %{workstreams: %{opts: opts}} = state) do
     if Keyword.get(opts, :auto_advance, true), do: {:noreply, advance_workstreams(state)}, else: {:noreply, state}
@@ -3698,7 +3734,7 @@ defmodule SymphonyElixir.Orchestrator do
         Process.demonitor(ref, [:flush])
         state = update_in(state.workstreams.workers, &Map.delete(&1, attempt_id))
         send(self(), :advance_workstreams)
-        reconcile_child_handoffs(state)
+        state |> schedule_archive_wait(updated) |> reconcile_child_handoffs()
 
       _ ->
         state
@@ -4006,7 +4042,58 @@ defmodule SymphonyElixir.Orchestrator do
     end)
   end
 
+  defp publication_archive_wait?(%{status: :reconciling, current_attempt_id: id, operations: operations, definition: definition, stage_id: stage}) do
+    match?(%{type: :publish, status: :executing, reconciliation: ":validation_not_permanently_archived"}, operations[id]) and
+      definition.stages[stage].type == :publish
+  end
+
+  defp publication_archive_wait?(_run), do: false
+
+  defp current_archive_wait?(run, attempt_id, polls) do
+    publication_archive_wait?(run) and run.current_attempt_id == attempt_id and archive_wait_polls(run) == polls
+  end
+
+  # Count only this publication's wait polls, retaining the budget through transport
+  # retries and coordinator restarts without changing candidate or side-effect identity.
+  defp archive_wait_polls(run) do
+    side_effect_id = run.operations[run.current_attempt_id].side_effect_id
+
+    run.operations
+    |> Map.values()
+    |> Enum.filter(&(&1.side_effect_id == side_effect_id))
+    |> Enum.reduce(0, &(Map.get(&1, :archive_wait_polls, 0) + &2))
+  end
+
+  defp schedule_archive_wait(state, run) do
+    if publication_archive_wait?(run) and Keyword.get(state.workstreams.opts, :auto_advance, true) do
+      polls = archive_wait_polls(run)
+
+      if polls < @publication_archive_wait_limit do
+        send_archive_wait(state, {:publication_archive_wait, run.id, run.current_attempt_id, polls})
+        state
+      else
+        commit_workstream(state, run, run.current_attempt_id <> "/archive-wait-exhausted", %{
+          kind: :publication_archive_wait_exhausted,
+          polls: polls
+        })
+      end
+    else
+      state
+    end
+  end
+
+  defp send_archive_wait(state, message) do
+    delay = max(Keyword.get(state.workstreams.opts, :publication_archive_retry_delay_ms, @publication_archive_retry_delay_ms), 10)
+    Process.send_after(self(), message, delay)
+  end
+
   defp recover_workstream(state, run, launch_allowed \\ true) do
+    if publication_archive_wait?(run),
+      do: schedule_archive_wait(state, run),
+      else: reconcile_workstream_operation(state, run, launch_allowed)
+  end
+
+  defp reconcile_workstream_operation(state, run, launch_allowed \\ true) do
     operation = Map.fetch!(run.operations, run.current_attempt_id)
     worker = find_workstream_worker(state.task_supervisor, run, operation)
 

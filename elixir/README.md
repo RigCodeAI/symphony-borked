@@ -555,3 +555,8 @@ separate checkout with a fresh conversation. Configure a distinct trusted `revie
 App reference outside workspace roots. Submitted findings authorize append-only
 same-run repair contexts; exact-head validation, three review rounds and human merge
 remain service boundaries. See [the source contract and live choices](../docs/review-repair.md).
+
+Active publication archive waits use the coordinator's bounded delayed reconciliation
+path (ten seconds, thirty checks across retries/restarts). Exhaustion remains visible
+as `publication_archive_wait_exhausted`; stopped work is not resumed. See
+[trusted publication](../docs/trusted-publication.md) for the full boundary.

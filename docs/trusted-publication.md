@@ -81,6 +81,21 @@ recomputes both stage gates against the clean current candidate and pinned polic
 then requires permanent archive verification for that exact validation attempt.
 Missing, failed, incomplete, forged, stale or development evidence cannot publish.
 
+If an active publisher returns `validation_not_permanently_archived`, the coordinator
+wakes its existing reconciliation path after ten seconds. It checks the same run,
+attempt and durable wait count and reattaches a surviving worker before considering
+replacement. New attempts retain the publication side-effect identity, branch,
+candidate and validation, and still need normal native authorization and archive
+qualification. Capture holds defer checks; stopped runs never resume this way.
+
+The automatic wait is limited to thirty checks per publication side-effect identity,
+including checks spent waiting for the original worker to exit. The count survives
+transport retries and coordinator restart. On exhaustion the run stays reconciling
+and records `publication_archive_wait_exhausted` for operator inspection; restart
+and ordinary reconciliation do not reset that budget. Other uncertain publication
+outcomes keep their existing recovery behavior. This is locally tested service
+behavior, not proof that a deployment or a stopped run has recovered.
+
 `Evidence.publication/4` finds a verified immutable revision containing the saved
 passing attempt, its authenticated validation-manifest identity and the completed
 artifact import. It verifies the local retained bytes against the root uploader's

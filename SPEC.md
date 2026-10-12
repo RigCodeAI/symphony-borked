@@ -2647,6 +2647,16 @@ Development, missing, failed, forged, incomplete and stale evidence MUST block.
 Later conversation events MUST NOT invalidate an already verified immutable evidence
 revision; the latest incomplete bundle does not qualify as archival proof.
 
+An active publication waiting on `validation_not_permanently_archived` MUST receive
+an automatic delayed reconciliation wake-up through the existing coordinator. Each
+wake-up MUST match the current run, attempt and durable wait count, preserve worker
+liveness checks, and respect capture, policy and native stop/authorization guards.
+The coordinator checks at ten-second intervals, at most thirty times per publication
+side-effect identity across transport retries and restarts. Exhaustion MUST retain
+reconciling state and record `publication_archive_wait_exhausted`; it does not weaken
+the archive gate or resume stopped work. A fresh attempt still requires normal native
+authorization and rechecks the exact candidate, validation and archive before writes.
+
 The coordinator MUST persist the stage operation before execution and the exact safe
 publication intent before the first remote write. It MUST recheck current task ownership
 before further writes. A stopped run MUST remain stopped while read-only reconciliation

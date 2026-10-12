@@ -1058,6 +1058,8 @@ class OperationController:
             raise OperationUnavailable("candidate workspace is invalid")
         root_fd = workspace_fd = git_fd = candidates_fd = file_fd = -1
         directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        # Linux O_PATH traverses search-only parents without permitting directory listing.
+        search_flags = getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
             root_fd = self._open_absolute_directory(self.workspace_root_path)
             self._check_open_directory(root_fd, owner_uid=self.expected_owner_uid, private=True)
@@ -1070,10 +1072,10 @@ class OperationController:
             current_fd = root_fd
             opened: list[int] = []
             for index, part in enumerate(relative_parts):
-                child = os.open(part, directory_flags, dir_fd=current_fd)
+                child = os.open(part, search_flags, dir_fd=current_fd)
                 opened.append(child)
                 if index == len(relative_parts) - 1:
-                    self._check_open_directory(child, owner_uid=self._worker_uid(), private=True)
+                    self._check_open_directory(child, owner_uid=self._worker_uid(), owner_gid=self._worker_gid(), private=True)
                 else:
                     self._check_open_directory(
                         child,
@@ -1082,8 +1084,8 @@ class OperationController:
                     )
                 current_fd = child
             workspace_fd = current_fd
-            git_fd = os.open(".git", directory_flags, dir_fd=workspace_fd)
-            self._check_open_directory(git_fd, owner_uid=self._worker_uid(), private=True)
+            git_fd = os.open(".git", search_flags, dir_fd=workspace_fd)
+            self._check_open_directory(git_fd, owner_uid=self._worker_uid(), owner_gid=self._worker_gid(), private=True)
             candidates_fd = os.open("factory-candidates", directory_flags, dir_fd=git_fd)
             self._check_open_directory(
                 candidates_fd,
@@ -1205,6 +1207,7 @@ class OperationController:
         descriptor: int,
         *,
         owner_uid: int | None = None,
+        owner_gid: int | None = None,
         allowed_owners: set[int] | None = None,
         exact_mode: int | None = None,
         private: bool,
@@ -1215,6 +1218,8 @@ class OperationController:
         allowed = allowed_owners if allowed_owners is not None else ({owner_uid} if owner_uid is not None else None)
         if allowed is not None and info.st_uid not in allowed:
             raise OperationUnavailable("candidate directory ownership is unsafe")
+        if owner_gid is not None and info.st_gid != owner_gid:
+            raise OperationUnavailable("candidate directory group is unsafe")
         mode = stat.S_IMODE(info.st_mode)
         if exact_mode is not None and mode != exact_mode:
             raise OperationUnavailable("candidate directory permissions are unsafe")

@@ -66,9 +66,16 @@ hard link. Permission updates use no-follow file descriptors. The broker already
 belongs to `factory-worker` and retains its empty capability bounding set. Its reader
 checks the configured worker group, exact modes, ownership, no-follow paths, stable
 file identity, size and checksum after exact successful operation/termination checks.
-No group write or world access is granted. Workspace directories and private broker
-records keep their permissions. Legacy `0700`/`0600` bundles remain accepted when
-already readable; deployment does not automatically change old artifacts or run pins.
+The producer also sets only its task root and `.git` to `0710`, checking their UID/GID
+with no-follow directory descriptors and granting task-root search last. The broker
+uses Linux `O_PATH` handles for those parents and checks their configured worker group;
+search permission suffices without granting listing or write access. The root-owned
+shared workspace root keeps `0750`. No recursive permission changes are performed.
+Existing worker-group members can reach known descendant paths and read files whose
+own permissions permit it (for example `0644`); unrelated `0600` files remain private.
+The producer grants no group write or world access. Private broker records keep their
+permissions. Legacy `0700`/`0600` bundles remain accepted when already readable;
+deployment does not automatically change old artifacts or run pins.
 This changes the pinned producer command and workstream definition. Deploy matching
 pins and regenerate through an authorized producer run; an old private bundle alone
 is not made readable by upgrading the broker.
@@ -105,9 +112,12 @@ python3 -m unittest factory.deploy.tests.test_candidate_bundle_rpc factory.deplo
 ```
 
 The bundle RPC suite includes a Linux root regression that runs the real producer as
-a separate worker UID, then invokes broker dispatch with all effective, permitted and
-bounding capabilities dropped. It reproduces the old `EACCES`, proves the new read,
-and rejects bundle writes and unrelated private-file reads. It skips when Linux/root
+a separate worker UID beneath the actual root-owned `0750` shared root and initially
+worker-owned `0700` task root / `0755` Git directory. Only the shipped producer changes
+permissions before broker dispatch with all effective, permitted and bounding capabilities
+dropped. It reproduces the old parent `EACCES`, proves the full bundle read, rejects parent
+listing/writes and unrelated private-file reads/writes, and demonstrates the disclosed
+known-`0644`-path access. It skips when Linux/root
 or the fixture setup capabilities are unavailable; such a skip is not verification.
 
 Live verification uses a dedicated disposable Rig clone with push disabled, the approved

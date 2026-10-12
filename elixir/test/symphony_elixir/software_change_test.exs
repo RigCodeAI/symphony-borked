@@ -26,10 +26,10 @@ defmodule SymphonyElixir.SoftwareChangeTest do
     commit_script = List.last(commit_command)
 
     assert Base.encode16(:crypto.hash(:sha256, commit_script), case: :lower) ==
-             "f4ba77de9f63131ee75ddff0c6f034ca0a606a194f199a37c3a0f74c4b0877d2"
+             "3cfde2cf353b66bdfea2a2e3193eede1c21472b3a4b162a308f20ecbb2bb7204"
 
     assert Base.encode16(:crypto.hash(:sha256, Jason.encode!(commit_command)), case: :lower) ==
-             "b7749f37ccbdf7446c562835c7ed10e5343f10bf52b2913fd581582a9dc33fc8"
+             "97c7e721d4583bfd2f0f97b2dd55c6d606db30b18fa4f125b179869f6961c3d9"
 
     workspace_root = Path.join(root, "workspaces")
     workspace = Path.join(workspace_root, "clone")

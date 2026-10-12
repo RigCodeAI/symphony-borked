@@ -113,7 +113,7 @@ class CandidateBundleRpcTests(unittest.TestCase):
             service_revision=REVISION,
             candidate_producer_command_sha256=self.command_sha256,
             worker_user=pwd.getpwuid(os.getuid()).pw_name,
-            worker_group=pwd.getpwuid(os.getuid()).pw_name,
+            worker_group=grp.getgrgid(os.getgid()).gr_name,
             expected_owner_uid=os.getuid(),
         )
         (self.root / "machine-id").write_text(MACHINE_ID + "\n", encoding="ascii")
@@ -321,11 +321,30 @@ class CandidateBundleRpcTests(unittest.TestCase):
             self.skipTest("fixture setup requires CHOWN, DAC_OVERRIDE, SETGID, SETUID and SETPCAP")
         worker = pwd.getpwnam("nobody")
         self.root.chmod(0o755)
+        # Recreate every ancestor in the live /srv/factory/contained-workspaces chain.
+        for parent in (self.root / "srv", self.root / "srv/factory"):
+            parent.mkdir(mode=0o755)
+            parent.chmod(0o755)
+            os.chown(parent, 0, 0)
+        relocated_root = self.root / "srv/factory/contained-workspaces"
+        self.workspace_root.rename(relocated_root)
+        self.workspace_root = relocated_root
+        self.workspace = relocated_root / "candidate"
+        self.candidates = self.workspace / ".git/factory-candidates"
+        self.bundle_path = self.candidates / f"{self.input_sha256}.bundle"
+        self.controller.workspace_root = relocated_root
+        self.controller.workspace_root_path = relocated_root
         self.controller.worker_user = worker.pw_name
         self.controller.worker_group = grp.getgrgid(worker.pw_gid).gr_name
         self.bundle_path.unlink()
         for path in (self.workspace, self.workspace / ".git", self.candidates):
             os.chown(path, worker.pw_uid, worker.pw_gid)
+        # Match the live root-owned shared root and private worker task boundary.
+        os.chown(self.workspace_root, 0, worker.pw_gid)
+        self.workspace_root.chmod(0o750)
+        self.workspace.chmod(0o700)
+        (self.workspace / ".git").chmod(0o755)
+        self.candidates.chmod(0o700)
 
         def run_worker(argv):
             return subprocess.run(
@@ -339,6 +358,7 @@ class CandidateBundleRpcTests(unittest.TestCase):
         source = self.workspace / "candidate"
         source.write_text("base\n")
         os.chown(source, worker.pw_uid, worker.pw_gid)
+        source.chmod(0o644)
         run_worker(["git", "add", "candidate"])
         run_worker(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
                     "commit", "--quiet", "-m", "base"])
@@ -346,6 +366,9 @@ class CandidateBundleRpcTests(unittest.TestCase):
         self.command_argv = load_shipped_local_commit_command()
         self.controller.candidate_producer_command_sha256 = compact_utf8_command_sha256(self.command_argv)
         result = json.loads(run_worker(self.command_argv).stdout)
+        self.assertEqual(self.workspace_root.stat().st_mode & 0o777, 0o750)
+        self.assertEqual(self.workspace.stat().st_mode & 0o777, 0o710)
+        self.assertEqual((self.workspace / ".git").stat().st_mode & 0o777, 0o710)
         self.assertEqual(self.candidates.stat().st_mode & 0o777, 0o750)
         self.assertEqual(self.bundle_path.stat().st_mode & 0o777, 0o640)
         self.bundle_bytes = self.bundle_path.read_bytes()
@@ -360,18 +383,23 @@ class CandidateBundleRpcTests(unittest.TestCase):
         secret.write_bytes(b"private worker data")
         os.chown(secret, worker.pw_uid, worker.pw_gid)
         secret.chmod(0o600)
+        private_worktree = self.workspace / "private-worktree-file"
+        private_worktree.write_bytes(b"private worktree data")
+        os.chown(private_worktree, worker.pw_uid, worker.pw_gid)
+        private_worktree.chmod(0o600)
         self.argv = ["/usr/bin/env", f"WORKSTREAM_INPUTS_JSON={self.inputs_json}", *self.command_argv]
         self.identity = self.install_operation(argv=self.argv)
         record_path = self.controller._record_path(self.operation_id)
         record_before = record_path.read_bytes()
 
-        def probe(private):
+        def probe(private, with_worker_group=True):
             read_fd, write_fd = os.pipe()
             pid = os.fork()
             if pid == 0:
                 os.close(read_fd)
                 try:
-                    os.setgroups([worker.pw_gid])
+                    os.setgroups([worker.pw_gid] if with_worker_group else [])
+                    os.setgid(12345)  # Distinct broker primary group; use the existing supplementary group.
                     libc = ctypes.CDLL(None, use_errno=True)
                     for capability in range(64):
                         # Drop every supported bounding capability before effective/permitted caps.
@@ -398,10 +426,20 @@ class CandidateBundleRpcTests(unittest.TestCase):
                         reply = self.fetch()
                         self.assertEqual(base64.b64decode(reply["data_base64"]), self.bundle_bytes)
                         self.assertTrue(reply["eof"])
+                        # This known-path access is the explicitly approved traversal consequence.
+                        self.assertEqual(source.read_text(), "candidate\n")
                         with self.assertRaises(PermissionError):
                             os.open(self.bundle_path, os.O_WRONLY)
-                        with self.assertRaises(PermissionError):
-                            secret.read_bytes()
+                        for private_file in (secret, private_worktree):
+                            with self.assertRaises(PermissionError):
+                                private_file.read_bytes()
+                            with self.assertRaises(PermissionError):
+                                os.open(private_file, os.O_WRONLY)
+                        for parent in (self.workspace, self.workspace / ".git"):
+                            with self.assertRaises(PermissionError):
+                                os.listdir(parent)
+                            with self.assertRaises(PermissionError):
+                                os.open(parent / "broker-write", os.O_WRONLY | os.O_CREAT, 0o600)
                     report = {"ok": True}
                 except BaseException as error:
                     report = {"error": repr(error)}
@@ -415,12 +453,17 @@ class CandidateBundleRpcTests(unittest.TestCase):
             self.assertEqual(status, 0)
             self.assertEqual(report, {"ok": True})
 
-        self.candidates.chmod(0o700)
-        self.bundle_path.chmod(0o600)
-        probe(private=True)  # Reproduce DEV-257 under the service's actual privilege boundary.
-        self.candidates.chmod(0o750)
-        self.bundle_path.chmod(0o640)
+        self.workspace.chmod(0o700)
+        probe(private=True)  # Readable artifacts still fail beneath the actual private task parent.
+        # Repair access only by replaying the shipped producer, never by a test chmod workaround.
+        private_worktree.unlink()
+        replay = json.loads(run_worker(self.command_argv).stdout)
+        self.assertEqual(replay, result)
+        private_worktree.write_bytes(b"private worktree data")
+        os.chown(private_worktree, worker.pw_uid, worker.pw_gid)
+        private_worktree.chmod(0o600)
         probe(private=False)
+        probe(private=True, with_worker_group=False)
         self.assertEqual(record_path.read_bytes(), record_before)
         self.assertEqual(self.records.stat().st_mode & 0o777, 0o700)
         self.assertEqual(record_path.stat().st_mode & 0o777, 0o600)
@@ -712,8 +755,12 @@ class CandidateBundleRpcTests(unittest.TestCase):
                 self.fetch()
         self.candidates.chmod(0o750)
         with patch.object(self.controller, "_worker_gid", return_value=os.getgid() + 1):
+            with self.assertRaisesRegex(engine.OperationUnavailable, "directory group is unsafe"):
+                self.fetch()  # Parent group mismatch.
+        with patch.object(self.controller, "_worker_gid", return_value=os.getgid() + 1), \
+                patch.object(self.controller, "_check_open_directory"):
             with self.assertRaises(engine.OperationUnavailable):
-                self.fetch()  # Directory group mismatch.
+                self.fetch()  # Transport directory group mismatch.
             self.candidates.chmod(0o700)
             with self.assertRaises(engine.OperationUnavailable):
                 self.fetch()  # Bundle group mismatch, private legacy directory.
@@ -748,7 +795,7 @@ class CandidateBundleRpcTests(unittest.TestCase):
             expected_machine_id=MACHINE_ID,
             service_revision=REVISION,
             worker_user=pwd.getpwuid(os.getuid()).pw_name,
-            worker_group=pwd.getpwuid(os.getuid()).pw_name,
+            worker_group=grp.getgrgid(os.getgid()).gr_name,
             expected_owner_uid=os.getuid(),
         )
         self.assertFalse(controller_without_pin.candidate_bundle_available)

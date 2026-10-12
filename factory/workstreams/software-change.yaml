@@ -116,7 +116,7 @@ stages:
               git("bundle", "verify", str(bundle))
               assert git("bundle", "list-heads", str(bundle)) == head + " HEAD", "bundle head mismatch"
               data = bundle.read_bytes()
-              for path, mode, flags in ((bundle_dir, 0o750, os.O_DIRECTORY), (bundle, 0o640, 0)):
+              for path, mode, flags in ((bundle_dir, 0o750, os.O_DIRECTORY), (bundle, 0o640, 0), (gitdir, 0o710, os.O_DIRECTORY), (root, 0o710, os.O_DIRECTORY)):
                   fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | flags)
                   try:
                       info = os.fstat(fd)

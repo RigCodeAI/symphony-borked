@@ -24,6 +24,7 @@ defmodule SymphonyElixir.EvidenceTest do
     assert :ok = Evidence.begin_capture(store, token, self(), destination, [original])
     assert {:error, :capture_in_progress} = Evidence.snapshot(original, "later", %{kind: :queued}, store)
     assert {:error, :capture_in_progress} = Evidence.artifact(original, "later", "bytes", store)
+    assert {:error, :capture_in_progress} = Evidence.retained(original, store)
     assert {:error, :capture_in_progress} = GenServer.call(store, {:event, original.id, "later", %{}})
     send(store, :flush)
     assert {:ok, %{snapshot: %{schema: %{"user_version" => 1}}, bundles: [%{run_id: "run-1"}], event_watermark: 1}} = Evidence.snapshot_capture(store, token)

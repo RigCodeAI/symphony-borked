@@ -1,8 +1,9 @@
 # DEV-242: smallest owner capture increment
 
-Status: locally qualified source candidate; shared ownership released. Compilation,
-build, specs, format and 85 focused tests passed in the isolated Docker runtime.
-Merged DEV-239/241 combined integration checks remain separate. No live capture or
+Status: the PR #18 baseline passed compilation, build, specs, format and 85
+focused tests in the isolated Docker runtime. PR #19's merged source is now
+integrated; its combined capture/cleanup checks are queued after DEV-239's
+correction pass. PR #20's validation timer changes are still unmerged. No live capture or
 restore is authorized or qualified. Reviewed against merged main
 `e7fd8290ed7e508547867c9a5233d9b9eb0bfd16` (PR #18), and live DEV-239,
 DEV-241, DEV-242 and DEV-243 scope. Recheck the seams after their integrations.
@@ -101,12 +102,14 @@ before dispatch, even when the local two-database snapshot is consistent.
 ## Source API and startup pins
 
 The trusted local startup option is `backup_capture`, with `root`,
-`service_revision`, `workspace_roots` and `cleanup: :disabled`; an optional
+`service_revision`, `workspace_roots` and `cleanup: :disabled` or `:enabled`; an optional
 `evidence_server` selects a service-owned test/server name. There is no workflow
 frontmatter field or deployment wiring in this increment. The root must already
 exist with private ownership, outside the supplied issue roots. Evidence must
 name the actual coordinator in its `capture_owner` startup option (the default
 is `SymphonyElixir.Orchestrator`). Limits are 128 runs and 256 MiB per database.
+The cleanup mode must match `merged_cleanup`; enabled mode still requires
+`cleanup_active_or_uncertain?/1` to report no owned work or uncertain deletion.
 Manifest inventories are capped at 10,000 stored IDs per table; exceeding a
 bound rejects the capture rather than omitting records.
 
@@ -161,21 +164,30 @@ Its pending-only wake is `reconcile_validation_checks(state, true)` inside
 `advance_workstreams/1`, rather than a new two-element mailbox message. Capture
 suppresses the advance message and step call, then re-arms advance on release;
 the queued reply stays in the saved run without requiring synchronous GitHub reads.
+The latest unmerged PR #20 separates immediate `:reconcile_validation_checks`
+from tokenized `{:validation_checks_tick, token}` and owns
+`validation_check_timer: {ref, token}`. The capture guard recognizes the tokenized
+message. After that PR merges, integrate the actual timer field and reuse its
+`schedule_validation_checks_tick/1` on release; do not reintroduce a recurring
+timer from the immediate wake. Until then an unknown timer-owner field rejects
+capture, so this branch does not claim that timer integration is complete.
 
-The unmerged DEV-241 source in worktree `0a12` has
-`cleanup_active_or_uncertain?(state)`, a `workstreams.cleanup.jobs` map and
-`:reconcile_merged_cleanup`. Its observed hold hook still reads `capture_hold`;
-that must bind to the actual `capture_held?/1` predicate at integration. Until
-that code is merged and checked, `merged_cleanup: true` rejects capture. Unknown
-durable-owner fields also reject rather than silently bypass a new producer.
+DEV-241 merged as `c498b78044cd5392615f4f623955fe1fbca2004e` (PR #19).
+Its actual `cleanup_active_or_uncertain?(state)` covers active jobs, surviving
+cleanup tasks and uncertain deletion outcomes. The merged job map is recognized,
+its hold hook now calls `capture_held?/1`, and capture cancels/re-arms the cleanup
+timer. Evidence's new `retained` action exports a bundle, so it is also write-held.
+The merge preserved DEV-241's retained-archive checks and cleanup reconciliation.
+These integration edits await the queued combined tests. Unknown durable-owner
+fields continue to reject rather than silently bypass a new producer.
 
 DEV-239 integration must expose any active or uncertain validation-check job to
 admission without changing its adapter configuration or gates. DEV-241 integration
 also changes the admission contract. Capture must reject while
 merge observation, cancellation archive, deletion or final evidence capture is
 active or uncertain. Do not infer quiescence from a completed run or Linear Done.
-Until its exact job/state predicate is available, capture with cleanup enabled
-must remain unavailable. DEV-243 child records will be preserved as Store bytes;
+Its job/state predicate is now present; no cleanup-enabled live capture is
+qualified by these source edits. DEV-243 child records will be preserved as Store bytes;
 no child semantics are invented here.
 
 DEV-239's queued `pending_validation_reply` is preserved in the run BLOB. A queued

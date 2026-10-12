@@ -332,6 +332,14 @@ defmodule SymphonyElixir.Evidence do
   @spec end_capture(GenServer.server(), reference()) :: :ok | {:error, term()}
   def end_capture(server, token), do: GenServer.call(server, {:capture_end, token}, :infinity)
 
+  @doc "Verifies the current archive bytes and exact expected sanitized run snapshot."
+  @spec retained(map(), GenServer.server()) :: {:ok, map()} | {:error, atom()}
+  def retained(run, server \\ __MODULE__), do: call(server, {:retained, report(run)})
+
+  @doc "Reads an immutable output only after verifying its exact permanent archive receipt."
+  @spec retained_artifact(map(), GenServer.server()) :: {:ok, binary()} | {:error, atom()}
+  def retained_artifact(reference, server \\ __MODULE__), do: call(server, {:retained_artifact, reference})
+
   @impl true
   def init(opts) do
     config = Keyword.fetch!(opts, :config)
@@ -393,7 +401,7 @@ defmodule SymphonyElixir.Evidence do
   def handle_call({:capture_end, _token}, _from, state), do: {:reply, {:error, :capture_not_authorized}, state}
 
   def handle_call(message, _from, %{capture: capture} = state)
-      when not is_nil(capture) and is_tuple(message) and elem(message, 0) in [:snapshot, :event, :artifact],
+      when not is_nil(capture) and is_tuple(message) and elem(message, 0) in [:snapshot, :event, :artifact, :retained],
       do: {:reply, {:error, :capture_in_progress}, state}
 
   def handle_call({:snapshot, snapshot, event_id, event}, _from, state) do
@@ -462,6 +470,43 @@ defmodule SymphonyElixir.Evidence do
   end
 
   def handle_call({:run, id}, _from, state), do: {:reply, view(state, id), state}
+
+  def handle_call({:retained, expected}, _from, state) do
+    result =
+      with {:ok, data} <- bundle(state, expected["id"]),
+           true <- data.snapshot == expected,
+           {:ok, revision} <- export(state, data),
+           %{"status" => "verified"} <- receipt(state, revision, data.manifest),
+           {:ok, files} <- publication_files(Path.join([state.root, "bundles", revision]), data.manifest["artifacts"]),
+           {:ok, ^expected} <- Jason.decode(files["snapshot.json"]) do
+        {:ok, %{run_id: expected["id"], task_key: task_key(expected["task_id"]), revision: revision, manifest_sha256: revision, artifacts: data.manifest["artifacts"]}}
+      else
+        _ -> {:error, :current_evidence_not_permanently_archived}
+      end
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:retained_artifact, reference}, _from, state) do
+    result =
+      with %{run_id: id, task_key: key, revision: revision, name: name, sha256: sha} <- reference,
+           true <- is_binary(revision) and Regex.match?(~r/^[a-f0-9]{64}$/, revision),
+           directory = Path.join([state.root, "bundles", revision]),
+           {:ok, bytes} <- publication_read(Path.join(directory, "manifest.json")),
+           true <- digest(bytes) == revision,
+           {:ok, manifest} <- Jason.decode(bytes),
+           true <- manifest["run_id"] == id and task_key(manifest["task_id"]) == key,
+           %{"status" => "verified"} <- receipt(state, revision, manifest),
+           {:ok, files} <- publication_files(directory, manifest["artifacts"]),
+           payload when is_binary(payload) <- files[name],
+           true <- digest(payload) == sha do
+        {:ok, payload}
+      else
+        _ -> {:error, :retained_artifact_unavailable}
+      end
+
+    {:reply, result, state}
+  end
 
   def handle_call({:current_snapshot, id}, _from, state) do
     result =

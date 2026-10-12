@@ -432,7 +432,8 @@ This project is licensed under the [Apache License 2.0](../LICENSE).
 
 The optional [local owner capture](../docs/dev-242-capture-barrier.md) is selected
 through trusted startup options, holds both database owners and rejects new
-mutations while copying. Its source passed compilation and 85 focused tests; its local
+mutations while copying. Its PR #18 baseline passed compilation and 85 focused
+tests; merged cleanup integration checks remain queued. Its local
 manifest always reports `restore_ready: false`. No deployed capture/restore is
 configured by this increment.
 
@@ -501,3 +502,9 @@ referencing a prior candidate-validation stage. A configured coordinator GitHub 
 exact permanently archived validation evidence are required; agents never receive its key
 or tokens. Durable retries reconcile the same branch and PR. The synchronous local runner
 rejects publication. See [configuration, App setup and verification limits](../docs/trusted-publication.md).
+
+Trusted coordinator startup option `merged_cleanup: true` enables idle reconciliation
+of recorded merged work. Cleanup requires exact directory identity, fresh contained
+worker termination and a verified current evidence archive. It is disabled by default;
+legacy tracker terminal states retain work. See [merged cleanup](../docs/merged-workspace-cleanup.md)
+for the read-only composition proof, retry/capture boundaries and validation limits.

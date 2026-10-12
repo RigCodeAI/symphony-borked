@@ -90,7 +90,8 @@ retention and the current acceptance boundary.
 
 DEV-242 adds source for a private local capture of the workstream and Evidence
 databases at a quiet boundary. Its [owner capture contract](docs/dev-242-capture-barrier.md)
-passed compilation and 85 focused tests; deployed restore, fencing and freshness
+passed compilation and 85 focused tests on the PR #18 baseline; merged cleanup
+integration checks remain queued. Deployed restore, fencing and freshness
 monitoring remain pending.
 
 DEV-235 adds [named cloud-agent routing and safe reassignment](docs/dev-235-agent-mapping.md)
@@ -167,6 +168,11 @@ archival must pass before the coordinator pushes a candidate or creates/reuses i
 See [trusted publication](docs/trusted-publication.md) for App permissions, replay behavior
 and the live acceptance boundary. This source increment does not claim an installed App
 or a completed Linear-to-PR deployment.
+
+DEV-241 adds opt-in idle cleanup using recorded directory ownership, fresh worker
+termination, the exact GitHub merge and a verified current archive. Legacy Linear
+terminal-state cleanup retains work. See [merged workspace cleanup](docs/merged-workspace-cleanup.md)
+for the read-only child-result proof, runtime requirements and remaining live gates.
 
 ## Upstream and license
 

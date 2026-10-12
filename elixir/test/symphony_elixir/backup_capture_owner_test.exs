@@ -260,7 +260,23 @@ defmodule SymphonyElixir.BackupCaptureOwnerTest do
       %{state | workstreams: workstreams}
     end)
 
-    assert {:error, :capture_cleanup_integration_required} = Orchestrator.capture_backup(coordinator, "cleanup-enabled")
+    assert {:error, :capture_not_configured} = Orchestrator.capture_backup(coordinator, "cleanup-mode-mismatch")
+
+    :sys.replace_state(coordinator, fn state ->
+      options = Keyword.update!(state.workstreams.opts, :backup_capture, &Map.put(&1, :cleanup, :enabled))
+      state = put_in(state.workstreams.opts, options)
+      put_in(state.workstreams.cleanup.jobs, %{"cleanup-active" => %{}})
+    end)
+
+    assert {:error, :capture_cleanup_active_or_uncertain} = Orchestrator.capture_backup(coordinator, "cleanup-active")
+
+    :sys.replace_state(coordinator, fn state ->
+      state = put_in(state.workstreams.cleanup.jobs, %{})
+      put_in(state.workstreams.runs[c.waiting_run.id][:cleanup],
+        %{status: :pending, delete_started: true, last_error: :cleanup_outcome_unknown})
+    end)
+
+    assert {:error, :capture_cleanup_active_or_uncertain} = Orchestrator.capture_backup(coordinator, "cleanup-uncertain")
   end
 
   test "holds intake during capture, ignores stale completion, and waits for both owners after interruption", c do

@@ -35,7 +35,13 @@ defmodule SymphonyElixir.ReviewResult do
   @type revision :: %{base_sha: String.t(), head_sha: String.t()}
   @type recorded_revision :: %{base_sha: String.t(), head_sha: String.t(), rubric_sha256: String.t()}
   @type location :: %{path: String.t(), start_line: pos_integer(), end_line: pos_integer(), side: :right}
-  @type validated_result :: %{base_sha: String.t(), head_sha: String.t(), rubric: map(), result: map(), locations: [location()]}
+  @type validated_result :: %{
+          base_sha: String.t(),
+          head_sha: String.t(),
+          rubric: map(),
+          result: map(),
+          locations: [location()]
+        }
 
   @doc "Returns the verified, embedded upstream rubric and its immutable identities."
   @spec rubric() :: map()
@@ -58,7 +64,15 @@ defmodule SymphonyElixir.ReviewResult do
          :ok <- result_shape(result),
          :ok <- commits(workspace, recorded),
          {:ok, locations} <- locations(result["findings"], workspace, recorded) do
-      {:ok, %{base_sha: recorded.base_sha, head_sha: recorded.head_sha, rubric: @rubric_pin, result: result, locations: locations}}
+      validated = %{
+        base_sha: recorded.base_sha,
+        head_sha: recorded.head_sha,
+        rubric: @rubric_pin,
+        result: result,
+        locations: locations
+      }
+
+      {:ok, validated}
     end
   end
 
@@ -105,12 +119,7 @@ defmodule SymphonyElixir.ReviewResult do
     keys = Enum.map(pairs, &elem(&1, 0))
 
     if length(keys) == MapSet.size(MapSet.new(keys)) do
-      Enum.reduce_while(pairs, {:ok, %{}}, fn {key, value}, {:ok, acc} ->
-        case unique_objects(value) do
-          {:ok, value} -> {:cont, {:ok, Map.put(acc, key, value)}}
-          {:error, _reason} = error -> {:halt, error}
-        end
-      end)
+      Enum.reduce_while(pairs, {:ok, %{}}, &unique_pair/2)
     else
       {:error, :duplicate_review_json_key}
     end
@@ -131,23 +140,34 @@ defmodule SymphonyElixir.ReviewResult do
 
   defp unique_objects(value), do: {:ok, value}
 
+  defp unique_pair({key, value}, {:ok, acc}) do
+    case unique_objects(value) do
+      {:ok, value} -> {:cont, {:ok, Map.put(acc, key, value)}}
+      {:error, _reason} = error -> {:halt, error}
+    end
+  end
+
   defp result_shape(result) do
     with :ok <- fields(result, @result_keys, []),
          true <- is_list(result["findings"]),
          true <- result["overall_correctness"] in ["patch is correct", "patch is incorrect"],
          true <- text?(result["overall_explanation"]),
          true <- confidence?(result["overall_confidence_score"]) do
-      result["findings"]
-      |> Enum.with_index()
-      |> Enum.reduce_while(:ok, fn {finding, index}, :ok ->
-        case finding_shape(finding) do
-          :ok -> {:cont, :ok}
-          {:error, reason} -> {:halt, {:error, {:invalid_review_finding, index, reason}}}
-        end
-      end)
+      finding_shapes(result["findings"])
     else
       _ -> {:error, :invalid_review_result}
     end
+  end
+
+  defp finding_shapes(findings) do
+    findings
+    |> Enum.with_index()
+    |> Enum.reduce_while(:ok, fn {finding, index}, :ok ->
+      case finding_shape(finding) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, {:invalid_review_finding, index, reason}}}
+      end
+    end)
   end
 
   defp finding_shape(finding) do
@@ -259,13 +279,17 @@ defmodule SymphonyElixir.ReviewResult do
   defp regular_blob(entry, path) do
     case :binary.split(entry, "\t") do
       [metadata, file] when file == path <> "\0" ->
-        case String.split(metadata, " ") do
-          [mode, "blob", oid] when mode in ["100644", "100755"] ->
-            if sha?(oid), do: {:ok, oid}, else: {:error, :invalid_review_blob}
+        regular_blob_metadata(metadata)
 
-          _ ->
-            {:error, :review_path_not_regular_head_file}
-        end
+      _ ->
+        {:error, :review_path_not_regular_head_file}
+    end
+  end
+
+  defp regular_blob_metadata(metadata) do
+    case String.split(metadata, " ") do
+      [mode, "blob", oid] when mode in ["100644", "100755"] ->
+        if sha?(oid), do: {:ok, oid}, else: {:error, :invalid_review_blob}
 
       _ ->
         {:error, :review_path_not_regular_head_file}
@@ -275,26 +299,31 @@ defmodule SymphonyElixir.ReviewResult do
   defp parse_hunks(diff) do
     diff
     |> String.split("\n")
-    |> Enum.reduce_while({:ok, [], nil}, fn line, {:ok, hunks, current} ->
-      case Regex.run(@hunk_header, line, capture: :all_but_first) do
-        nil ->
-          hunk_line(line, hunks, current)
-
-        captures ->
-          with {:ok, hunks} <- finish_hunk(hunks, current) do
-            [first | count] = captures
-            first = String.to_integer(first)
-            count = if count in [[], [""]], do: 1, else: String.to_integer(hd(count))
-            {:cont, {:ok, hunks, %{first: first, last: first + count - 1, next: first, added: []}}}
-          else
-            error -> {:halt, error}
-          end
-      end
-    end)
+    |> Enum.reduce_while({:ok, [], nil}, &parse_hunk_line/2)
     |> case do
       {:ok, hunks, current} -> finish_hunk(hunks, current)
       error -> error
     end
+  end
+
+  defp parse_hunk_line(line, {:ok, hunks, current}) do
+    case Regex.run(@hunk_header, line, capture: :all_but_first) do
+      nil -> hunk_line(line, hunks, current)
+      captures -> replace_hunk(captures, hunks, current)
+    end
+  end
+
+  defp replace_hunk(captures, hunks, current) do
+    case finish_hunk(hunks, current) do
+      {:ok, hunks} -> start_hunk(captures, hunks)
+      error -> {:halt, error}
+    end
+  end
+
+  defp start_hunk([first | count], hunks) do
+    first = String.to_integer(first)
+    count = if count in [[], [""]], do: 1, else: String.to_integer(hd(count))
+    {:cont, {:ok, hunks, %{first: first, last: first + count - 1, next: first, added: []}}}
   end
 
   defp hunk_line(_line, hunks, nil), do: {:cont, {:ok, hunks, nil}}

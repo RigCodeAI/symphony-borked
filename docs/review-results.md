@@ -142,13 +142,22 @@ mix compile --warnings-as-errors
 mix format --check-formatted lib/symphony_elixir/review_result.ex test/symphony_elixir/review_result_test.exs
 mix specs.check
 mix test test/symphony_elixir/review_result_test.exs
+mix credo suggest lib/symphony_elixir/review_result.ex --strict
 ```
 
 Final result: compilation, formatting and public specs passed; **21 tests,
-0 failures** (seed `796721`). Full local `make all` was not run under the
+0 failures** (final recheck seed `160987`); strict Credo inspected the validator
+with 69 checks and found no issues. Full local `make all` was not run under the
 coordinator's focused-test-only slot; repository broad CI remains separate.
 
 The independent review identified a forced-text binary edge, resolved by checking
 the committed blob for NUL with a regression test. Focused execution also exposed
 Git option ordering in the existing adapter; the new reader uses an explicit path
 separator and verifies the selected file set. No shared adapter file was changed.
+
+The final recheck used PR commit `1a0e8533aa5007f66fdee2d1798b9ff4b969cb67`
+plus only the validator's local Credo fixes. The source archive included all 21
+focused tests. Helper extraction removed the new nesting and line-length findings
+without changing the API or validation decisions. Hosted broad `make-all` on the
+initial head stopped at Credo before coverage/Dialyzer; those stages remain
+unverified, and no broad local suite was repeated for this scoped recheck.

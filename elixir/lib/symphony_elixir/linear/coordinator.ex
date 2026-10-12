@@ -2,7 +2,7 @@ defmodule SymphonyElixir.Linear.Coordinator do
   @moduledoc "Durable native event intake owned by the existing coordinator."
 
   alias SymphonyElixir.Linear.{AgentMapping, Delegation}
-  alias SymphonyElixir.{Config, WorkstreamRun, WorkstreamStore}
+  alias SymphonyElixir.{Config, WorkstreamChild, WorkstreamRun, WorkstreamStore}
 
   @spec init(map(), keyword()) :: {:ok, map()} | {:error, term()}
   def init(state, opts) do
@@ -16,7 +16,7 @@ defmodule SymphonyElixir.Linear.Coordinator do
         with {:ok, config} <- Delegation.validate(config),
              false <- is_nil(state.workstreams),
              {:ok, stored} <- WorkstreamStore.linear_load(state.workstreams.store) do
-          tasks = Map.new(stored.tasks, fn {id, task} -> {id, Map.merge(task, %{authorized_stage: nil, authorized_until: 0, check_at: 0})} end)
+          tasks = Map.new(stored.tasks, fn {id, task} -> {id, Map.merge(task, %{owned_child_grant: nil, authorized_stage: nil, authorized_until: 0, check_at: 0})} end)
           stored = Map.put(stored, :tasks, tasks)
           send(self(), :linear_process)
           {:ok, Map.put(state, :linear, Map.merge(stored, %{config: config, job: nil, opts: opts, timer: nil}))}
@@ -63,7 +63,7 @@ defmodule SymphonyElixir.Linear.Coordinator do
           state =
             if event.kind == :issue_updated and current_assignment_event?(state.linear.tasks[event.issue_id], route, event) do
               task = state.linear.tasks[event.issue_id]
-              save_task(state, Map.merge(task, %{authorized_stage: nil, authorized_until: 0, check_at: 0, scope_revision: (task[:scope_revision] || 0) + 1}))
+              save_task(state, Map.merge(task, %{owned_child_grant: nil, authorized_stage: nil, authorized_until: 0, check_at: 0, scope_revision: (task[:scope_revision] || 0) + 1}))
             else
               state
             end
@@ -312,6 +312,7 @@ defmodule SymphonyElixir.Linear.Coordinator do
             Map.merge(task, %{
               status: :reassigning,
               pending_reassignment: pending,
+              owned_child_grant: nil,
               authorized_stage: nil,
               authorized_until: 0,
               check_at: 0,
@@ -421,12 +422,112 @@ defmodule SymphonyElixir.Linear.Coordinator do
   @spec ready?(map(), map()) :: boolean()
   def ready?(%{linear: nil}, _run), do: true
 
+  def ready?(state, %{parent_handoff: lineage} = child) when is_map(lineage) do
+    case state.workstreams.runs[lineage[:parent_run_id]] do
+      parent when is_map(parent) -> child_authorized?(state, parent, child)
+      _ -> false
+    end
+  end
+
+  def ready?(_state, %{parent_handoff: _}), do: false
+  def ready?(_state, %{parent_run_id: _}), do: false
+  def ready?(_state, %{task_id: "child/" <> _}), do: false
+
   def ready?(state, run) do
-    case Enum.find_value(state.linear.tasks, fn {_id, task} -> if task.run_id == run.id, do: task end) do
+    case native_task(state, run.id) do
       nil -> not String.starts_with?(run.task_id, "linear/")
       task -> task.status == :acknowledged and task[:authorized_stage] == run.stage_id and task[:authorized_until] > System.system_time(:millisecond)
     end
   end
+
+  @doc "Checks the current native lease for one exact coordinator-owned child."
+  @spec child_authorized?(map(), map(), map()) :: boolean()
+  def child_authorized?(%{linear: nil}, _parent, _child), do: true
+
+  def child_authorized?(state, parent, child) do
+    with task when is_map(task) <- native_task(state, parent.id),
+         true <- task.status == :acknowledged,
+         %{digest: digest, until: until} <- task[:owned_child_grant],
+         true <- until > System.system_time(:millisecond),
+         {:ok, current, _child} <- child_scope(state, task, parent, child),
+         true <- digest == current do
+      true
+    else
+      _ -> false
+    end
+  end
+
+  defp native_task(state, id), do: Enum.find_value(state.linear.tasks, fn {_id, task} -> if task.run_id == id, do: task end)
+
+  # Volatile worker receipts and child outputs are not lease pins. The handoff,
+  # parent inputs and both execution/definition contexts remain exact throughout.
+  defp child_scope(state, task, parent, child \\ nil) do
+    with true <- task.run_id == parent.id and task.issue_id == parent.issue_id,
+         true <- WorkstreamRun.compatible_policy?(parent),
+         {:ok, intent, child} <- scoped_child(state, parent, child),
+         true <- WorkstreamRun.compatible_policy?(child),
+         true <- child[:parent_run_id] == parent.id,
+         :ok <- WorkstreamChild.correlate(intent, Map.put(child.parent_handoff, :child_run_id, child.id)),
+         route when is_map(route) <- task_route(task, state.linear.config) do
+      pins = %{
+        task: Map.take(task, [:issue_id, :run_id, :session_id, :assignee_id, :agent_id, :route, :app_user_id, :oauth_client_id, :scope_revision, :event]),
+        route: route,
+        intent: intent,
+        parent:
+          Map.take(parent, [:id, :task_id, :issue_id, :workspace, :branch, :definition, :execution, :policy, :outputs, :artifacts, :stage_id, :current_candidate_context_id, :candidate_contexts]),
+        child: child_pins(child),
+        child_attempt: child_attempt_scope(child)
+      }
+
+      digest = :crypto.hash(:sha256, :erlang.term_to_binary(pins)) |> Base.encode16(case: :lower)
+      {:ok, digest, child}
+    else
+      _ -> {:error, :native_child_scope_mismatch}
+    end
+  rescue
+    _ -> {:error, :native_child_scope_mismatch}
+  end
+
+  defp scoped_child(state, %{status: :waiting_for_child, child_handoff: intent} = parent, supplied) do
+    child = supplied || state.workstreams.runs[intent.child_run_id]
+
+    with true <- parent.stage_id == intent.parent_stage_id and parent.current_attempt_id == intent.parent_attempt_id,
+         %{type: :child, status: :waiting_for_child, child_handoff: ^intent} <- parent.operations[intent.parent_attempt_id],
+         %{type: :child, status: :waiting, stage: stage} <- Enum.find(parent.attempts, &(&1.id == intent.parent_attempt_id)),
+         true <- stage == parent.stage_id,
+         true <- is_map(child) and child.status not in [:stopped, :blocked, :policy_blocked] do
+      {:ok, intent, child}
+    else
+      _ -> {:error, :native_child_scope_mismatch}
+    end
+  end
+
+  defp scoped_child(_state, %{status: :ready} = parent, supplied) do
+    with %{stage_id: stage_id} = prepared <- parent.execution[:child_preparation],
+         true <- stage_id == parent.stage_id,
+         stage = parent.definition.stages[parent.stage_id],
+         {:ok, inputs} <- WorkstreamChild.inputs(stage, parent.outputs),
+         definition = Map.put(prepared.definition, :input_values, inputs),
+         child = WorkstreamRun.new("child/" <> parent.id <> "/" <> stage.id, definition, prepared.workspace, [], prepared.execution),
+         {:ok, intent, linked} <- WorkstreamChild.prepare(parent, child),
+         true <- is_nil(supplied) or (supplied.status == :ready and is_nil(supplied.current_attempt_id) and child_pins(supplied) == child_pins(linked)) do
+      {:ok, intent, linked}
+    else
+      _ -> {:error, :native_child_scope_mismatch}
+    end
+  end
+
+  defp scoped_child(_state, _parent, _supplied), do: {:error, :native_child_scope_mismatch}
+
+  defp child_pins(child),
+    do:
+      Map.take(child, [:id, :task_id, :issue_id, :workspace, :branch, :definition, :execution, :policy, :parent_run_id, :parent_handoff, :stage_id, :current_candidate_context_id, :candidate_contexts])
+
+  defp child_attempt_scope(%{status: :ready} = child), do: "#{child.id}/#{child.stage_id}/#{length(child.attempts) + 1}"
+  defp child_attempt_scope(%{current_attempt_id: id}) when is_binary(id), do: id
+  defp child_attempt_scope(child), do: {:settled, length(child.attempts)}
+
+  defp child_stage?(run), do: is_map(run) and match?(%{type: :child}, get_in(run, [:definition, :stages, run.stage_id]))
 
   @spec report(map()) :: map()
   def report(%{linear: nil}), do: %{enabled: false}
@@ -475,7 +576,16 @@ defmodule SymphonyElixir.Linear.Coordinator do
 
           start_job(state, {:check, issue_id, revision}, fn ->
             with :ok <- Delegation.execution_isolated(run, route),
-                 do: Delegation.inspect_event(event, route, state.linear.opts)
+                 {:ok, issue} <- Delegation.inspect_event(event, route, state.linear.opts) do
+              if child_stage?(run) and run.status in [:ready, :waiting_for_child] do
+                with true <- issue.assignee_id == task.assignee_id,
+                     {:ok, digest, child} <- child_scope(state, task, run),
+                     :ok <- Delegation.qualified_child(child, run, task, route, state.linear.opts),
+                     do: {:ok, issue, digest}
+              else
+                {:ok, issue}
+              end
+            end
           end)
 
         true ->
@@ -573,6 +683,7 @@ defmodule SymphonyElixir.Linear.Coordinator do
               app_user_id: route["app_user_id"],
               oauth_client_id: route["oauth_client_id"],
               event: event,
+              owned_child_grant: nil,
               authorized_stage: nil,
               authorized_until: 0,
               scope_revision: 0,
@@ -624,6 +735,27 @@ defmodule SymphonyElixir.Linear.Coordinator do
 
       (task[:scope_revision] || 0) != revision ->
         state
+
+      match?({:ok, _, _}, result) ->
+        {:ok, issue, digest} = result
+
+        case if(issue.assignee_id == task.assignee_id, do: child_scope(state, task, run), else: {:error, :native_assignee_changed}) do
+          {:ok, ^digest, _child} ->
+            now = System.system_time(:millisecond)
+            task = Map.merge(task, %{owned_child_grant: %{digest: digest, until: now + 5_000}, authorized_stage: run.stage_id, authorized_until: now + 5_000, check_at: now + 1_000})
+            send(self(), :recover_authorized_children)
+            send(self(), :advance_workstreams)
+            save_task(state, task)
+
+          {:error, :native_assignee_changed} ->
+            stop_task(state, issue_id, task.event, stop)
+
+          _ ->
+            save_task(state, Map.merge(task, %{owned_child_grant: nil, authorized_stage: nil, authorized_until: 0, check_at: 0}))
+        end
+
+      match?({:ok, _}, result) and child_stage?(run) ->
+        save_task(state, Map.merge(task, %{owned_child_grant: nil, authorized_stage: nil, authorized_until: 0, check_at: 0}))
 
       match?({:ok, _}, result) and run.status == :ready ->
         task = Map.merge(task, %{authorized_stage: run.stage_id, authorized_until: System.system_time(:millisecond) + 5_000, check_at: System.system_time(:millisecond) + 1_000})
@@ -714,6 +846,7 @@ defmodule SymphonyElixir.Linear.Coordinator do
           activity_id: Delegation.new_activity_id(),
           assignee_id: issue.assignee_id,
           event: record.event,
+          owned_child_grant: nil,
           authorized_stage: nil,
           authorized_until: 0,
           check_at: 0,
@@ -796,6 +929,7 @@ defmodule SymphonyElixir.Linear.Coordinator do
               error: inspect(reason)
             },
             pending_reassignment: nil,
+            owned_child_grant: nil,
             authorized_stage: nil,
             authorized_until: 0,
             scope_revision: (task[:scope_revision] || 0) + 1
@@ -826,7 +960,7 @@ defmodule SymphonyElixir.Linear.Coordinator do
         :ok = WorkstreamStore.commit(state.workstreams.store, updated, event_id, receipt)
         :ok = SymphonyElixir.Evidence.sync!(state.workstreams.store)
         state = put_in(state.workstreams.runs[run.id], updated)
-        task = state.linear.tasks[record.event.issue_id] |> Map.merge(%{authorized_stage: nil, authorized_until: 0, check_at: 0})
+        task = state.linear.tasks[record.event.issue_id] |> Map.merge(%{owned_child_grant: nil, authorized_stage: nil, authorized_until: 0, check_at: 0})
         send(self(), :advance_workstreams)
         commit(state, record, task, :reply_delivered)
 
@@ -1033,6 +1167,7 @@ defmodule SymphonyElixir.Linear.Coordinator do
       oauth_client_id: route["oauth_client_id"],
       error: inspect(reason),
       event: event,
+      owned_child_grant: nil,
       authorized_stage: nil,
       authorized_until: 0,
       scope_revision: 0,
@@ -1071,6 +1206,7 @@ defmodule SymphonyElixir.Linear.Coordinator do
     task =
       Map.merge(task, %{
         status: :stopped,
+        owned_child_grant: nil,
         authorized_stage: nil,
         authorized_until: 0,
         stop_event_id: if(same_stop, do: task[:stop_event_id], else: event.id),

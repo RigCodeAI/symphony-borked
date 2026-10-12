@@ -155,11 +155,22 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info(message, %{workstreams: %{capture: capture}} = state)
       when not is_nil(capture) and
-             message in [:advance_workstreams, :linear_process, :linear_tick, :observe_stopped_publications, :reconcile_validation_checks, :reconcile_merged_cleanup, :reconcile_child_handoffs],
+             message in [
+               :advance_workstreams,
+               :linear_process,
+               :linear_tick,
+               :observe_stopped_publications,
+               :reconcile_validation_checks,
+               :reconcile_merged_cleanup,
+               :reconcile_child_handoffs,
+               :recover_authorized_children
+             ],
       do: {:noreply, state}
 
   def handle_info({ref, {:child_merge_proof, _key, _result}}, %{workstreams: %{capture: capture}} = state)
       when not is_nil(capture) and is_reference(ref), do: {:noreply, state}
+
+  def handle_info(:recover_authorized_children, state), do: {:noreply, recover_authorized_children(state)}
 
   def handle_info(:reconcile_child_handoffs, state) do
     {:noreply, reconcile_child_handoffs(state)}
@@ -3390,14 +3401,14 @@ defmodule SymphonyElixir.Orchestrator do
   defp start_child_handoff(state, parent) do
     stage = parent.definition.stages[parent.stage_id]
 
-    with :ok <- child_execution_scope(state),
-         %{stage_id: stage_id} = prepared <- parent.execution[:child_preparation],
+    with %{stage_id: stage_id} = prepared <- parent.execution[:child_preparation],
          true <- stage_id == stage.id,
          {:ok, inputs} <- WorkstreamChild.inputs(stage, parent.outputs),
          definition = Map.put(prepared.definition, :input_values, inputs),
          {:ok, _} <- WorkstreamRunner.validate_workspace(prepared.workspace, prepared.execution.workspace_root, definition),
          child = WorkstreamRun.new("child/" <> parent.id <> "/" <> stage.id, definition, prepared.workspace, [], prepared.execution),
          {:ok, waiting, child, intent} <- WorkstreamRun.begin_child(parent, child),
+         :ok <- child_execution_scope(state, parent, child),
          result <- WorkstreamStore.commit_child_handoff(state.workstreams.store, parent, waiting, child, intent),
          {kind, stored_parent, stored_child} when kind in [:ok, :duplicate] <- result do
       :ok = Evidence.sync!(state.workstreams.store)
@@ -3407,13 +3418,15 @@ defmodule SymphonyElixir.Orchestrator do
       state
     else
       {:error, :capture_in_progress} -> state
+      {:error, :native_child_authorization_not_qualified} -> state
       {:error, reason} -> block_child_handoff(state, parent, reason)
       _ -> block_child_handoff(state, parent, :pinned_child_preparation_missing)
     end
   end
 
-  defp child_execution_scope(%{linear: nil}), do: :ok
-  defp child_execution_scope(_state), do: {:error, :native_child_authorization_not_qualified}
+  defp child_execution_scope(state, parent, child) do
+    if LinearCoordinator.child_authorized?(state, parent, child), do: :ok, else: {:error, :native_child_authorization_not_qualified}
+  end
 
   defp block_child_handoff(state, parent, reason) do
     blocked = Map.merge(parent, %{status: :blocked, phase: :blocked, child_error: inspect(reason)})
@@ -3421,15 +3434,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp child_dispatch_allowed?(state, %{parent_handoff: lineage} = child) when is_map(lineage) do
-    with true <- child[:parent_run_id] == lineage[:parent_run_id],
-         parent when is_map(parent) <- durable_run(state, lineage[:parent_run_id]),
-         true <- parent.status == :waiting_for_child,
-         intent when is_map(intent) <- parent[:child_handoff],
-         :ok <- WorkstreamChild.correlate(intent, Map.put(lineage, :child_run_id, child.id)),
-         true <- WorkstreamRun.compatible_policy?(parent),
-         # Native delegation currently authorizes only the directly delegated run.
-         # Owned-child native authorization must be qualified before that route runs.
-         true <- is_nil(state.linear) do
+    with {:ok, parent} <- linked_child_parent(state, child),
+         :ok <- child_execution_scope(state, parent, child) do
       true
     else
       _ -> false
@@ -3438,7 +3444,25 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp child_dispatch_allowed?(_state, %{parent_handoff: _invalid}), do: false
   defp child_dispatch_allowed?(_state, %{parent_run_id: _unlinked}), do: false
+  defp child_dispatch_allowed?(_state, %{task_id: "child/" <> _unlinked}), do: false
   defp child_dispatch_allowed?(_state, _run), do: true
+
+  defp linked_child_parent(state, %{parent_handoff: lineage} = child) when is_map(lineage) do
+    with true <- child[:parent_run_id] == lineage[:parent_run_id],
+         parent when is_map(parent) <- durable_run(state, lineage[:parent_run_id]),
+         true <- parent.status == :waiting_for_child,
+         intent when is_map(intent) <- parent[:child_handoff],
+         true <- parent.stage_id == intent.parent_stage_id and parent.current_attempt_id == intent.parent_attempt_id,
+         %{type: :child, status: :waiting_for_child, child_handoff: ^intent} <- parent.operations[intent.parent_attempt_id],
+         :ok <- WorkstreamChild.correlate(intent, Map.put(lineage, :child_run_id, child.id)),
+         true <- WorkstreamRun.compatible_policy?(parent) do
+      {:ok, parent}
+    else
+      _ -> {:error, :child_linkage_mismatch}
+    end
+  end
+
+  defp linked_child_parent(_state, _child), do: {:error, :child_linkage_mismatch}
 
   defp reconcile_child_handoffs(%{workstreams: nil} = state), do: state
 
@@ -3501,7 +3525,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     eligible = WorkstreamCleanup.candidate?(child) or child[:cleanup][:status] == :cleaned
 
-    if child_execution_scope(state) == :ok and parent.status == :waiting_for_child and eligible and is_map(refs) and due do
+    if child_execution_scope(state, parent, child) == :ok and parent.status == :waiting_for_child and eligible and is_map(refs) and due do
       kind = if map_size(refs) == 0, do: :retain, else: :verify
 
       task =
@@ -3541,8 +3565,8 @@ defmodule SymphonyElixir.Orchestrator do
         child = durable_run(state, job.child_id)
 
         with false <- __MODULE__.capture_held?(state),
-             :ok <- child_execution_scope(state),
              true <- is_map(parent) and is_map(child),
+             :ok <- child_execution_scope(state, parent, child),
              true <- workstream_fingerprint(parent) == job.parent_fingerprint and workstream_fingerprint(child) == job.child_fingerprint,
              :ok <- accept_child_proof_kind(job[:kind], result) do
           case result do
@@ -3712,6 +3736,19 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp recover_authorized_children(%{workstreams: nil} = state), do: state
+
+  defp recover_authorized_children(state) do
+    state = reconcile_child_handoffs(state)
+
+    Enum.reduce(state.workstreams.runs, state, fn {_id, run}, acc ->
+      if is_map(run[:parent_handoff]) and run.status in [:executing, :reconciling] and
+           (is_nil(acc.workstreams.workers[run.current_attempt_id]) or acc.workstreams.workers[run.current_attempt_id][:launch_pending] == true) and child_dispatch_allowed?(acc, run),
+         do: recover_workstream(acc, run),
+         else: acc
+    end)
+  end
+
   defp recover_workstreams(%{workstreams: nil} = state), do: state
 
   defp recover_workstreams(state) do
@@ -3723,12 +3760,21 @@ defmodule SymphonyElixir.Orchestrator do
       cond do
         linear_stopped?(acc, run) -> stop_linear_workstream(acc, run)
         run.status in [:complete, :blocked, :policy_blocked, :stopped] -> acc
-        not child_dispatch_allowed?(acc, run) -> acc
+        not child_dispatch_allowed?(acc, run) -> observe_unleased_child(acc, run)
         not WorkstreamRun.compatible_policy?(run) -> block_workstream_policy(acc, run)
         run.status in [:executing, :reconciling] -> recover_workstream(acc, run)
         true -> acc
       end
     end)
+  end
+
+  # A revoked lease gates launch, not observation of an existing operation. Attach
+  # without sending a start signal; reconciled ready work still needs a fresh grant.
+  defp observe_unleased_child(state, run) do
+    if run.status in [:executing, :reconciling] and WorkstreamRun.compatible_policy?(run) and
+         match?({:ok, _parent}, linked_child_parent(state, run)),
+       do: recover_workstream(state, run, false),
+       else: state
   end
 
   defp linear_stopped?(%{linear: nil}, _run), do: false
@@ -3960,7 +4006,7 @@ defmodule SymphonyElixir.Orchestrator do
     end)
   end
 
-  defp recover_workstream(state, run) do
+  defp recover_workstream(state, run, launch_allowed \\ true) do
     operation = Map.fetch!(run.operations, run.current_attempt_id)
     worker = find_workstream_worker(state.task_supervisor, run, operation)
 
@@ -3968,13 +4014,18 @@ defmodule SymphonyElixir.Orchestrator do
       workers = state.workstreams.workers
 
       if Map.has_key?(workers, run.current_attempt_id) do
+        pending = workers[run.current_attempt_id][:launch_pending] == true
+        if launch_allowed and pending, do: send(worker, :workstream_start)
         send(worker, {:workstream_redeliver, self()})
-        state
+
+        if launch_allowed and pending,
+          do: update_in(state.workstreams.workers[run.current_attempt_id], &Map.delete(&1, :launch_pending)),
+          else: state
       else
         ref = Process.monitor(worker)
-        send(worker, :workstream_start)
+        if launch_allowed, do: send(worker, :workstream_start)
         send(worker, {:workstream_redeliver, self()})
-        put_in(state.workstreams.workers[run.current_attempt_id], %{pid: worker, ref: ref, run_id: run.id})
+        put_in(state.workstreams.workers[run.current_attempt_id], %{pid: worker, ref: ref, run_id: run.id, launch_pending: not launch_allowed})
       end
     else
       reconciler = Keyword.get(state.workstreams.opts, :workstream_reconciler, &SymphonyElixir.Publisher.reconcile/2)

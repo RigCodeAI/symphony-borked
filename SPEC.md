@@ -2866,8 +2866,17 @@ output production MUST use the service's typed, permanently archived references.
 Parent result values MUST come from verified retained bytes, with a complete output
 map and matching original producer identities; raw workspace-dependent values MUST
 NOT be copied into the parent. Positive runtime contract verification uses synthetic
-remote receipts with real local storage; native owned-child authorization and live
-external qualification remain pending in this source slice.
+remote receipts with real local storage. Native owned-child work MUST require a fresh,
+short-lived service grant from the parent's acknowledged Linear assignment. The grant
+MUST bind the issue/session/assignee, assignment revision, parent stage attempt, exact
+child identity, child stage attempt and candidate context, and both pinned
+definition/execution contexts. Child agent settings
+MUST match the parent's selected Cloud Agent, and its separate clone MUST come from
+trusted configuration. Expiry, restart, stop and reassignment MUST revoke the grant.
+Unmatched child IDs MUST fail closed regardless of task ID prefix. Creation, child
+dispatch/recovery and parent proof acceptance MUST recheck that exact grant. This
+source contract does not qualify native Coverage intake, child question/reply routing
+or live external execution.
 Synthetic fixtures MUST NOT authorize production publication or support claims.
 Coverage Factory remains the owner of scenario/oracle approval, specimen qualification
 and trusted scoring. See [child workstreams](docs/child-workstreams.md) for current limits.

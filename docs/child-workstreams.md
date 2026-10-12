@@ -90,10 +90,15 @@ A final human reply,
 `child.status == :complete`, matching
 lineage IDs or an asserted `merged: true` is insufficient.
 
-Native child dispatch also remains unqualified: the current Linear authorization
-contract covers the directly delegated run. The child path fails closed in native
-mode rather than treating an internal task ID as authorization. This local contract
-increment adds no public approval endpoint or synthetic production success path.
+Native authorization source now extends the existing Linear task owner with a
+short-lived grant for one exact linked child. It binds the fresh parent assignment,
+current attempt/child identity, pinned settings and trusted clone. Child creation,
+dispatch/recovery and parent proof acceptance fail closed without that grant; internal
+task IDs do not authorize child work. Restart discards grants and requires a fresh
+native check before recovery through the existing owner. The intake restriction to
+`software-change` remains. Native Coverage intake, child question/reply routing and
+live child qualification remain pending. See [native delegation](linear-delegation.md).
+This increment adds no public approval endpoint or synthetic production success path.
 
 The fixtures in `elixir/test/fixtures/dev243_child/` are test-only. They do not publish
 PRs or provide trusted scoring assertions. Full DEV-243 still requires an agreed
@@ -101,7 +106,7 @@ Coverage Factory adapter/schema, approved frozen scenario/oracle/stack identitie
 one real qualified vulnerable/safe pair, trusted scorer receipts, security-owner
 approval and release-owner support-claim review.
 
-Validation used image
+The preceding merged local handoff increment was validated using image
 `sha256:930b428bffd3752c5a53310b0b93173e0fdf95e307970bb2c5854d894611d3c9`,
 with networking disabled and a dedicated container. The selected `mix test` pass
 included all seven child test files plus `durable_workstream_test.exs`,

@@ -1,8 +1,9 @@
 # DEV-239 source evidence and rollout boundary
 
 Development PR: <https://github.com/RigCodeAI/symphony/pull/20>.
-Tested source commit: `aa8583d6968fa6fced8c5bdf19a47e593c746745`.
-This record-only follow-up does not change the tested implementation.
+Original tested source commit: `aa8583d6968fa6fced8c5bdf19a47e593c746745`.
+Tested PR review correction: `c16ee06dc056ff5f1284dcf7b069712c95ea3849`.
+The following evidence-only commit does not change this tested code.
 
 Branch: `cycle/dev-239`. Source base: merged DEV-238 PR 18,
 `e7fd8290ed7e508547867c9a5233d9b9eb0bfd16`. GitHub independently confirmed merge.
@@ -53,6 +54,21 @@ cover prompt wake, cancellation during a paused read, and altered/expired seals.
 The observer initially used a strict boolean operator on a nil reservation, which
 restarted its coordinator; the OTP monitor regression reproduced it and now passes.
 
+Coordinator PR review identified two further source blockers:
+
+- Immediate protected-reply wakes started new permanent polling chains. One owned
+  timer now sends a token-bound periodic tick; immediate wakes perform reconciliation
+  without scheduling. The OTP regression checks repeated queued-reply wakes, timer
+  replacement and ignored stale ticks.
+- Real GitHub responses include annotation metadata inside check output. Inbound
+  normalization now extracts validated title, summary and text separately. GET/list,
+  create and update fixtures include `annotations_count: 0` and `annotations_url`
+  from the [documented response shape](https://docs.github.com/en/rest/checks/runs).
+  Malformed content and outbound annotation metadata remain rejected.
+  A same-App unrelated check with the documented empty external ID also blocked
+  listing before name filtering; the regression reproduced this error before the
+  inbound-only fix. Outbound external IDs still must be nonempty.
+
 ## Checks actually run
 
 Own local container `dev239-check`, pinned image
@@ -64,13 +80,21 @@ was copied read-only. Other ticket containers and cloud workers were not modifie
 - `mix compile --warnings-as-errors`: passed.
 - `mix specs.check`: passed.
 - `mix format --check-formatted`: passed.
-- New gate/transport/shipped-flow suite: **43 tests, zero failures**.
+- Original gate/transport/shipped-flow suite: **43 tests, zero failures**.
+- PR review correction suite: **48 tests, zero failures**; includes repeated timer
+  wakes, documented GitHub metadata, malformed content and empty external IDs.
+  Compilation, specs, full formatting and PR-body validation also passed again.
 - Final related validation/publication/workstream/durable lifecycle suite:
   **117 tests, zero failures, one Docker validation test excluded**.
 - `git diff --check`: passed.
 - `make all`: executed; failed at strict Credo, including baseline and new
   refactoring/readability categories. Setup/build/format/spec stages were reached.
   Coverage and Dialyzer were not reached. Broad CI is not green.
+
+Correction diagnostics are `/private/tmp/dev239-review-focused.log` and
+`/private/tmp/dev239-empty-id-reproduction.log` (one expected failure before the fix).
+Current remote CI on the prior head `95279392306410ca2eb3268d1d7fcc90c4e9371b`
+also stopped at strict Credo; CodeQL and PR-body checks passed.
 
 Development logs are `/private/tmp/dev239-focused-final.log` and
 `/private/tmp/dev239-make-all.log`. They are local diagnostics, not trusted factory
@@ -94,6 +118,8 @@ scheduling, the monitor and stage-verifier owner callbacks, async stage-result a
 `validation_checks` tasks. The orchestrator has the exact seam list. Combined
 capture readiness is not claimed. DEV-243 owns child linkage and DEV-241 cleanup;
 this increment does not alter Store/Evidence ownership or those barriers.
+The periodic `{:validation_checks_tick, token}` handler also requires the capture
+reconciliation guard while preserving its single owned timer.
 
 ## Short reproducible local demo
 
@@ -108,7 +134,7 @@ On this host, after acquiring the shared build slot:
 /opt/homebrew/bin/docker stop dev239-check
 ```
 
-Expected: the 43 source/contract tests pass with no live App, PR, upload or merge.
+Expected: the 48 source/contract tests pass with no live App, PR, upload or merge.
 Tests delete only their own temporary fixtures. Stop only this ticket's container;
 preserve its cache volumes and diagnostics until the grouped checkpoint is reviewed.
 Live demo commands and expected readbacks are in the rollout plan and remain gated

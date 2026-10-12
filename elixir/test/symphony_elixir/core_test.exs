@@ -615,7 +615,7 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "terminal cleanup uses the workspace recorded for the running issue" do
+  test "terminal cleanup retains recorded work outside the current configured root" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -675,7 +675,7 @@ defmodule SymphonyElixir.CoreTest do
 
       _updated_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
 
-      refute File.exists?(old_workspace)
+      assert File.exists?(old_workspace)
       assert File.exists?(new_workspace)
     after
       File.rm_rf(test_root)

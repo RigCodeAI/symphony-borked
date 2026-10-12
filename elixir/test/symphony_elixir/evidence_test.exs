@@ -17,7 +17,18 @@ defmodule SymphonyElixir.EvidenceTest do
   test "redacts credentials and excludes hidden reasoning before database and bundle persistence", c do
     System.put_env("FACTORY_TEST_SECRET", "fixture-secret-12345")
     on_exit(fn -> System.delete_env("FACTORY_TEST_SECRET") end)
-    run = run("run-1", "linear/task-1")
+    attempt_id = "run-1/implement/1"
+
+    run =
+      run("run-1", "linear/task-1")
+      |> Map.merge(%{
+        stage_id: "implement",
+        current_attempt_id: attempt_id,
+        attempts: [
+          %{id: attempt_id, stage: "implement", ordinal: 1, type: :agent, status: :completed, gate: :passed, gate_detail: "checks passed", result: %{status: :ok}}
+        ]
+      })
+
     assert :ok = Evidence.snapshot(run, "created", %{password: "unpatterned-password", client_secret: "unpatterned-client-credential"}, c.store)
 
     event = %{
@@ -57,6 +68,18 @@ defmodule SymphonyElixir.EvidenceTest do
 
     assert json =~ "Visible question"
     html = EvidenceController.render_task([view])
+    assert html =~ "<h3>Conversation</h3>"
+    assert html =~ "<strong>Agent</strong> · Stage implement · Attempt 1"
+    assert html =~ "<strong>Task input</strong> · Stage implement · Attempt 1"
+    assert html =~ "<details><summary><strong>Task input</strong>"
+    assert html =~ "Latest gate/check:</strong> Passed"
+    assert Regex.match?(~r/<blockquote[^>]*>.*&lt;script&gt;bad&lt;\/script&gt;.*<\/blockquote>/s, html)
+    assert html =~ "Visible question; [REDACTED]"
+    assert html =~ "<details><summary>Run details, waits and policy</summary>"
+    assert html =~ "<details><summary>Observable event audit details (3 events)</summary>"
+    {conversation_position, _} = :binary.match(html, "<h3>Conversation</h3>")
+    {details_position, _} = :binary.match(html, "<details><summary>Run details, waits and policy</summary>")
+    assert conversation_position < details_position
     assert html =~ "&lt;script&gt;bad&lt;/script&gt;"
     refute html =~ "<script>"
     assert :ok = GenServer.stop(c.store)
@@ -67,6 +90,29 @@ defmodule SymphonyElixir.EvidenceTest do
       refute data =~ "hidden-model-thought"
       refute data =~ "unpatterned-password"
     end
+  end
+
+  test "conversation omits unknown and non-message events while retaining them in audit details", c do
+    run = run("audit-run", "audit-task")
+    assert :ok = Evidence.snapshot(run, "created", %{kind: :queued}, c.store)
+    assert {:ok, [view]} = Evidence.task(Evidence.task_key(run.task_id), c.store)
+
+    audit_events = [
+      %{"kind" => "item/completed", "item" => %{"type" => "commandExecution", "command" => "check command"}},
+      %{"kind" => "future_event", "message" => "future event payload"}
+    ]
+
+    html = EvidenceController.render_task([%{view | events: audit_events}])
+    [_, after_conversation_heading] = String.split(html, "<h3>Conversation</h3>", parts: 2)
+
+    [conversation, _audit_details] =
+      String.split(after_conversation_heading, "<details><summary>Run details, waits and policy</summary>", parts: 2)
+
+    assert conversation =~ "No agent messages or task input were recorded."
+    refute conversation =~ "check command"
+    refute conversation =~ "future event payload"
+    assert html =~ "commandExecution"
+    assert html =~ "future event payload"
   end
 
   test "restart and workspace deletion retain transcript; latest exact upload receipt gates cleanup", c do
@@ -126,6 +172,7 @@ defmodule SymphonyElixir.EvidenceTest do
     assert html =~ "Stage implement · Attempt 1"
     assert html =~ "Stage implement · Attempt 2"
     assert html =~ "Stage approval · Attempt 3"
+    assert html =~ "Latest gate/check:</strong> Passed"
     assert html =~ "original-definition"
     assert html =~ "Approve candidate?"
     changed = %{run("new-run", child.task_id) | definition: %{child.definition | definitions: %{"workstream.yaml" => %{sha256: "new-definition", text: "new instructions"}}}}

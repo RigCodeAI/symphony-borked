@@ -1,0 +1,9 @@
+version: 1
+name: controlled-capacity-worker
+model: gpt-6-luna
+reasoning_effort: medium
+daybreak: false
+approval_policy: never
+sandbox: workspace-write
+instructions: [instructions.md]
+skills: []

@@ -42,6 +42,7 @@ WORKER_HOST_PUBLIC_KEY = WORKER_HOST_KEY_DIR / "ssh_host_ed25519_key.pub"
 WORKER_HOST_KEY_MARKER = DATA_ROOT / "worker-hostkey.json"
 MAX_MODEL_AUTH_BYTES = 1024 * 1024
 MAX_EVIDENCE_INDEX_BYTES = 256 * 1024 * 1024
+SQLITE_BACKUP_TIMEOUT_SECONDS = 30
 TOKEN_PATTERN = re.compile(r"(?:sk-|gh[pousr]_|github_pat_)[A-Za-z0-9_-]+|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
 COORDINATOR_DEFAULT_SECRET_ENVS = {"LINEAR_API_KEY", "LINEAR_API_TOKEN"}
 COORDINATOR_ADDITIONAL_SECRET_PAIRS = (
@@ -663,6 +664,39 @@ def archive_runs(cloud):
             os.close(fd)
 
 
+def _sqlite_backup(path, target):
+    # The existing deployment installs this root-owned CLI. Unlike Python's
+    # connect(), -nofollow checks symlinks at the actual database open. Its
+    # .backup still uses SQLite's snapshot API, including committed WAL data.
+    # A separate process also lets the deadline kill/reap blocked SQLite calls.
+    with tempfile.TemporaryDirectory(prefix="sqlite-snapshot-", dir=target.parent) as directory:
+        try:
+            version = subprocess.run(
+                ["/usr/bin/sqlite3", "-init", "/dev/null", "-version"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, check=True, timeout=SQLITE_BACKUP_TIMEOUT_SECONDS,
+            )
+            match = re.match(r"(\d+)\.(\d+)\.(\d+)(?:\s|$)", version.stdout)
+            # 3.39.3 extended NOFOLLOW to every component, not only the leaf.
+            if not match or tuple(map(int, match.groups())) < (3, 39, 3):
+                raise RuntimeError("SQLite backup requires CLI version 3.39.3 or newer")
+            subprocess.run(
+                ["/usr/bin/sqlite3", "-readonly", "-nofollow", "-batch", "-bail", "-init", "/dev/null",
+                 str(path), ".backup snapshot.sqlite"],
+                cwd=directory, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, check=True, timeout=SQLITE_BACKUP_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("SQLite backup timed out; quiesce the database owner before retrying") from None
+        except (OSError, subprocess.CalledProcessError):
+            raise RuntimeError("SQLite backup failed; check source paths and quiesce a locked database owner") from None
+        snapshot = Path(directory) / "snapshot.sqlite"
+        with closing(sqlite3.connect(snapshot.as_uri() + "?mode=ro", uri=True)) as dest:
+            if dest.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise RuntimeError("SQLite backup integrity check failed")
+        os.replace(snapshot, target)
+
+
 def backup(cloud):
     # DEV-232 owns the runtime database. Back up any configured *.sqlite files
     # with SQLite's online backup API, never by copying live WAL files.
@@ -676,6 +710,21 @@ def backup(cloud):
     evidence_index = evidence_root / "index.sqlite"
     evidence_index_info = None
     _assert_no_symlink_components(DATA_ROOT)
+    try:
+        state_info = state.lstat()
+    except FileNotFoundError:
+        state_info = None
+    databases = []
+    if state_info is not None:
+        if not stat.S_ISDIR(state_info.st_mode):
+            raise ValueError("backup state root must be a real directory")
+        _assert_no_symlink_components(state)
+        databases = sorted(state.glob("*.sqlite"))
+        # Validate the whole inventory before reading or uploading any database.
+        for path in databases:
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise ValueError("backup database must be a single-link regular file")
     try:
         evidence_root_info = evidence_root.lstat()
     except FileNotFoundError:
@@ -693,23 +742,15 @@ def backup(cloud):
                 evidence_index_info.st_size > MAX_EVIDENCE_INDEX_BYTES):
             raise ValueError("evidence index must be a single-link regular file within the backup size limit")
     with tempfile.TemporaryDirectory(prefix="factory-backup-") as directory:
-        for path in sorted(state.glob("*.sqlite")):
-            if path.is_symlink():
-                raise ValueError("backup database must not be a symlink")
+        for path in databases:
             target = Path(directory) / path.name
-            with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)) as source, closing(sqlite3.connect(target)) as dest:
-                source.backup(dest)
-                if dest.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                    raise RuntimeError("SQLite backup integrity check failed")
+            _sqlite_backup(path, target)
             payload = target.read_bytes()
             cloud.put(bucket, f"backups/{stamp}/{path.name}", payload)
             manifest["databases"].append({"name": path.name, "sha256": hashlib.sha256(payload).hexdigest()})
         if evidence_index_info is not None:
             target = Path(directory) / "evidence-index.sqlite"
-            with closing(sqlite3.connect(f"file:{evidence_index}?mode=ro", uri=True, timeout=30)) as source, closing(sqlite3.connect(target)) as dest:
-                source.backup(dest)
-                if dest.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                    raise RuntimeError("SQLite evidence index backup integrity check failed")
+            _sqlite_backup(evidence_index, target)
             if target.stat().st_size > MAX_EVIDENCE_INDEX_BYTES:
                 raise ValueError("evidence index backup exceeds the size limit")
             payload = target.read_bytes()
@@ -910,7 +951,7 @@ def main():
         backup(cloud)
 
 
-if __name__ == "__main__":
+def run_cli():
     try:
         main()
     except Exception as exc:
@@ -921,3 +962,7 @@ if __name__ == "__main__":
         detail = f": {exc}" if isinstance(exc, (ValueError, RuntimeError, PermissionError)) else ""
         print(f"factory {command} failed ({type(exc).__name__}){detail}", file=sys.stderr)
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    run_cli()

@@ -10,10 +10,12 @@ The coordinator owns this store; it is not another scheduler. `/tasks/<task-key>
 is a stable URL derived from the task ID, shared by all runs for that task. The
 viewer shows stage attempts, retries, gates, questions, pinned definitions,
 parent/child links, observable completed messages/tool events, and test artifacts.
-Reloading the page reads current persisted events. Every route, including artifact
-downloads, verifies Google's signed IAP JWT and the configured domain/email
-allowlist. Unsigned identity headers grant no access. Evidence responses use
-`Cache-Control: private, no-store`.
+Completed agent messages appear first as a readable conversation with their stage
+and attempt. Task input can be expanded beside those messages. Waits, attempt data, pinned policy and raw event details remain
+available in expandable sections. Reloading the page reads current persisted
+events. Every route, including artifact downloads, verifies Google's signed IAP
+JWT and the configured domain/email allowlist. Unsigned identity headers grant no
+access. Evidence responses use `Cache-Control: private, no-store`.
 
 ## Configuration
 

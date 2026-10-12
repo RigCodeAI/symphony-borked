@@ -298,7 +298,10 @@ defmodule SymphonyElixir.WorkerOperationTest do
                  send(self(), :registered_review)
                  :ok
                end,
-               preparation, rpc_fun: rpc_fun, stream_start_fun: fn _, _, _ -> {:ok, fake_port(stream_script(~s(echo '{"ok":"stream_ready"}'), "exit 0"))} end)
+               preparation,
+               rpc_fun: rpc_fun,
+               stream_start_fun: fn _, _, _ -> {:ok, fake_port(stream_script(~s(echo '{"ok":"stream_ready"}'), "exit 0"))} end
+             )
 
     assert_receive :prepared_review
     assert {:error, :invalid_worker_check_command} = WorkerOperation.run_check(command, @workspace, 1_000, @operation_id, @config, fn _ -> :ok end, %{})

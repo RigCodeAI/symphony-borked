@@ -1,0 +1,45 @@
+version: 1
+name: capacity-with-human-wait
+inputs: [task]
+agents:
+  worker: agent.yaml
+entry: prepare
+stages:
+  - id: prepare
+    type: agent
+    inputs: [task]
+    outputs: [candidate]
+    agent: worker
+    prompt: Prepare the controlled candidate.
+    next: validate
+  - id: validate
+    type: check
+    inputs: [candidate]
+    outputs: [validation]
+    gate:
+      command: [test, "-f", effects]
+      timeout_ms: 1000
+      success: decision
+      failure: blocked
+  - id: decision
+    type: human_wait
+    inputs: [candidate, validation]
+    outputs: [answer]
+    prompt: Continue the controlled candidate?
+    next: finish
+  - id: finish
+    type: agent
+    inputs: [candidate, answer]
+    outputs: [result]
+    agent: worker
+    prompt: Finish the controlled candidate.
+    next: verify
+  - id: verify
+    type: check
+    inputs: [result]
+    outputs: [verification]
+    gate:
+      command: [test, "-f", effects]
+      timeout_ms: 1000
+      success: complete
+      failure: blocked

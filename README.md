@@ -136,6 +136,11 @@ Named cloud/review definitions and a bounded subscription qualification command 
 available. See [worker qualification](docs/worker-qualification.md) for exact requested
 settings, readiness checks, receipts and the Daybreak verification boundary.
 
+The shipped software-change definition uses a [service-owned local commit check](docs/local-candidate-commits.md)
+after the agent edits and tests. This preserves Codex's protected Git metadata while
+preparing a real local candidate and transport bundle. Activation and publication
+remain separate verified boundaries.
+
 ## Factory boundaries
 
 - Extend the existing coordinator; keep one writer per task and reconcile before retrying.

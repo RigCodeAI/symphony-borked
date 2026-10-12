@@ -1,0 +1,23 @@
+version: 1
+name: capacity-without-human-wait
+inputs: [task]
+agents:
+  worker: agent.yaml
+entry: execute
+stages:
+  - id: execute
+    type: agent
+    inputs: [task]
+    outputs: [result]
+    agent: worker
+    prompt: Execute the controlled local task.
+    next: verify
+  - id: verify
+    type: check
+    inputs: [result]
+    outputs: [verification]
+    gate:
+      command: [test, "-f", effects]
+      timeout_ms: 1000
+      success: complete
+      failure: blocked

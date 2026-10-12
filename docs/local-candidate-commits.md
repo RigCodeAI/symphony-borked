@@ -1,0 +1,79 @@
+# Local candidate commits
+
+The software-change workstream now uses `implement` → `local-commit` →
+`inspect-candidate` → `candidate-ready`. The agent edits and runs development checks,
+then leaves its changes uncommitted. The fixed service check creates the local commit
+as the existing unprivileged worker. Publication and human GitHub merge remain separate.
+
+## Why the commit is service-owned
+
+DEV-251's real Rust test passed, but `git add` could not create `.git/index.lock`.
+The worker owns its clone and Git metadata, and its underlying mount is writable.
+Codex's inner `workspace-write` sandbox protects `.git`; `approval_policy: never`
+does not grant access beyond that sandbox. Changing ownership would not fix this
+boundary. The new flow retains the sandbox rather than giving the model writable
+Git configuration and hooks.
+
+The commit command is literal Python in the pinned workstream definition. It runs
+through the existing contained executable-check path, after trusted termination of
+the agent, with the check's operation identity saved before release. It uses fixed
+system executables and a clean Git environment. Hooks, signing, prompts and network
+protocols are disabled. Linked/shared metadata, metadata symlinks, detached HEAD,
+missing candidate input and unsupported Git configuration block the gate.
+
+The service stages nonignored changes and creates one commit with a fixed author and
+`Factory-Candidate` marker derived from the saved implementation result. Repeating
+the same check on a clean checkout succeeds only with that marker; a clean base or
+another implementation result cannot be reported as a prepared candidate. Failure
+preserves the checkout for diagnosis rather than resetting or discarding changes.
+
+## Candidate transport contract
+
+The `candidate-commit` check output contains `exit_status` and a JSON object in its
+`output` field:
+
+```json
+{
+  "candidate_commit": "<full Git SHA>",
+  "base_commit": "<immediate parent SHA>",
+  "candidate_input_sha256": "<saved candidate-input digest>",
+  "branch": "refs/heads/<local branch>",
+  "candidate_bundle": ".git/factory-candidates/<input digest>.bundle",
+  "bundle_sha256": "<bundle SHA-256>",
+  "bundle_bytes": 1234
+}
+```
+
+The fixed check generates that path and a Git bundle containing the new commit,
+excluding its immediate parent. Git verifies the bundle prerequisite and exact head
+before the output is emitted. `base_commit` is the bundle prerequisite, not a substitute
+for the repository's approved validation base. The bundle resides under the model's
+protected Git metadata. No model-selected snapshot path is accepted.
+
+A consumer must bind the output to the pinned successful service check and its exact
+terminated worker operation, retrieve through an authorized bounded channel, verify
+bytes/checksum, and import into a controlled coordinator checkout of the prerequisite.
+Then it must verify the candidate head, branch and source before trusted validation.
+The coordinator's unchanged seed clone cannot stand in for the worker candidate.
+DEV-238 owns automated bundle retrieval and publication-side consumption; the producer
+alone does not prove automated transport, validation, archival or publication.
+
+## Verification and rollout
+
+Focused contracts exercise real Git commits, clean-base rejection, same-input replay,
+different-input rejection, disabled hooks/signing, configuration rejection, and bundle
+import into a receiver that did not already contain the candidate commit. Run from
+`elixir/`:
+
+```bash
+mise exec -- mix test test/symphony_elixir/local_candidate_commit_test.exs test/symphony_elixir/software_change_test.exs
+```
+
+Live verification uses a dedicated disposable Rig clone with push disabled, the approved
+contained worker, an isolated journal outside the clone, real agent/check operations,
+and exact termination proofs. Compilation/focused checks and live results must be
+recorded separately; this document does not assert deployment.
+
+New definitions apply only to new runs. Old questions, waits, attempts, stop tombstones
+and uncommitted changes retain their original pins and history. Do not repin an old run
+or answer a stale question to force it through this new pipeline.

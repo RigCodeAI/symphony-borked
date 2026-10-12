@@ -65,17 +65,104 @@ defmodule SymphonyElixirWeb.EvidenceController do
       escape(run.revision) <>
       "</code></p>" <>
       links(run) <>
+      "<h3>Conversation</h3>" <>
+      conversation(run) <>
+      latest_check_summary(snapshot) <>
+      "<details><summary>Run details, waits and policy</summary>" <>
       "<h3>Stages and attempts</h3>" <>
       Enum.map_join(snapshot["attempts"] || [], "", &attempt/1) <>
       "<h3>Waiting gate and questions</h3>" <>
       json(%{"pending_wait" => snapshot["pending_wait"], "questions" => snapshot["questions"]}) <>
       "<details><summary>Pinned definitions, agents and policy</summary>" <>
       json(Map.take(snapshot, ~w(definitions pinned_definitions agents policy))) <>
-      "</details>" <>
-      "<h3>Observable events</h3>" <>
+      "</details></details>" <>
+      "<details><summary>Observable event audit details (#{length(run.events)} events)</summary>" <>
       Enum.map_join(run.events, "", &json/1) <>
-      "<h3>Artifact manifest</h3>" <> artifact_links(run) <> json(run.artifacts) <> "</article>"
+      "</details>" <>
+      "<h3>Evidence artifacts</h3>" <>
+      artifact_links(run) <>
+      "<details><summary>Artifact manifest</summary>" <> json(run.artifacts) <> "</details></article>"
   end
+
+  defp conversation(run) do
+    messages = Enum.flat_map(run.events, &conversation_message/1)
+
+    case messages do
+      [] -> "<p>No agent messages or task input were recorded.</p>"
+      messages -> Enum.map_join(messages, "", &render_conversation_message(run, &1))
+    end
+  end
+
+  defp conversation_message(%{"kind" => "item/completed", "item" => %{"type" => "agentMessage", "text" => text}} = event)
+       when is_binary(text) and text != "" do
+    [%{speaker: "Agent", text: text, event: event}]
+  end
+
+  defp conversation_message(%{"kind" => "item/completed", "item" => %{"type" => "userMessage", "content" => content}} = event) do
+    text =
+      content
+      |> List.wrap()
+      |> Enum.flat_map(fn
+        %{"type" => "text", "text" => value} when is_binary(value) -> [value]
+        _ -> []
+      end)
+      |> Enum.join("\n")
+
+    if text == "", do: [], else: [%{speaker: "Task input", text: text, event: event}]
+  end
+
+  defp conversation_message(_event), do: []
+
+  defp render_conversation_message(run, %{speaker: speaker, text: text, event: event}) do
+    label =
+      "<strong>" <>
+        escape(speaker) <>
+        "</strong> · " <>
+        escape(event_context(run, event))
+
+    body = "<blockquote style=\"white-space:pre-wrap;overflow-wrap:anywhere\">" <> escape(text) <> "</blockquote>"
+
+    if speaker == "Task input" do
+      "<section><details><summary>" <> label <> "</summary>" <> body <> "</details></section>"
+    else
+      "<section><p>" <> label <> "</p>" <> body <> "</section>"
+    end
+  end
+
+  defp event_context(run, event) do
+    case event_attempt(run, event["attempt_id"]) do
+      %{"stage" => stage, "ordinal" => ordinal} ->
+        "Stage #{stage} · Attempt #{ordinal}"
+
+      _ ->
+        stage = event["stage_id"] || "not recorded"
+        attempt = event["attempt_id"] || "not recorded"
+        "Stage #{stage} · Attempt #{attempt}"
+    end
+  end
+
+  defp event_attempt(_run, nil), do: nil
+
+  defp event_attempt(run, attempt_id) do
+    Enum.find(run.snapshot["attempts"] || [], &(&1["id"] == attempt_id))
+  end
+
+  defp latest_check_summary(snapshot) do
+    check =
+      snapshot["attempts"]
+      |> List.wrap()
+      |> Enum.reverse()
+      |> Enum.find(&(&1["type"] == "check" or not is_nil(&1["gate"])))
+
+    case check do
+      nil -> ""
+      attempt -> "<p><strong>Latest gate/check:</strong> " <> escape(check_status(attempt)) <> " · Stage " <> escape(attempt["stage"]) <> " · Attempt " <> escape(attempt["ordinal"]) <> "</p>"
+    end
+  end
+
+  defp check_status(%{"gate" => gate}) when gate in ["passed", "failed"], do: String.capitalize(gate)
+  defp check_status(%{"status" => status}) when is_binary(status), do: String.replace(status, "_", " ") |> String.capitalize()
+  defp check_status(_attempt), do: "Status unavailable"
 
   defp artifact_links(run) do
     key = Evidence.task_key(run.snapshot["task_id"])

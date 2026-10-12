@@ -12,6 +12,10 @@ defmodule SymphonyElixir.WorkstreamRun do
   @executor_sources ~w(
                        orchestrator.ex
                        recovery_inspection.ex
+                       recovery_plan.ex
+                       cli.ex
+                       agent_runtime_supervisor.ex
+                       ../symphony_elixir.ex
                        workstream_runner.ex
                        worker_operation.ex
                        workstream_cancellation.ex

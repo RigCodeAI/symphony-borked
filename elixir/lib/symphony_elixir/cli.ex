@@ -6,10 +6,11 @@ defmodule SymphonyElixir.CLI do
   alias SymphonyElixir.LogFile
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
-  @switches [{@acknowledgement_switch, :boolean}, logs_root: :string, port: :integer]
+  @switches [{@acknowledgement_switch, :boolean}, logs_root: :string, port: :integer, recovery_plan: [:string, :keep]]
 
   @type ensure_started_result :: {:ok, [atom()]} | {:error, term()}
   @type deps :: %{
+          optional(:set_recovery_plan) => (String.t() -> :ok | {:error, term()}),
           file_regular?: (String.t() -> boolean()),
           set_workflow_file_path: (String.t() -> :ok | {:error, term()}),
           set_logs_root: (String.t() -> :ok | {:error, term()}),
@@ -40,6 +41,7 @@ defmodule SymphonyElixir.CLI do
     case OptionParser.parse(args, strict: @switches) do
       {opts, [], []} ->
         with :ok <- require_guardrails_acknowledgement(opts),
+             :ok <- maybe_set_recovery_plan(opts, deps),
              :ok <- maybe_set_logs_root(opts, deps),
              :ok <- maybe_set_server_port(opts, deps) do
           run(Path.expand("WORKFLOW.md"), deps)
@@ -47,6 +49,7 @@ defmodule SymphonyElixir.CLI do
 
       {opts, [workflow_path], []} ->
         with :ok <- require_guardrails_acknowledgement(opts),
+             :ok <- maybe_set_recovery_plan(opts, deps),
              :ok <- maybe_set_logs_root(opts, deps),
              :ok <- maybe_set_server_port(opts, deps) do
           run(workflow_path, deps)
@@ -78,7 +81,7 @@ defmodule SymphonyElixir.CLI do
 
   @spec usage_message() :: String.t()
   defp usage_message do
-    "Usage: symphony [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md]"
+    "Usage: symphony [--logs-root <path>] [--port <port>] [--recovery-plan <absolute-private-json>] [path-to-WORKFLOW.md]"
   end
 
   @spec runtime_deps() :: deps()
@@ -88,8 +91,43 @@ defmodule SymphonyElixir.CLI do
       set_workflow_file_path: &SymphonyElixir.Workflow.set_workflow_file_path/1,
       set_logs_root: &set_logs_root/1,
       set_server_port_override: &set_server_port_override/1,
+      set_recovery_plan: &set_recovery_plan/1,
       ensure_all_started: ensure_all_started
     }
+  end
+
+  defp maybe_set_recovery_plan(opts, deps) do
+    case Keyword.get_values(opts, :recovery_plan) do
+      [] ->
+        :ok
+
+      [path] ->
+        case Map.get(deps, :set_recovery_plan) do
+          setter when is_function(setter, 1) ->
+            case setter.(path) do
+              :ok -> :ok
+              {:error, reason} when is_atom(reason) -> {:error, "Recovery plan rejected: #{reason}"}
+              _ -> {:error, "Recovery plan rejected"}
+            end
+
+          _ ->
+            {:error, "Recovery plan startup is unavailable"}
+        end
+
+      _ ->
+        {:error, usage_message()}
+    end
+  end
+
+  defp set_recovery_plan(path) do
+    if not is_nil(Process.whereis(SymphonyElixir.Supervisor)) or not is_nil(Process.whereis(SymphonyElixir.Orchestrator)) do
+      {:error, :recovery_requires_cold_start}
+    else
+      with {:ok, _config} <- SymphonyElixir.RecoveryPlan.load(path) do
+        Application.put_env(:symphony_elixir, :recovery_plan_path, path)
+        :ok
+      end
+    end
   end
 
   defp maybe_set_logs_root(opts, deps) do

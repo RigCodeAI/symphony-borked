@@ -25,13 +25,17 @@ defmodule SymphonyElixir.CLITest do
         send(parent, :port_set)
         :ok
       end,
+      set_recovery_plan: fn _path ->
+        send(parent, :recovery_plan_loaded)
+        :ok
+      end,
       ensure_all_started: fn ->
         send(parent, :started)
         {:ok, [:symphony_elixir]}
       end
     }
 
-    assert {:error, banner} = CLI.evaluate(["WORKFLOW.md"], deps)
+    assert {:error, banner} = CLI.evaluate(["--recovery-plan", "/private/tmp/plan.json", "WORKFLOW.md"], deps)
     assert banner =~ "This Symphony implementation is a low key engineering preview."
     assert banner =~ "Codex will run without any guardrails."
     assert banner =~ "SymphonyElixir is not a supported product and is presented as-is."
@@ -40,6 +44,7 @@ defmodule SymphonyElixir.CLITest do
     refute_received :workflow_set
     refute_received :logs_root_set
     refute_received :port_set
+    refute_received :recovery_plan_loaded
     refute_received :started
   end
 
@@ -135,5 +140,129 @@ defmodule SymphonyElixir.CLITest do
     }
 
     assert :ok = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
+  end
+
+  test "loads a recovery plan before other settings, workflow selection, and startup" do
+    parent = self()
+    plan_path = "/private/tmp/operator-recovery.json"
+
+    deps = %{
+      set_recovery_plan: fn path ->
+        send(parent, {:recovery_plan_loaded, path})
+        :ok
+      end,
+      set_logs_root: fn path ->
+        send(parent, {:logs_root_set, path})
+        :ok
+      end,
+      set_server_port_override: fn port ->
+        send(parent, {:port_set, port})
+        :ok
+      end,
+      file_regular?: fn path ->
+        send(parent, {:file_checked, path})
+        true
+      end,
+      set_workflow_file_path: fn path ->
+        send(parent, {:workflow_set, path})
+        :ok
+      end,
+      ensure_all_started: fn ->
+        send(parent, :started)
+        {:ok, [:symphony_elixir]}
+      end
+    }
+
+    assert :ok =
+             CLI.evaluate(
+               [@ack_flag, "--recovery-plan", plan_path, "--logs-root", "logs", "--port", "8123", "WORKFLOW.md"],
+               deps
+             )
+
+    assert receive_messages(6) == [
+             {:recovery_plan_loaded, plan_path},
+             {:logs_root_set, Path.expand("logs")},
+             {:port_set, 8123},
+             {:file_checked, Path.expand("WORKFLOW.md")},
+             {:workflow_set, Path.expand("WORKFLOW.md")},
+             :started
+           ]
+  end
+
+  test "returns a static error and stops before workflow access when a recovery plan is rejected" do
+    parent = self()
+    plan_path = "/private/tmp/unsafe-plan.json"
+
+    deps = %{
+      set_recovery_plan: fn path ->
+        send(parent, {:recovery_plan_loaded, path})
+        {:error, :unsafe_plan}
+      end,
+      file_regular?: fn _path ->
+        send(parent, :file_checked)
+        true
+      end,
+      set_workflow_file_path: fn _path ->
+        send(parent, :workflow_set)
+        :ok
+      end,
+      set_logs_root: fn _path ->
+        send(parent, :logs_root_set)
+        :ok
+      end,
+      set_server_port_override: fn _port ->
+        send(parent, :port_set)
+        :ok
+      end,
+      ensure_all_started: fn ->
+        send(parent, :started)
+        {:ok, [:symphony_elixir]}
+      end
+    }
+
+    assert {:error, "Recovery plan rejected: unsafe_plan"} =
+             CLI.evaluate([@ack_flag, "--recovery-plan", plan_path, "WORKFLOW.md"], deps)
+
+    assert_received {:recovery_plan_loaded, ^plan_path}
+    refute_received :file_checked
+    refute_received :workflow_set
+    refute_received :logs_root_set
+    refute_received :port_set
+    refute_received :started
+  end
+
+  test "rejects a duplicate recovery-plan flag without calling the plan loader" do
+    parent = self()
+
+    deps = %{
+      set_recovery_plan: fn _path ->
+        send(parent, :recovery_plan_loaded)
+        :ok
+      end,
+      file_regular?: fn _path -> true end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+    }
+
+    assert {:error, message} =
+             CLI.evaluate(
+               [@ack_flag, "--recovery-plan", "/private/tmp/first.json", "--recovery-plan", "/private/tmp/second.json"],
+               deps
+             )
+
+    assert message =~ "Usage: symphony"
+    refute_received :recovery_plan_loaded
+  end
+
+  defp receive_messages(count) do
+    Enum.map(1..count, fn _index ->
+      receive do
+        message -> message
+      after
+        100 -> flunk("expected #{count} CLI dependency calls")
+      end
+    end)
   end
 end

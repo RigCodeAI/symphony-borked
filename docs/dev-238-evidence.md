@@ -102,6 +102,21 @@ coordinator explicitly requested a fixed candidate rather than repeatedly chasin
 main. No coordinator or broker deployment has been performed by this owner. Broad
 CI and the live acceptance matrix remain open after development PR publication.
 
+## Development PR and broad CI
+
+Development PR 18: <https://github.com/RigCodeAI/symphony/pull/18>.
+The pushed/tested head is `4bb747da381c7d073a5cd1d410d4e03717f6c99a` before this
+record-only update. The remote branch and PR head matched independently.
+
+GitHub `make-all` run `38200290681` failed at strict Credo: 174 refactoring,
+166 readability and 17 design findings across 162 source files. Findings include
+both existing code and this publisher increment. Setup, build, format and spec checks
+were reached; coverage and Dialyzer were not reached. The 225 local functional checks
+and 52 Python checks remain separate passing proof, not an all-green CI claim.
+CodeQL actions/Python and the CodeQL gate passed. Repository alpha guidance treats
+broad CI as non-blocking while retaining human review and GitHub protections.
+No merge or deployment was performed; the live acceptance matrix is still open.
+
 ## Material-risk review
 
 A separate read-only review identified cancellation bookkeeping and import resource

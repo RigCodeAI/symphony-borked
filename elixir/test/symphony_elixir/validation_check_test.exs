@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.ValidationCheckTest do
   use SymphonyElixir.TestSupport
-  alias SymphonyElixir.{Evidence, ServiceCheckCompletion, Validation, ValidationPolicy, ValidationCheck, WorkstreamCleanup, WorkstreamOutputs, WorkstreamRun, WorkstreamStore}
+  alias SymphonyElixir.{CandidateContext, Evidence, ServiceCheckCompletion, Validation, ValidationPolicy, ValidationCheck, WorkstreamCleanup, WorkstreamOutputs, WorkstreamRun, WorkstreamStore}
 
   # Authenticated synthetic contract receipts and simulated GitHub only.
   # No check, archive upload, live GitHub mutation or merge is performed here.
@@ -460,6 +460,134 @@ defmodule SymphonyElixir.ValidationCheckTest do
     assert ServiceCheckCompletion.verified?(failed, started.current_attempt_id)
   end
 
+  test "repair validation binds its immutable context while testing against current main", c do
+    run = repair_context_fixture(c)
+    original = c.run.execution
+    assert {:ok, view} = CandidateContext.view(run, run.current_attempt_id)
+    assert view.execution.validation_base == c.base_sha
+    assert view.execution.repair_parent_sha == c.candidate_sha
+    refute view.execution.validation_base == view.execution.repair_parent_sha
+    assert run.execution == original
+    assert {:ok, result} = ValidationCheck.reconcile(run, c.stage)
+    assert result.qualified
+    assert result.base_sha == c.base_sha
+    assert result.head_sha != c.candidate_sha
+    assert :ok = ValidationCheck.verify_attested_completion(run, c.stage, {:ok, result})
+    assert run.execution == original
+    assert hd(run.attempts) == hd(c.run.attempts)
+  end
+
+  test "main advancing to an ancestor of the repair head still invalidates prior-base tests", c do
+    run = repair_context_fixture(c)
+    assert {:ok, result} = ValidationCheck.reconcile(run, c.stage)
+    assert result.qualified
+    git!(c.workspace, ["merge-base", "--is-ancestor", c.candidate_sha, result.head_sha])
+    Agent.update(c.remote, &(&1 |> Map.put(:base_sha, c.candidate_sha) |> put_in([:pr, :base_sha], c.candidate_sha)))
+    assert {:error, _} = ValidationCheck.verify_ready(run, c.stage)
+    assert {:ok, blocked} = ValidationCheck.reconcile(run, c.stage)
+    refute blocked.qualified
+    assert [%{conclusion: "failure"}] = Agent.get(c.remote, & &1.checks)
+    assert run.execution.validation_base == c.base_sha
+  end
+
+  test "a consuming repair check cannot reuse a validation attempt from another context", c do
+    run = repair_context_fixture(c)
+    attempts = Enum.map(run.attempts, fn attempt -> if attempt.stage == "validate" and attempt.id != hd(run.attempts).id, do: Map.delete(attempt, :candidate_context_id), else: attempt end)
+    assert {:ok, blocked} = ValidationCheck.reconcile(%{run | attempts: attempts}, c.stage)
+    refute blocked.qualified
+    assert [%{conclusion: "failure"}] = Agent.get(c.remote, & &1.checks)
+  end
+
+  test "a signed receipt without the repair context binding cannot qualify the same head", c do
+    run = repair_context_fixture(c)
+    attempt = run.attempts |> Enum.reverse() |> Enum.find(&(&1.stage == "validate"))
+    assert {:ok, identity} = CandidateContext.validation_context(run, attempt.id)
+    {receipt, _bytes} = write_signed_contract(c.workspace, run.execution.validation_archive, run.execution.validation_policy, Map.delete(identity, :candidate_context_id), c.base_sha)
+    attempts = Enum.map(run.attempts, fn saved -> if saved.id == attempt.id, do: put_in(saved.result.evidence["receipt"], receipt), else: saved end)
+    assert {:ok, blocked} = ValidationCheck.reconcile(%{run | attempts: attempts}, c.stage)
+    refute blocked.qualified
+    assert blocked.reason == inspect(:stale_or_incomplete_validation_evidence)
+  end
+
+  test "altered repair context or selector cannot qualify a sealed completion", c do
+    run = repair_context_fixture(c)
+    assert {:ok, result} = ValidationCheck.reconcile(run, c.stage)
+    id = run.current_candidate_context_id
+    altered = put_in(run.candidate_contexts[id].validation_base, c.candidate_sha)
+
+    for invalid <- [altered, Map.put(run, :current_candidate_context_id, nil), Map.put(run, :current_candidate_context_id, "unknown-context")] do
+      assert {:error, _} = ValidationCheck.verify_ready(invalid, c.stage)
+      assert {:error, :validation_check_completion_not_verified} = ValidationCheck.verify_attested_completion(invalid, c.stage, {:ok, result})
+    end
+  end
+
+  test "a valid repair context cannot qualify a different PR with the same head and base", c do
+    run = repair_context_fixture(c, 42)
+    assert {:ok, _view} = CandidateContext.view(run, run.current_attempt_id)
+    assert {:ok, blocked} = ValidationCheck.reconcile(run, c.stage)
+    refute blocked.qualified
+    assert [%{conclusion: "failure"}] = Agent.get(c.remote, & &1.checks)
+  end
+
+  test "the original context preserves the legacy check identity", c do
+    assert {:ok, result} = ValidationCheck.reconcile(c.run, c.stage)
+    remote = Map.take(result, [:number, :head_sha, :base_sha, :head_branch, :base_branch, :url])
+    expected = digest(:erlang.term_to_binary({c.run.id, c.run.definition.definitions, c.run.policy, c.stage.gate, c.run.execution.validation_policy, c.run.execution.validation_check, remote}))
+    assert result.external_id == expected
+  end
+
+  defp repair_context_fixture(c, pr_number \\ 41) do
+    # Synthetic coordinator-authorized context and receipts; no live review or PR.
+    File.write!(Path.join(c.workspace, "README.md"), "Repair on the previously published head.\n")
+    git!(c.workspace, ["add", "."])
+    git!(c.workspace, ["commit", "--quiet", "-m", "repair fixture"])
+    head = git!(c.workspace, ["rev-parse", "HEAD"])
+    pr = %{"number" => pr_number, "url" => "https://github.com/RigCodeAI/rig/pull/#{pr_number}", "head_branch" => "feature/manual", "base_branch" => "main"}
+    publication = %{id: c.run.id <> "/publish/fixture", stage: "publish", type: :publish, status: :completed, gate: :passed, result: %{evidence: %{"candidate_sha" => c.candidate_sha, "pr" => pr}}}
+    review = %{id: c.run.id <> "/review/fixture", stage: "review", type: :agent, status: :completed, gate: :passed, result: %{evidence: %{"head_sha" => c.candidate_sha, "base_sha" => c.base_sha}}}
+
+    context = %{
+      version: 1,
+      run_id: c.run.id,
+      task_id: c.run.task_id,
+      execution_sha256: context_digest(c.run.execution),
+      definition_sha256: context_digest(c.run.definition),
+      policy_sha256: context_digest(c.run.policy),
+      source_context_id: nil,
+      validation_base: c.base_sha,
+      repair_parent_sha: c.candidate_sha,
+      publication_attempt_id: publication.id,
+      publication_sha256: context_digest(publication.result.evidence),
+      review_attempt_id: review.id,
+      review_sha256: context_digest(review.result.evidence),
+      pr: pr
+    }
+
+    id = context_digest(context)
+    context = Map.put(context, :id, id)
+    key = File.read!(Path.join(c.run.execution.validation_archive, "producer.key"))
+    seal = :crypto.mac(:hmac, :sha256, key, "factory-candidate-context-v1\n" <> context_bytes(context)) |> Base.encode16(case: :lower)
+    context = Map.put(context, :seal, seal)
+    validation_id = c.run.id <> "/validate/repair-fixture"
+    validation = %{id: validation_id, stage: "validate", type: :check, status: :completed, gate: :passed, candidate_context_id: id}
+    run = c.run |> Map.put(:candidate_contexts, %{id => context}) |> Map.put(:current_candidate_context_id, id)
+    run = %{run | attempts: [hd(c.run.attempts), publication, review, validation], status: :ready, current_attempt_id: nil}
+    assert {:ok, identity} = CandidateContext.validation_context(run, validation_id)
+    {receipt, bytes} = write_signed_contract(c.workspace, run.execution.validation_archive, run.execution.validation_policy, identity, c.base_sha)
+    validation = Map.put(validation, :result, %{evidence: %{"receipt" => receipt}})
+    run = %{run | attempts: [hd(c.run.attempts), publication, review, validation]}
+    evidence_run = %{run | stage_id: "validate", current_attempt_id: validation_id}
+    :ok = Evidence.snapshot(evidence_run, "repair-validation-imported", %{"kind" => "validation_imported", "manifest_sha256" => receipt["manifest_sha256"]}, c.evidence_server)
+    :ok = Evidence.artifact(evidence_run, "validation/" <> validation_id <> "/manifest.json", bytes, c.evidence_server)
+    assert {:ok, [view]} = Evidence.task(Evidence.task_key(run.task_id), c.evidence_server)
+    write_upload_receipt(Path.join(c.root, "evidence"), view)
+    Agent.update(c.remote, &put_in(&1.pr.head_sha, head))
+    WorkstreamRun.start_stage(run)
+  end
+
+  defp context_bytes(value), do: value |> Jason.encode!() |> Jason.decode!() |> :erlang.term_to_binary([:deterministic])
+  defp context_digest(value), do: digest(context_bytes(value))
+
   defp start_validation_runtime(c, run) do
     suffix = System.unique_integer([:positive])
     path = Path.join(c.root, "runtime-#{suffix}.sqlite")
@@ -502,13 +630,13 @@ defmodule SymphonyElixir.ValidationCheckTest do
 
     case failure do
       :missing ->
-        %{c.run | attempts: [%{attempt | result: %{}}]}
+        %{c.run | attempts: [%{attempt | result: %{}} | tl(c.run.attempts)]}
 
       :forged ->
-        %{c.run | attempts: [%{attempt | result: %{evidence: %{"receipt" => %{"id" => String.duplicate("0", 64), "manifest_sha256" => String.duplicate("1", 64)}}}}]}
+        %{c.run | attempts: [%{attempt | result: %{evidence: %{"receipt" => %{"id" => String.duplicate("0", 64), "manifest_sha256" => String.duplicate("1", 64)}}}} | tl(c.run.attempts)]}
 
       :stale ->
-        %{c.run | attempts: [%{attempt | id: "different-attempt"}]}
+        %{c.run | attempts: [%{attempt | id: "different-attempt"} | tl(c.run.attempts)]}
 
       :policy ->
         put_in(c.run, [:execution, :validation_policy, :digest], String.duplicate("0", 64))
@@ -517,7 +645,7 @@ defmodule SymphonyElixir.ValidationCheckTest do
         context = %{task_id: c.run.task_id, run_id: c.run.id, attempt_id: attempt.id, base_sha: c.base_sha}
         options = if kind == :failed, do: [exit_status: 1], else: [status: "incomplete"]
         {receipt, _} = write_signed_contract(c.workspace, c.run.execution.validation_archive, c.run.execution.validation_policy, context, c.base_sha, options)
-        %{c.run | attempts: [%{attempt | result: %{evidence: %{"receipt" => receipt}}}]}
+        %{c.run | attempts: [%{attempt | result: %{evidence: %{"receipt" => receipt}}} | tl(c.run.attempts)]}
     end
   end
 
@@ -605,7 +733,8 @@ defmodule SymphonyElixir.ValidationCheckTest do
       "allowed_emails" => []
     }
 
-    {:ok, evidence_server} = Evidence.start_link(config: {:ok, evidence_config}, name: nil, receipt_uid: File.stat!(root).uid)
+    evidence_name = Module.concat(__MODULE__, "Evidence#{System.unique_integer([:positive])}")
+    {:ok, evidence_server} = Evidence.start_link(config: {:ok, evidence_config}, name: evidence_name, receipt_uid: File.stat!(root).uid)
 
     on_exit(fn ->
       if Process.alive?(evidence_server), do: GenServer.stop(evidence_server)
@@ -619,7 +748,7 @@ defmodule SymphonyElixir.ValidationCheckTest do
       validation_base: base_sha,
       publisher: %{app_id: 1, installation_id: 2, private_key_path: Path.join(root, "publisher.pem")},
       publisher_transport: SymphonyElixir.PublisherTest.Transport,
-      evidence_server: evidence_server,
+      evidence_server: evidence_name,
       evidence_url: "https://evidence.example.test/tasks/fixture"
     }
 

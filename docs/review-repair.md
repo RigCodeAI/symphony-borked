@@ -207,7 +207,8 @@ permissions. Its protected owner record is
 `<records-dir>/review-owners/<leaf-digest>.json` (mode `0600`, in a `0700` directory).
 Version 1 stores `kind=review-preparation-leaf-owner`, `run_id`,
 `stable_operation_id`, `source_workspace`, all nine `identity` pins, `leaf`, and
-`binding_sha256` over the compact sorted binding JSON plus newline. It records no
+`binding_sha256` over the compact sorted binding JSON plus newline (excluding
+`version` and `binding_sha256` itself). It records no
 current attempt ID. Only a missing leaf can receive a new owner record; a plausible
 worker marker never grants ownership. The root-owned public operation manifest
 adds `review_preparation_command_sha256`; the held wrapper verifies that pin and

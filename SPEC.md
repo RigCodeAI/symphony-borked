@@ -1159,6 +1159,21 @@ Issue-workspace cleanup returns removal/path errors and stops host fanout at the
 first failure. This does not add coordinator retries, prove worker termination,
 confirm a GitHub merge, or satisfy a permanent-archive gate.
 
+Factory managed cleanup is a separate, opt-in service action. The existing
+coordinator records directory identities before new runs execute; older unrecorded
+paths remain retained. Admission and cleanup reject overlapping owners. Idle
+reconciliation must confirm the recorded published head and real GitHub merge,
+require fresh contained termination of every external operation, persist the
+deletion intent, and verify the exact current permanent archive before deleting
+each recorded directory. A recreated path never inherits the old deletion intent.
+Failures remain pending and restart retries all gates. A Linear terminal state
+alone must not trigger automatic deletion. Cancellation stays retained until an
+approved retention and verified recovery contract exists. Parent output artifacts
+must be readable from verified immutable evidence outside the child workspace.
+A service-owned read-only merged-revision/archive proof is available independently
+of workspace deletion. Capture holds fence cleanup scheduling and its final
+ownership check. No cleanup action closes, changes or merges a GitHub PR.
+
 This is the most important portability constraint.
 
 Invariant 1: Run the coding agent only in the per-issue workspace path.

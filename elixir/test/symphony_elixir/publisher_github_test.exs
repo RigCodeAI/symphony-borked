@@ -150,6 +150,31 @@ defmodule SymphonyElixir.PublisherGithubTest do
     assert {:ok, %{number: 31, body: nil}} = PublisherGithub.get_pr_for_test(config, 31, request_fun)
   end
 
+  test "read-only PR observation preserves merge identity without accepting malformed merge flags", %{config: config, key: key} do
+    merger = %{"id" => 123, "login" => "human", "type" => "User"}
+
+    raw =
+      pull_request(31, "feature/read", "closed", "human text")
+      |> Map.merge(%{"merged" => true, "merge_commit_sha" => String.duplicate("b", 40), "merged_at" => "2026-10-11T22:00:00Z", "merged_by" => Map.put(merger, "irrelevant", "ignored")})
+
+    request_fun =
+      app_request_fun(key, fn :get, "/repos/RigCodeAI/rig/pulls/31", _, _, _ ->
+        {:ok, %{status: 200, body: raw}}
+      end)
+
+    assert {:ok, %{merged: true, merged_by: ^merger, body: "human text", merge_commit_sha: sha}} =
+             PublisherGithub.get_pr_for_test(config, 31, request_fun)
+
+    assert sha == String.duplicate("b", 40)
+
+    malformed =
+      app_request_fun(key, fn :get, "/repos/RigCodeAI/rig/pulls/31", _, _, _ ->
+        {:ok, %{status: 200, body: Map.put(raw, "merged", "true")}}
+      end)
+
+    assert {:error, :invalid_pull_request_response} = PublisherGithub.get_pr_for_test(config, 31, malformed)
+  end
+
   test "rejects a private key with group or world access before any request", %{config: config, key_path: key_path} do
     File.chmod!(key_path, 0o644)
     request_fun = fn _method, _path, _headers, _params, _body -> flunk("GitHub must not be called") end

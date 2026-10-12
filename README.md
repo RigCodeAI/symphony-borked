@@ -179,6 +179,11 @@ exact GitHub merge and a verified current archive. Legacy Linear
 terminal-state cleanup retains work. See [merged workspace cleanup](docs/merged-workspace-cleanup.md)
 for the read-only child-result proof, runtime requirements and remaining live gates.
 
+DEV-243's bounded child-handoff source is being prepared independently of the external
+Coverage Factory scorer. See [child workstreams](docs/child-workstreams.md) for the
+internal schema, atomic creation, capture guards and pending merge/authorization gates.
+Contract fixtures do not qualify live coverage or production publication.
+
 ## Upstream and license
 
 This fork builds on [OpenAI Symphony](https://github.com/openai/symphony).

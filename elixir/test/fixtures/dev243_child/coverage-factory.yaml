@@ -1,0 +1,54 @@
+version: 1
+name: coverage-factory-contract-fixture
+inputs: [request]
+agents:
+  researcher: researcher.yaml
+entry: research
+stages:
+  - id: research
+    type: agent
+    inputs: [request]
+    outputs: [capability-gap]
+    agent: researcher
+    prompt: Describe the capability gap for this contract fixture.
+    next: qualify
+  - id: qualify
+    type: check
+    inputs: [capability-gap]
+    outputs: [qualified-gap]
+    gate:
+      command: ["true"]
+      timeout_ms: 1000
+      success: approval-before
+      failure: blocked
+  - id: approval-before
+    type: human_wait
+    inputs: [qualified-gap]
+    outputs: [approval-before-result]
+    prompt: Approve the synthetic child handoff.
+    approval: true
+    next: implement-gap
+  - id: implement-gap
+    type: child
+    inputs: [qualified-gap]
+    outputs: [child-result]
+    workstream: software-change.yaml
+    input_mapping:
+      task: qualified-gap
+    next: re-evaluate
+  - id: re-evaluate
+    type: check
+    inputs: [child-result]
+    outputs: [re-evaluation-result]
+    gate:
+      command: ["true"]
+      timeout_ms: 1000
+      success: approval-after
+      failure: blocked
+  - id: approval-after
+    type: human_wait
+    inputs: [re-evaluation-result]
+    outputs: []
+    prompt: Review the synthetic re-evaluation result.
+    approval: true
+    next: complete

@@ -1,0 +1,23 @@
+version: 1
+name: software-change
+inputs: [task]
+agents:
+  implementer: implementer.yaml
+entry: implement
+stages:
+  - id: implement
+    type: agent
+    inputs: [task]
+    outputs: [candidate]
+    agent: implementer
+    prompt: Prepare a synthetic candidate for this contract fixture.
+    next: inspect
+  - id: inspect
+    type: check
+    inputs: [candidate]
+    outputs: [child-evidence]
+    gate:
+      command: ["true"]
+      timeout_ms: 1000
+      success: complete
+      failure: blocked

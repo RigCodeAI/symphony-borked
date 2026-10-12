@@ -1,0 +1,11 @@
+version: 1
+name: Contract Fixture Researcher
+model: gpt-6.1-sol
+reasoning_effort: low
+daybreak: false
+approval_policy: never
+sandbox: workspace-write
+instructions:
+  - researcher.md
+skills:
+  - skills/research/SKILL.md

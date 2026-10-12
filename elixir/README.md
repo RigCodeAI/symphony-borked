@@ -525,3 +525,9 @@ permanent archival before reporting success or advancing a protected human wait.
 an enrolled ordinary PR. Its trusted `validation_pr` execution option names the PR;
 it launches no coding agent and publishes no branch. General Rig policy and live
 App/protection rollout remain gated. See [operator plan](../docs/trusted-validation-check.md).
+
+The bounded `child` stage is described in [child workstreams](../docs/child-workstreams.md).
+It uses the durable coordinator and a separately prepared `child_workspace`; the synchronous
+local runner does not dispatch children. Contract tests cover atomic creation, restarts,
+cancellation, archived typed results and exact parent resume. Native child authorization
+and live external qualification remain pending. No test fixture certifies coverage.

@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -49,6 +50,24 @@ def secret_fingerprint(env, key, resource, version):
     return sha256(f"{env}\n{key}\n{resource}\n{version}".encode())
 
 
+class ReferenceFixture(SimpleNamespace):
+    """Synthetic resource identities/version pins; contains no credential values."""
+
+    def document(self):
+        assert all(value.startswith("projects/factory-test/secrets/") for value in self.resource_ids.values())
+        assert all(re.fullmatch(r"[1-9][0-9]*", str(value)) for value in self.versions.values())
+        return {
+            "project_id": self.project_id,
+            "role": "coordinator",
+            "service_revision": self.revision,
+            "coordinator_workflow": self.workflow,
+            "coordinator_secret_env": self.environment_mapping,
+            "secret_ids": self.resource_ids,
+            "secret_versions": self.versions,
+            "enable_linear_webhook": self.webhook,
+        }
+
+
 class RecoveryPreflightTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -86,56 +105,48 @@ class RecoveryPreflightTests(unittest.TestCase):
             "LINEAR_API_KEY": "linear_api",
             "LINEAR_API_TOKEN": "linear_signing",
         } if workflow == "linear" else {})
-        return {
-            "project_id": "factory-test",
-            "role": "coordinator",
-            "service_revision": revision,
-            "coordinator_workflow": workflow,
-            "coordinator_secret_env": mapping,
-            "secret_ids": {
+        return ReferenceFixture(
+            project_id="factory-test", revision=revision, workflow=workflow,
+            environment_mapping=mapping,
+            resource_ids={
                 "linear_api": "projects/factory-test/secrets/linear-api",
                 "linear_signing": "projects/factory-test/secrets/linear-signing",
                 "model_auth": f"projects/factory-test/secrets/{unselected}",
                 "worker_ssh": "projects/factory-test/secrets/worker-ssh",
             },
-            "secret_versions": {
-                "linear_api": "4",
-                "linear_signing": "8",
-                "model_auth": "2",
-                "worker_ssh": "1",
-            },
-            "enable_linear_webhook": webhook,
-        }
+            versions={"linear_api": "4", "linear_signing": "8", "model_auth": "2", "worker_ssh": "1"},
+            webhook=webhook,
+        )
 
     def public_projection(self, references, release_sha):
-        mapping = references["coordinator_secret_env"]
+        mapping = references.environment_mapping
         selected_versions = {
-            env: references["secret_versions"][key]
+            env: references.versions[key]
             for env, key in mapping.items()
         }
         fingerprints = {
             env: secret_fingerprint(
-                env, key, references["secret_ids"][key], references["secret_versions"][key]
+                env, key, references.resource_ids[key], references.versions[key]
             )
             for env, key in mapping.items()
         }
         return {
-            "project_id": references["project_id"],
-            "role": references["role"],
-            "service_revision": references["service_revision"],
+            "project_id": references.project_id,
+            "role": "coordinator",
+            "service_revision": references.revision,
             "release_sha256": release_sha,
-            "coordinator_workflow": references["coordinator_workflow"],
+            "coordinator_workflow": references.workflow,
             "coordinator_secret_env": mapping,
             "coordinator_secret_versions": selected_versions,
             "coordinator_secret_fingerprints": fingerprints,
-            "enable_linear_webhook": references["enable_linear_webhook"],
+            "enable_linear_webhook": references.webhook,
         }
 
     def boot_config(self, references, release_sha):
         return {
             **self.public_projection(references, release_sha),
-            "secret_ids": references["secret_ids"],
-            "secret_versions": references["secret_versions"],
+            "secret_ids": references.resource_ids,
+            "secret_versions": references.versions,
         }
 
     def write_valid_inventory(self):
@@ -196,9 +207,9 @@ class RecoveryPreflightTests(unittest.TestCase):
         self.write("active-release-sha256.txt", (self.release_sha + "\n").encode())
         self.write_json("boot-release.json", {"service_revision": self.boot_revision})
         self.write("boot-release-sha256.txt", (self.boot_release_sha + "\n").encode())
-        active_references_data = json_bytes(active_refs)
+        active_references_data = json_bytes(active_refs.document())
         self.write("active-references.json", active_references_data)
-        self.write_json("boot-references.json", boot_refs)
+        self.write_json("boot-references.json", boot_refs.document())
         self.write("active-WORKFLOW.md", self.active_workflow)
         self.write("boot-WORKFLOW.md", self.boot_workflow)
         self.write("current-release.txt", f"/opt/factory/releases/{self.active_revision}\n".encode())
@@ -325,18 +336,18 @@ class RecoveryPreflightTests(unittest.TestCase):
         for mutation in mutations:
             with self.subTest(mutation=mutation):
                 self.reset_fixture()
-                refs = self.read_json("active-references.json")
+                refs = self.references(self.active_revision)
                 if mutation == "selected_reference":
-                    refs["secret_ids"]["linear_api"] = "projects/factory-test/secrets/replaced-api"
-                    self.write_json("active-references.json", refs)
+                    refs.resource_ids["linear_api"] = "projects/factory-test/secrets/replaced-api"
+                    self.write_json("active-references.json", refs.document())
                     self.set_expected("references_sha256", sha256((self.directory / "active-references.json").read_bytes()))
                     projection = self.public_projection(refs, self.release_sha)
                     self.write_json("active-public.json", projection)
                     self.write_json("effective-public.json", projection)
                 elif mutation == "workflow":
-                    refs["coordinator_workflow"] = "pilot"
-                    refs["coordinator_secret_env"] = {}
-                    self.write_json("active-references.json", refs)
+                    refs.workflow = "pilot"
+                    refs.environment_mapping = {}
+                    self.write_json("active-references.json", refs.document())
                     self.set_expected("references_sha256", sha256((self.directory / "active-references.json").read_bytes()))
                     self.write("active-WORKFLOW.md", b"pilot coordinator workflow\n")
                     self.set_expected("workflow_sha256", sha256((self.directory / "active-WORKFLOW.md").read_bytes()))
@@ -344,8 +355,8 @@ class RecoveryPreflightTests(unittest.TestCase):
                     self.write_json("active-public.json", projection)
                     self.write_json("effective-public.json", projection)
                 else:
-                    refs["enable_linear_webhook"] = True
-                    self.write_json("active-references.json", refs)
+                    refs.webhook = True
+                    self.write_json("active-references.json", refs.document())
                     self.set_expected("references_sha256", sha256((self.directory / "active-references.json").read_bytes()))
                     projection = self.public_projection(refs, self.release_sha)
                     self.write_json("active-public.json", projection)
@@ -358,13 +369,11 @@ class RecoveryPreflightTests(unittest.TestCase):
                 self.assertFalse(report["dispatch_allowed"])
 
     def test_unselected_secret_reference_drift_does_not_break_selected_pins(self):
-        boot_refs = self.read_json("boot-references.json")
-        boot_refs["secret_ids"]["model_auth"] = "projects/factory-test/secrets/model-auth-rotated"
-        boot_refs["secret_versions"]["model_auth"] = "3"
-        self.write_json("boot-references.json", boot_refs)
-        boot_config = self.read_json("boot-config.json")
-        boot_config["secret_ids"] = boot_refs["secret_ids"]
-        boot_config["secret_versions"] = boot_refs["secret_versions"]
+        boot_refs = self.references(self.boot_revision)
+        boot_refs.resource_ids["model_auth"] = "projects/factory-test/secrets/model-auth-rotated"
+        boot_refs.versions["model_auth"] = "3"
+        self.write_json("boot-references.json", boot_refs.document())
+        boot_config = self.boot_config(boot_refs, self.boot_release_sha)
         self.write_json("boot-config.json", boot_config)
 
         report = self.result()

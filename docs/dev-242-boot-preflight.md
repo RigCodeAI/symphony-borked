@@ -195,3 +195,11 @@ The self-review checked fixed input inventory, read limits, static error output,
 source-derived reference comparisons and the lack of any activation/credential
 or provider path. The actual deployed Python/runtime, live metadata, release
 availability, and all disposable restore acceptance remain unqualified here.
+
+
+CodeQL initially classified dictionary reads of the fixture's `secret_ids`,
+`secret_versions` and environment mapping as credential values flowing to a
+file. The fixture now models synthetic resource identities/version pins
+explicitly, validates their fake project/resource namespace and numeric versions,
+and exports the existing nonsecret JSON schema. No scanner suppression or alert
+dismissal was added. Both 12-test platform runs passed again after this change.

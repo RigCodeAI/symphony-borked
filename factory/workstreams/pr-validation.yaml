@@ -1,0 +1,45 @@
+# Validation-only pilot for an enrolled non-factory PR. The service supplies
+# validation_pr and exact clone/base/policy; this does not select a general Rig policy.
+version: 1
+name: pr-validation
+inputs: [task]
+agents: {}
+entry: validate
+stages:
+  - id: validate
+    type: check
+    inputs: [task]
+    outputs: [validation]
+    gate:
+      evaluator: candidate_validation
+      required:
+        - check: architecture-tests
+          assertion: exit_status
+          equals: 0
+        - check: architecture-tests
+          assertion: test_count
+          equals: 1
+      success: github-validation
+      failure: blocked
+  - id: github-validation
+    type: check
+    inputs: [validation]
+    outputs: [github-validation]
+    gate:
+      evaluator: github_validation
+      validation_stage: validate
+      required:
+        - check: architecture-tests
+          assertion: exit_status
+          equals: 0
+        - check: architecture-tests
+          assertion: test_count
+          equals: 1
+      success: merge-wait
+      failure: blocked
+  - id: merge-wait
+    type: human_wait
+    inputs: [github-validation]
+    outputs: [answer]
+    prompt: The current PR has passing trusted validation. Human merge remains in GitHub. This reply does not authorize merging or cleanup.
+    next: complete

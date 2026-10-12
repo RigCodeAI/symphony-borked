@@ -114,11 +114,27 @@ stages:
         - check: architecture-tests
           assertion: test_count
           equals: 1
+      success: github-validation
+      failure: blocked
+  - id: github-validation
+    type: check
+    inputs: [publication, validation]
+    outputs: [github-validation]
+    gate:
+      evaluator: github_validation
+      validation_stage: validate
+      required:
+        - check: architecture-tests
+          assertion: exit_status
+          equals: 0
+        - check: architecture-tests
+          assertion: test_count
+          equals: 1
       success: candidate-ready
       failure: blocked
   - id: candidate-ready
     type: human_wait
-    inputs: [publication]
+    inputs: [publication, github-validation]
     outputs: [answer]
     prompt: The exact validated candidate has one linked Rig PR with permanent evidence. Human merge remains in GitHub; this reply completes only the configured workstream and does not authorize merging or cleanup.
     next: complete

@@ -170,3 +170,8 @@ The upstream [demo](https://player.vimeo.com/video/1186371009?h=5626e4b899) illu
 Symphony's original workflow; it is not evidence of this factory's readiness.
 
 Licensed under the [Apache License 2.0](LICENSE).
+
+DEV-239 adds an App-owned `factory/validation` check and current-head readiness gate.
+See [trusted GitHub validation](docs/trusted-validation-check.md) for the separate
+App, validation-only PR path and approval-gated rollout. Source tests do not prove
+that Rig branch protection or the live validation path has been enabled.

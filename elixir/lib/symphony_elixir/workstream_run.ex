@@ -20,6 +20,8 @@ defmodule SymphonyElixir.WorkstreamRun do
                        publisher.ex
                        publisher_git.ex
                        publisher_github.ex
+                       validation_check.ex
+                       validation_github.ex
                        candidate_transfer.ex
                        evidence.ex
                      )
@@ -192,6 +194,7 @@ defmodule SymphonyElixir.WorkstreamRun do
     result = json_stage_result(result)
     evidence = result_evidence(result)
     gate = if stage.type == :check and is_nil(gate), do: if(passing_check?(result), do: :passed, else: :failed), else: gate
+    run = if stage.type == :check and stage.gate[:evaluator] == :github_validation and gate == :passed, do: Map.put(run, :validation_observation, elem(result, 1)), else: run
     run = update_attempt(run, %{status: :completed, result: evidence, gate: gate, gate_detail: gate_detail})
     run = put_in(run.operations[run.current_attempt_id].status, :completed)
     run = if stage.type == :agent, do: close_pending_questions(run, stage.id, run.current_attempt_id), else: run
@@ -586,6 +589,47 @@ defmodule SymphonyElixir.WorkstreamRun do
     end
   end
 
+  @doc "Consumes a queued human reply only after an owned, sealed current validation observation."
+  @spec complete_validation_reply(map(), map()) :: {:ok, map()} | {:error, term()}
+  def complete_validation_reply(run, observation) do
+    pending = run[:pending_validation_reply]
+
+    with true <- is_map(pending) and run.status == :waiting_for_answer,
+         true <- run.pending_wait.id == pending.wait_id and run.current_attempt_id == pending.attempt_id and run.artifacts == pending.artifact_ids,
+         :ok <- SymphonyElixir.ValidationCheck.verify_attested_completion(run, SymphonyElixir.ValidationCheck.stage(run.definition), {:ok, observation}) do
+      verified = Map.put(run, :validated_wait_reply, true)
+
+      result =
+        case pending.kind do
+          :answer -> apply_wait_answer(verified, pending.wait_id, pending.reply, pending.activity_id, pending.activity_body)
+          :approval -> approve_wait(verified, pending.wait_id, pending.digest, pending.activity_id, pending.activity_body)
+        end
+
+      case result do
+        {:ok, updated} -> {:ok, Map.drop(updated, [:validated_wait_reply, :pending_validation_reply])}
+        error -> error
+      end
+    else
+      _ -> {:error, :current_validation_required}
+    end
+  end
+
+  defp queue_validation_reply(run, reply) do
+    pending = Map.merge(reply, %{attempt_id: run.current_attempt_id, artifact_ids: run.artifacts})
+
+    case run[:pending_validation_reply] do
+      nil ->
+        updated = run |> Map.put(:pending_validation_reply, pending) |> Map.put(:phase, :waiting_for_validation)
+        {:ok, if(is_binary(reply.activity_id), do: record_activity(updated, reply.activity_id, reply.activity_body), else: updated)}
+
+      ^pending ->
+        {:ok, run}
+
+      _ ->
+        {:error, :validation_reply_already_pending}
+    end
+  end
+
   defp approve_wait(run, wait_id, digest, activity_id, activity_body) do
     wait = run.pending_wait
 
@@ -601,6 +645,9 @@ defmodule SymphonyElixir.WorkstreamRun do
 
       digest != wait.approval_digest ->
         {:error, :stale_artifact_revision}
+
+      SymphonyElixir.ValidationCheck.protects_wait?(run) and not Map.get(run, :validated_wait_reply, false) ->
+        queue_validation_reply(run, %{kind: :approval, wait_id: wait_id, digest: digest, activity_id: activity_id, activity_body: activity_body})
 
       true ->
         stage = Map.fetch!(run.definition.stages, run.stage_id)
@@ -630,6 +677,9 @@ defmodule SymphonyElixir.WorkstreamRun do
 
       not valid_wait_outputs?(reply, stage.outputs) ->
         {:error, :invalid_human_wait_outputs}
+
+      SymphonyElixir.ValidationCheck.protects_wait?(run) and not Map.get(run, :validated_wait_reply, false) ->
+        queue_validation_reply(run, %{kind: :answer, wait_id: wait_id, reply: reply, activity_id: activity_id, activity_body: activity_body})
 
       true ->
         evidence = %{reply: reply, wait_id: wait_id, artifact_ids: wait.artifact_ids}
@@ -936,6 +986,13 @@ defmodule SymphonyElixir.WorkstreamRun do
   defp stage_phase(:agent), do: :implementing
   defp stage_phase(:publish), do: :publishing
   defp stage_phase(_type), do: :validating
+
+  defp finish_gate(run, %{type: :check, gate: %{evaluator: :github_validation}} = stage, result) do
+    case SymphonyElixir.ValidationCheck.verify_attested_completion(run, stage, result) do
+      :ok -> {result, :passed, %{verdict: :passed, verified: true}}
+      {:error, reason} -> {{:error, reason}, :failed, %{verdict: :failed, verified: false, reason: inspect(reason)}}
+    end
+  end
 
   defp finish_gate(run, %{type: :check} = stage, result) do
     if candidate_validation?(stage) do

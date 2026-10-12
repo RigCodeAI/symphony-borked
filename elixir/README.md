@@ -495,3 +495,15 @@ referencing a prior candidate-validation stage. A configured coordinator GitHub 
 exact permanently archived validation evidence are required; agents never receive its key
 or tokens. Durable retries reconcile the same branch and PR. The synchronous local runner
 rejects publication. See [configuration, App setup and verification limits](../docs/trusted-publication.md).
+
+### Trusted GitHub validation check
+
+`github_validation` is a coordinator-owned check evaluator referencing a prior
+`candidate_validation` stage and inline required assertions. Configure a separate
+`validation_check` App reference; its keys and tokens stay outside agent/test
+processes. The coordinator rechecks current head/base, authenticated receipts and
+permanent archival before reporting success or advancing a protected human wait.
+`factory/workstreams/pr-validation.yaml` provides a validation-only pilot entry for
+an enrolled ordinary PR. Its trusted `validation_pr` execution option names the PR;
+it launches no coding agent and publishes no branch. General Rig policy and live
+App/protection rollout remain gated. See [operator plan](../docs/trusted-validation-check.md).

@@ -1,0 +1,11 @@
+version: 1
+name: Contract Fixture Implementer
+model: gpt-6.1-sol
+reasoning_effort: low
+daybreak: false
+approval_policy: never
+sandbox: workspace-write
+instructions:
+  - implementer.md
+skills:
+  - skills/implementation/SKILL.md

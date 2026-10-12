@@ -2814,3 +2814,41 @@ or invalid evidence MUST retain receipts and escalate to a human. Review approva
 quality score and Linear replies MUST NOT authorize merge. Rig feedback ownership
 MUST be released as one coordinated cutover so one system owns factory branch fixes.
 See [the source contract and unqualified live boundaries](docs/review-repair.md).
+
+## Bounded child workstream handoff
+
+A version-1 parent MAY declare one `child` stage with `id`, `inputs`, `outputs`,
+relative `workstream`, complete `input_mapping` and `next`. The child MUST be a
+pinned `software-change` definition without child stages. It MUST transition to
+a check stage for independent re-evaluation, never directly to parent completion.
+Child definitions, agents and referenced resources MUST be pinned with the parent.
+
+The coordinator MUST bind exactly the declared parent values and validate a separate
+prepared workspace. Child identity MUST bind parent run, stage attempt, input and
+definition/execution fingerprints. Parent wait, child creation, linkage, operation
+records and evidence events MUST commit atomically. Replay MUST return the same stored
+child; conflicting fingerprints, stale parent state and ownership aliases MUST reject.
+The parent wait MUST release execution capacity. Shared capture holds MUST prevent
+handoff writes and dispatch/cancellation callbacks during a consistent capture.
+
+Stopping the parent MUST prevent owned-child dispatch and propagate through the
+existing cancellation/reconciliation owner, including after restart. Unknown child
+termination MUST remain unresolved. Late results MUST retain evidence without making
+a stopped parent ready. Cleanup MUST retain output evidence needed by the parent.
+
+Child completion, a final human reply and matching lineage IDs MUST NOT certify
+GitHub merge or coverage. Resume MUST consume the service-owned verified merge/revision
+and retained-evidence receipt for the exact linked child before independent re-evaluation.
+The coordinator MUST obtain that proof outside its callbacks, recheck exact parent/child
+snapshots, and complete the saved waiting attempt once before making the declared check
+stage ready. Capture MUST reject active proof tasks and hold result callbacks. Later
+parent cancellation MUST NOT cancel a child whose handoff already completed. Retained
+output production MUST use the service's typed, permanently archived references.
+Parent result values MUST come from verified retained bytes, with a complete output
+map and matching original producer identities; raw workspace-dependent values MUST
+NOT be copied into the parent. Positive runtime contract verification uses synthetic
+remote receipts with real local storage; native owned-child authorization and live
+external qualification remain pending in this source slice.
+Synthetic fixtures MUST NOT authorize production publication or support claims.
+Coverage Factory remains the owner of scenario/oracle approval, specimen qualification
+and trusted scoring. See [child workstreams](docs/child-workstreams.md) for current limits.

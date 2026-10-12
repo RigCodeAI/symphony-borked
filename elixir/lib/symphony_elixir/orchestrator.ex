@@ -7,7 +7,21 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, BackupCapture, Config, Evidence, RecoveryInspection, StatusDashboard, Tracker, WorkstreamCleanup, WorkstreamRun, WorkstreamRunner, WorkstreamStore}
+  alias SymphonyElixir.{
+    AgentRunner,
+    BackupCapture,
+    Config,
+    Evidence,
+    RecoveryInspection,
+    StatusDashboard,
+    Tracker,
+    WorkstreamChild,
+    WorkstreamCleanup,
+    WorkstreamRun,
+    WorkstreamRunner,
+    WorkstreamStore
+  }
+
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.Linear.Coordinator, as: LinearCoordinator
 
@@ -140,8 +154,26 @@ defmodule SymphonyElixir.Orchestrator do
   def handle_info({:backup_capture_settled, _token, _kind, _pid}, state), do: {:noreply, state}
 
   def handle_info(message, %{workstreams: %{capture: capture}} = state)
-      when not is_nil(capture) and message in [:advance_workstreams, :linear_process, :linear_tick, :observe_stopped_publications, :reconcile_validation_checks, :reconcile_merged_cleanup],
+      when not is_nil(capture) and
+             message in [:advance_workstreams, :linear_process, :linear_tick, :observe_stopped_publications, :reconcile_validation_checks, :reconcile_merged_cleanup, :reconcile_child_handoffs],
       do: {:noreply, state}
+
+  def handle_info({ref, {:child_merge_proof, _key, _result}}, %{workstreams: %{capture: capture}} = state)
+      when not is_nil(capture) and is_reference(ref), do: {:noreply, state}
+
+  def handle_info(:reconcile_child_handoffs, state) do
+    {:noreply, reconcile_child_handoffs(state)}
+  end
+
+  def handle_info({:child_proofs_tick, _token}, %{workstreams: %{capture: capture}} = state) when not is_nil(capture), do: {:noreply, state}
+
+  def handle_info({:child_proofs_tick, token}, %{workstreams: %{child_proof_timer: {_timer, token}}} = state),
+    do: {:noreply, state |> put_in([Access.key(:workstreams), :child_proof_timer], nil) |> reconcile_child_handoffs()}
+
+  def handle_info({:child_proofs_tick, _token}, state), do: {:noreply, state}
+
+  def handle_info({ref, {:child_merge_proof, key, result}}, state) when is_reference(ref),
+    do: {:noreply, accept_child_merge_proof(state, ref, key, result)}
 
   def handle_info(
         {ref, {:validation_stage_verified, _id, _attempt, _pid, _artifacts, _result}},
@@ -284,7 +316,7 @@ defmodule SymphonyElixir.Orchestrator do
         {:DOWN, ref, :process, _pid, reason},
         %{running: running} = state
       ) do
-    state = validation_monitor_down(state, ref)
+    state = state |> validation_monitor_down(ref) |> child_proof_down(ref)
 
     case find_issue_id_for_ref(running, ref) do
       nil ->
@@ -2532,6 +2564,8 @@ defmodule SymphonyElixir.Orchestrator do
               cancellations: %{},
               publications: %{},
               validation_checks: %{},
+              child_proofs: %{},
+              child_proof_timer: nil,
               cleanup: %{jobs: %{}, timer: nil},
               capture: nil,
               capture_results: %{},
@@ -2601,7 +2635,23 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp capture_admission(state) do
     workstreams = state.workstreams
-    known_fields = [:store, :store_path, :runs, :workers, :cancellations, :publications, :cleanup, :opts, :capture, :capture_results, :validation_checks, :validation_check_timer]
+
+    known_fields = [
+      :store,
+      :store_path,
+      :runs,
+      :workers,
+      :cancellations,
+      :publications,
+      :cleanup,
+      :opts,
+      :capture,
+      :capture_results,
+      :validation_checks,
+      :validation_check_timer,
+      :child_proofs,
+      :child_proof_timer
+    ]
 
     cond do
       not is_nil(workstreams.capture) -> {:error, :capture_in_progress}
@@ -2611,9 +2661,10 @@ defmodule SymphonyElixir.Orchestrator do
       Enum.any?(Map.keys(workstreams), &(&1 not in known_fields)) -> {:error, :capture_owner_integration_required}
       map_size(workstreams.workers) != 0 or map_size(workstreams.cancellations) != 0 -> {:error, :capture_work_active}
       map_size(Map.get(workstreams, :validation_checks, %{})) != 0 -> {:error, :capture_validation_active}
+      child_proof_active?(state) -> {:error, :capture_child_proof_active}
       Enum.any?(workstreams.publications, fn {_id, job} -> is_reference(job[:ref]) end) -> {:error, :capture_publication_active}
       not capture_linear_quiet?(state.linear) -> {:error, :capture_linear_unresolved}
-      Enum.any?(workstreams.runs, fn {_id, run} -> not capture_run_quiet?(run) end) -> {:error, :capture_operation_unresolved}
+      Enum.any?(workstreams.runs, fn {_id, run} -> not (capture_run_quiet?(run) or capture_child_wait_quiet?(state, run)) end) -> {:error, :capture_operation_unresolved}
       true -> :ok
     end
   end
@@ -2645,6 +2696,24 @@ defmodule SymphonyElixir.Orchestrator do
         settled and publication
       end)
   end
+
+  defp capture_child_wait_quiet?(state, %{status: status, child_handoff: intent} = parent) when status in [:waiting_for_child, :stopped] do
+    with true <- parent.id == intent.parent_run_id and parent.current_attempt_id == intent.parent_attempt_id,
+         child when is_map(child) <- durable_run(state, intent.child_run_id),
+         true <- child[:parent_run_id] == parent.id and is_map(child[:parent_handoff]),
+         :ok <- WorkstreamChild.correlate(intent, Map.put(child.parent_handoff, :child_run_id, child.id)),
+         %{type: :child, status: :waiting_for_child, worker: nil} = operation <- parent.operations[intent.parent_attempt_id],
+         true <- is_nil(operation[:external_process]) and is_nil(operation[:publication_intent]) do
+      settled = put_in(parent.operations[intent.parent_attempt_id].status, :not_applied)
+      capture_run_quiet?(%{settled | status: :waiting_for_answer})
+    else
+      _ -> false
+    end
+  rescue
+    _ -> false
+  end
+
+  defp capture_child_wait_quiet?(_state, _run), do: false
 
   defp capture_publication_verified?(attempt, intent) do
     evidence = get_in(attempt, [:result, :evidence]) || %{}
@@ -2707,6 +2776,9 @@ defmodule SymphonyElixir.Orchestrator do
     if timer = state.workstreams[:validation_check_timer], do: Process.cancel_timer(elem(timer, 0))
     state = put_in(state.workstreams[:validation_check_timer], nil)
 
+    if timer = state.workstreams[:child_proof_timer], do: Process.cancel_timer(elem(timer, 0))
+    state = put_in(state.workstreams[:child_proof_timer], nil)
+
     if state.linear do
       if state.linear.timer, do: Process.cancel_timer(state.linear.timer)
       put_in(state.linear.timer, nil)
@@ -2753,6 +2825,7 @@ defmodule SymphonyElixir.Orchestrator do
       send(self(), :observe_stopped_publications)
       if cleanup_enabled?(state), do: send(self(), :reconcile_merged_cleanup)
       if Map.has_key?(state.workstreams, :validation_checks), do: send(self(), :reconcile_validation_checks)
+      send(self(), :reconcile_child_handoffs)
       state
     else
       _ ->
@@ -2993,6 +3066,7 @@ defmodule SymphonyElixir.Orchestrator do
            Enum.all?(opts, fn {key, value} ->
              (key in [
                 :workspace,
+                :child_workspace,
                 :workspace_root,
                 :codex_command,
                 :branch,
@@ -3013,10 +3087,12 @@ defmodule SymphonyElixir.Orchestrator do
          :ok <- check_workstream_definition(definition, opts),
          :ok <- database_outside_workspace(state.workstreams.store_path, workspace),
          :ok <- evidence_outside_workspace(workspace),
-         false <- Enum.any?(state.workstreams.runs, fn {_id, run} -> WorkstreamCleanup.overlaps?(run.workspace, workspace) end),
+         false <- child_workspace_reserved?(state, workspace),
          {:ok, root} <- SymphonyElixir.PathSafety.canonicalize(opts[:workspace_root]),
          execution_opts = Keyword.put(opts, :workspace_root, root),
-         {:ok, execution} <- WorkstreamRunner.pin_execution_context(execution_opts, workspace, definition) do
+         {:ok, execution} <- WorkstreamRunner.pin_execution_context(execution_opts, workspace, definition),
+         {:ok, child_preparation} <- pin_child_preparation(state, definition, workspace, execution_opts) do
+      execution = if child_preparation, do: Map.put(execution, :child_preparation, child_preparation), else: execution
       run = WorkstreamRun.new(task_id, definition, workspace, execution_opts, execution)
       {:ok, if(cleanup_enabled?(state), do: WorkstreamCleanup.enroll(run), else: run)}
     else
@@ -3025,6 +3101,49 @@ defmodule SymphonyElixir.Orchestrator do
       {:error, _} = error -> error
     end
   end
+
+  defp pin_child_preparation(state, definition, parent_workspace, opts) do
+    case Enum.find(Map.values(definition.stages), &(&1.type == :child)) do
+      nil ->
+        {:ok, nil}
+
+      stage ->
+        with requested when is_binary(requested) <- opts[:child_workspace],
+             {:ok, child_definition} <- bind_child_agent(stage.child_definition, definition),
+             {:ok, workspace} <- WorkstreamRunner.validate_workspace(requested, opts[:workspace_root], child_definition),
+             false <- workspace_paths_overlap?(parent_workspace, workspace),
+             false <- child_workspace_reserved?(state, workspace),
+             :ok <- database_outside_workspace(state.workstreams.store_path, workspace),
+             :ok <- evidence_outside_workspace(workspace),
+             child_opts = opts |> Keyword.put(:workspace, workspace) |> Keyword.delete(:child_workspace),
+             {:ok, execution} <- WorkstreamRunner.pin_execution_context(child_opts, workspace, child_definition) do
+          {:ok, %{stage_id: stage.id, definition: child_definition, workspace: workspace, execution: execution}}
+        else
+          nil -> {:error, :prepared_child_workspace_required}
+          true -> {:error, :child_workspace_already_owned}
+          {:error, _} = error -> error
+          _ -> {:error, :invalid_child_preparation}
+        end
+    end
+  end
+
+  defp bind_child_agent(child, %{agent_selection: %{agent_id: id}}),
+    do: SymphonyElixir.Linear.AgentMapping.bind(child, id)
+
+  defp bind_child_agent(child, _parent), do: {:ok, child}
+
+  defp child_workspace_reserved?(state, workspace) do
+    Enum.any?(state.workstreams.runs, fn {_id, run} ->
+      workspace_paths_overlap?(run.workspace, workspace) or
+        case get_in(run, [:execution, :child_preparation, :workspace]) do
+          path when is_binary(path) -> workspace_paths_overlap?(path, workspace)
+          _ -> false
+        end
+    end)
+  end
+
+  defp workspace_paths_overlap?(left, right),
+    do: left == right or String.starts_with?(left, right <> "/") or String.starts_with?(right, left <> "/")
 
   defp check_workstream_definition(definition, opts) do
     expected = Keyword.get(opts, :definition_sha256)
@@ -3185,15 +3304,17 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp advance_workstreams(state) do
     state = reconcile_validation_checks(state, true)
+    state = reconcile_child_handoffs(state)
 
     Enum.reduce(state.workstreams.runs, state, fn {id, _}, acc ->
       run = durable_run(acc, id)
 
       cond do
         run.status != :ready -> acc
+        not child_dispatch_allowed?(acc, run) -> acc
         not LinearCoordinator.ready?(acc, run) -> acc
         not WorkstreamRun.compatible_policy?(run) -> block_workstream_policy(acc, run)
-        run.definition.stages[run.stage_id].type != :human_wait and workstream_capacity_used(acc) >= acc.max_concurrent_agents -> acc
+        run.definition.stages[run.stage_id].type not in [:human_wait, :child] and workstream_capacity_used(acc) >= acc.max_concurrent_agents -> acc
         true -> start_workstream_stage(acc, run)
       end
     end)
@@ -3216,16 +3337,29 @@ defmodule SymphonyElixir.Orchestrator do
   defp workstream_operation_unconfirmed?(_run, _operation), do: false
 
   defp start_workstream_stage(state, run) do
-    if SymphonyElixir.ValidationCheck.protects_wait?(run) and
-         SymphonyElixir.ValidationCheck.verify_attested_completion(run, SymphonyElixir.ValidationCheck.stage(run.definition), {:ok, run[:validation_observation]}) != :ok do
-      updated = %{run | status: :blocked, phase: :blocked}
-      commit_workstream(state, updated, run.id <> "/validation-readiness/" <> workstream_fingerprint(run.artifacts), %{kind: :current_validation_required})
-    else
-      start_qualified_workstream_stage(state, run)
+    cond do
+      __MODULE__.capture_held?(state) ->
+        state
+
+      SymphonyElixir.ValidationCheck.protects_wait?(run) and
+          SymphonyElixir.ValidationCheck.verify_attested_completion(run, SymphonyElixir.ValidationCheck.stage(run.definition), {:ok, run[:validation_observation]}) != :ok ->
+        updated = %{run | status: :blocked, phase: :blocked}
+        commit_workstream(state, updated, run.id <> "/validation-readiness/" <> workstream_fingerprint(run.artifacts), %{kind: :current_validation_required})
+
+      true ->
+        start_qualified_workstream_stage(state, run)
     end
   end
 
   defp start_qualified_workstream_stage(state, run) do
+    cond do
+      __MODULE__.capture_held?(state) -> state
+      run.definition.stages[run.stage_id].type == :child -> start_child_handoff(state, run)
+      true -> start_worker_stage(state, run)
+    end
+  end
+
+  defp start_worker_stage(state, run) do
     run = WorkstreamRun.start_stage(run)
     state = commit_workstream(state, run, run.current_attempt_id <> "/start", %{kind: :stage_started})
 
@@ -3250,6 +3384,238 @@ defmodule SymphonyElixir.Orchestrator do
       end
     end
   end
+
+  defp start_child_handoff(state, parent) do
+    stage = parent.definition.stages[parent.stage_id]
+
+    with :ok <- child_execution_scope(state),
+         %{stage_id: stage_id} = prepared <- parent.execution[:child_preparation],
+         true <- stage_id == stage.id,
+         {:ok, inputs} <- WorkstreamChild.inputs(stage, parent.outputs),
+         definition = Map.put(prepared.definition, :input_values, inputs),
+         {:ok, _} <- WorkstreamRunner.validate_workspace(prepared.workspace, prepared.execution.workspace_root, definition),
+         child = WorkstreamRun.new("child/" <> parent.id <> "/" <> stage.id, definition, prepared.workspace, [], prepared.execution),
+         {:ok, waiting, child, intent} <- WorkstreamRun.begin_child(parent, child),
+         result <- WorkstreamStore.commit_child_handoff(state.workstreams.store, parent, waiting, child, intent),
+         {kind, stored_parent, stored_child} when kind in [:ok, :duplicate] <- result do
+      :ok = Evidence.sync!(state.workstreams.store)
+      state = put_in(state.workstreams.runs[stored_parent.id], stored_parent)
+      state = put_in(state.workstreams.runs[stored_child.id], stored_child)
+      send(self(), :advance_workstreams)
+      state
+    else
+      {:error, :capture_in_progress} -> state
+      {:error, reason} -> block_child_handoff(state, parent, reason)
+      _ -> block_child_handoff(state, parent, :pinned_child_preparation_missing)
+    end
+  end
+
+  defp child_execution_scope(%{linear: nil}), do: :ok
+  defp child_execution_scope(_state), do: {:error, :native_child_authorization_not_qualified}
+
+  defp block_child_handoff(state, parent, reason) do
+    blocked = Map.merge(parent, %{status: :blocked, phase: :blocked, child_error: inspect(reason)})
+    commit_workstream(state, blocked, parent.id <> "/child-blocked/" <> workstream_fingerprint(reason), %{kind: :child_handoff_blocked, reason: inspect(reason)})
+  end
+
+  defp child_dispatch_allowed?(state, %{parent_handoff: lineage} = child) when is_map(lineage) do
+    with true <- child[:parent_run_id] == lineage[:parent_run_id],
+         parent when is_map(parent) <- durable_run(state, lineage[:parent_run_id]),
+         true <- parent.status == :waiting_for_child,
+         intent when is_map(intent) <- parent[:child_handoff],
+         :ok <- WorkstreamChild.correlate(intent, Map.put(lineage, :child_run_id, child.id)),
+         true <- WorkstreamRun.compatible_policy?(parent),
+         # Native delegation currently authorizes only the directly delegated run.
+         # Owned-child native authorization must be qualified before that route runs.
+         true <- is_nil(state.linear) do
+      true
+    else
+      _ -> false
+    end
+  end
+
+  defp child_dispatch_allowed?(_state, %{parent_handoff: _invalid}), do: false
+  defp child_dispatch_allowed?(_state, %{parent_run_id: _unlinked}), do: false
+  defp child_dispatch_allowed?(_state, _run), do: true
+
+  defp reconcile_child_handoffs(%{workstreams: nil} = state), do: state
+
+  defp reconcile_child_handoffs(state) do
+    if __MODULE__.capture_held?(state) do
+      state
+    else
+      Enum.reduce(state.workstreams.runs, state, fn {id, _parent}, acc ->
+        parent = durable_run(acc, id)
+
+        case parent[:child_handoff] do
+          %{child_run_id: child_id} = intent ->
+            case durable_run(acc, child_id) do
+              child when is_map(child) -> reconcile_linked_child(acc, parent, child, intent)
+              _ -> acc
+            end
+
+          _ ->
+            acc
+        end
+      end)
+      |> schedule_child_proof_retry()
+    end
+  end
+
+  defp reconcile_linked_child(state, parent, child, intent) do
+    identity = if is_map(child[:parent_handoff]), do: Map.put(child.parent_handoff, :child_run_id, child.id), else: %{}
+
+    if parent.id == intent[:parent_run_id] and child[:parent_run_id] == parent.id and WorkstreamChild.correlate(intent, identity) == :ok do
+      if parent.status == :stopped and child.status != :stopped do
+        case WorkstreamChild.cancellation_target(parent, child, intent) do
+          {:ok, _child_id} -> stop_linear_workstream(state, child)
+          {:error, _reason} -> state
+        end
+      else
+        observation = %{child_run_id: child.id, stage_id: child.stage_id, attempt_id: child.current_attempt_id, status: child.status, artifacts: child.artifacts}
+
+        state =
+          if parent[:child_observation] == observation do
+            state
+          else
+            sequence = Map.get(parent, :child_observation_sequence, 0) + 1
+            updated = parent |> Map.put(:child_observation, observation) |> Map.put(:child_observation_sequence, sequence)
+            id = intent.parent_attempt_id <> "/child-observed/" <> Integer.to_string(sequence)
+            commit_workstream(state, updated, id, %{kind: :child_state_observed, identity: identity})
+          end
+
+        start_child_merge_proof(state, durable_run(state, parent.id), child)
+      end
+    else
+      state
+    end
+  end
+
+  defp start_child_merge_proof(state, parent, child) do
+    key = parent.current_attempt_id
+    job = state.workstreams.child_proofs[key]
+    refs = child[:retained_output_artifacts] || %{}
+    due = is_nil(job) or (not is_reference(job[:ref]) and job.retry_at <= System.monotonic_time(:millisecond))
+
+    eligible = WorkstreamCleanup.candidate?(child) or child[:cleanup][:status] == :cleaned
+
+    if child_execution_scope(state) == :ok and parent.status == :waiting_for_child and eligible and is_map(refs) and due do
+      kind = if map_size(refs) == 0, do: :retain, else: :verify
+
+      task =
+        Task.Supervisor.async_nolink(state.task_supervisor, fn ->
+          Process.put(:symphony_child_proof, %{parent_id: parent.id, child_id: child.id})
+
+          result =
+            case kind do
+              :retain ->
+                case WorkstreamCleanup.retain_outputs(child, state.workstreams.opts) do
+                  {:ok, produced} -> {:outputs_retained, produced}
+                  error -> error
+                end
+
+              :verify ->
+                WorkstreamChild.completion_proof(parent, child, state.workstreams.opts)
+            end
+
+          {:child_merge_proof, key, result}
+        end)
+
+      job = %{ref: task.ref, pid: task.pid, parent_id: parent.id, child_id: child.id, kind: kind, parent_fingerprint: workstream_fingerprint(parent), child_fingerprint: workstream_fingerprint(child)}
+      put_in(state.workstreams.child_proofs[key], job)
+    else
+      state
+    end
+  end
+
+  defp accept_child_merge_proof(%{workstreams: nil} = state, _ref, _key, _result), do: state
+
+  defp accept_child_merge_proof(state, ref, key, result) do
+    case state.workstreams.child_proofs[key] do
+      %{ref: ^ref} = job ->
+        Process.demonitor(ref, [:flush])
+        state = update_in(state.workstreams.child_proofs, &Map.delete(&1, key))
+        parent = durable_run(state, job.parent_id)
+        child = durable_run(state, job.child_id)
+
+        with false <- __MODULE__.capture_held?(state),
+             :ok <- child_execution_scope(state),
+             true <- is_map(parent) and is_map(child),
+             true <- workstream_fingerprint(parent) == job.parent_fingerprint and workstream_fingerprint(child) == job.child_fingerprint,
+             :ok <- accept_child_proof_kind(job[:kind], result) do
+          case result do
+            {:outputs_retained, refs} ->
+              retained = Map.put(child, :retained_output_artifacts, refs)
+              state = commit_workstream(state, retained, key <> "/child-outputs/" <> workstream_fingerprint(refs), %{kind: :child_outputs_retained})
+              send(self(), :reconcile_child_handoffs)
+              state
+
+            {:ok, proof} ->
+              case WorkstreamRun.finish_child(parent, child, proof) do
+                {:ok, resumed} ->
+                  state = commit_workstream(state, resumed, key <> "/child-complete", %{kind: :child_merge_verified, child_run_id: child.id, proof: proof})
+                  send(self(), :advance_workstreams)
+                  state
+
+                _ ->
+                  retry_child_proof(state, key)
+              end
+          end
+        else
+          _ -> retry_child_proof(state, key)
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  defp accept_child_proof_kind(:retain, {:outputs_retained, refs}) when is_map(refs) and map_size(refs) > 0, do: :ok
+  defp accept_child_proof_kind(:verify, {:ok, proof}) when is_map(proof), do: :ok
+  defp accept_child_proof_kind(_kind, _result), do: {:error, :child_proof_not_verified}
+
+  defp retry_child_proof(state, key) do
+    delay = max(Keyword.get(state.workstreams.opts, :child_proof_retry_ms, 60_000), 10)
+    state = put_in(state.workstreams.child_proofs[key], %{retry_at: System.monotonic_time(:millisecond) + delay})
+    schedule_child_proof_retry(state)
+  end
+
+  defp schedule_child_proof_retry(state) do
+    retry_at =
+      state.workstreams.child_proofs
+      |> Enum.filter(fn {key, job} -> not is_reference(job[:ref]) and Enum.any?(state.workstreams.runs, fn {_id, run} -> run.status == :waiting_for_child and run.current_attempt_id == key end) end)
+      |> Enum.map(fn {_key, job} -> job.retry_at end)
+      |> Enum.min(fn -> nil end)
+
+    if __MODULE__.capture_held?(state) or not is_nil(state.workstreams.child_proof_timer) or is_nil(retry_at) do
+      state
+    else
+      token = make_ref()
+      delay = max(retry_at - System.monotonic_time(:millisecond), 10)
+      put_in(state.workstreams.child_proof_timer, {Process.send_after(self(), {:child_proofs_tick, token}, delay), token})
+    end
+  end
+
+  defp child_proof_down(%{workstreams: nil} = state, _ref), do: state
+
+  defp child_proof_down(state, ref) do
+    case Enum.find(state.workstreams.child_proofs, fn {_key, job} -> job[:ref] == ref end) do
+      {key, _job} -> retry_child_proof(state, key)
+      nil -> state
+    end
+  end
+
+  defp child_proof_active?(state) do
+    Enum.any?(state.workstreams.child_proofs, fn {_key, job} -> is_reference(job[:ref]) end) or
+      Enum.any?(Task.Supervisor.children(state.task_supervisor), fn pid ->
+        case Process.info(pid, :dictionary) do
+          {:dictionary, dictionary} -> is_map(Keyword.get(dictionary, :symphony_child_proof))
+          _ -> false
+        end
+      end)
+  end
+
+  defp accept_workstream_result(%{workstreams: nil} = state, _run, _attempt, _pid, _result), do: state
 
   defp accept_workstream_result(state, run_id, attempt_id, pid, result) do
     run = durable_run(state, run_id)
@@ -3306,7 +3672,7 @@ defmodule SymphonyElixir.Orchestrator do
         Process.demonitor(ref, [:flush])
         state = update_in(state.workstreams.workers, &Map.delete(&1, attempt_id))
         send(self(), :advance_workstreams)
-        state
+        reconcile_child_handoffs(state)
 
       _ ->
         state
@@ -3347,6 +3713,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp recover_workstreams(%{workstreams: nil} = state), do: state
 
   defp recover_workstreams(state) do
+    state = reconcile_child_handoffs(state)
     state = reconcile_stopped_workstreams(state)
     acknowledge_committed_receipts(state)
 
@@ -3354,6 +3721,7 @@ defmodule SymphonyElixir.Orchestrator do
       cond do
         linear_stopped?(acc, run) -> stop_linear_workstream(acc, run)
         run.status in [:complete, :blocked, :policy_blocked, :stopped] -> acc
+        not child_dispatch_allowed?(acc, run) -> acc
         not WorkstreamRun.compatible_policy?(run) -> block_workstream_policy(acc, run)
         run.status in [:executing, :reconciling] -> recover_workstream(acc, run)
         true -> acc
@@ -3367,9 +3735,17 @@ defmodule SymphonyElixir.Orchestrator do
     Enum.any?(state.linear.tasks, fn {_id, task} -> task.run_id == run.id and task.status in [:stopped, :reassigning] end)
   end
 
-  defp stop_linear_workstream(state, %{status: :stopped} = run), do: request_workstream_cancellation(state, run, nil)
+  defp stop_linear_workstream(state, %{status: :stopped} = run) do
+    if __MODULE__.capture_held?(state),
+      do: state,
+      else: state |> request_workstream_cancellation(run, nil) |> reconcile_child_handoffs()
+  end
 
   defp stop_linear_workstream(state, run) do
+    if __MODULE__.capture_held?(state), do: state, else: stop_owned_workstream(state, run)
+  end
+
+  defp stop_owned_workstream(state, run) do
     worker = state.workstreams.workers[run.current_attempt_id]
     operation = run.operations[run.current_attempt_id]
     pid = if worker, do: worker.pid, else: if(operation, do: find_workstream_worker(state.task_supervisor, run, operation))
@@ -3385,9 +3761,10 @@ defmodule SymphonyElixir.Orchestrator do
       # A BEAM exit alone is not proof that a remote process tree has stopped.
       Task.Supervisor.terminate_child(state.task_supervisor, pid)
       if worker, do: Process.demonitor(worker.ref, [:flush])
-      update_in(state.workstreams.workers, &Map.delete(&1, run.current_attempt_id))
+      state = update_in(state.workstreams.workers, &Map.delete(&1, run.current_attempt_id))
+      reconcile_child_handoffs(state)
     else
-      state
+      reconcile_child_handoffs(state)
     end
   end
 

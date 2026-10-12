@@ -51,12 +51,25 @@ defmodule SymphonyElixir.Workstream do
   Loads a version 1 workstream YAML file and validates its definitions and required inputs.
 
   Relative agent paths are resolved from the workstream file. Relative instruction and skill
-  paths are resolved from their agent file. The returned `:definitions` map contains source text
-  and a SHA-256 digest for every loaded file.
+  paths are resolved from their agent file. A parent may declare one child stage whose relative
+  workstream path resolves from the parent file; the child must be named `software-change` and
+  cannot contain another child stage. Child definitions and referenced resources are loaded and
+  pinned with the parent. The returned `:definitions` map contains source text and a SHA-256 digest
+  for every loaded file.
   """
   @spec load(Path.t(), map()) :: {:ok, loaded_workstream()} | {:error, term()}
   def load(path, input_values) when is_binary(path) and is_map(input_values) do
-    with {:ok, workstream_path, source, document} <- read_yaml(path, :workstream),
+    load_definition(path, input_values, :root, nil)
+  end
+
+  def load(path, input_values) when is_binary(path) and not is_map(input_values),
+    do: {:error, {:invalid_workstream_inputs, :expected_map}}
+
+  def load(path, _input_values), do: {:error, {:invalid_workstream_path, path}}
+
+  defp load_definition(path, input_values, mode, preloaded)
+       when mode in [:root, :child] and is_map(input_values) do
+    with {:ok, workstream_path, source, document} <- workstream_source(path, mode, preloaded),
          :ok <- exact_fields(document, ~w(version name inputs agents entry stages), :workstream),
          :ok <- validate_version(Map.get(document, "version"), :workstream),
          {:ok, name} <- required_name(Map.get(document, "name"), :workstream_name),
@@ -64,14 +77,16 @@ defmodule SymphonyElixir.Workstream do
          {:ok, entry} <- required_name(Map.get(document, "entry"), :workstream_entry),
          {:ok, stages} <- normalize_stages(Map.get(document, "stages")),
          {:ok, agent_paths} <- validation_agent_paths(Map.get(document, "agents"), stages, entry),
-         {:ok, agents, definitions} <- load_agents(agent_paths, Path.dirname(workstream_path)),
+         :ok <- validate_child_stage_mode(stages, mode),
+         {:ok, agents, agent_definitions} <- load_agents(agent_paths, Path.dirname(workstream_path)),
          :ok <- validate_input_values(input_names, input_values),
          :ok <- validate_agent_references(stages, agents),
+         {:ok, stages, child_definitions} <- load_child_stages(stages, workstream_path, mode),
          :ok <- validate_transitions(stages, entry, agents),
          :ok <- validate_outputs(stages, input_names),
-         :ok <- validate_dataflow(stages, entry, input_names) do
-      workstream_definition = reference(workstream_path, source)
-
+         :ok <- validate_dataflow(stages, entry, input_names),
+         {:ok, definitions} <- merge_child_references(agent_definitions, child_definitions),
+         {:ok, definitions} <- merge_child_references(definitions, %{workstream_path => reference(workstream_path, source)}) do
       {:ok,
        %{
          version: 1,
@@ -81,15 +96,136 @@ defmodule SymphonyElixir.Workstream do
          stages: stages,
          agents: agents,
          input_values: input_values,
-         definitions: Map.put(definitions, workstream_path, workstream_definition)
+         definitions: definitions
        }}
     end
   end
 
-  def load(path, input_values) when is_binary(path) and not is_map(input_values),
-    do: {:error, {:invalid_workstream_inputs, :expected_map}}
+  defp merge_child_references(existing, additions) do
+    Enum.reduce_while(additions, {:ok, existing}, fn {path, reference}, {:ok, merged} ->
+      case Map.fetch(merged, path) do
+        {:ok, ^reference} -> {:cont, {:ok, merged}}
+        {:ok, _changed} -> {:halt, {:error, {:definition_changed_during_load, path}}}
+        :error -> {:cont, {:ok, Map.put(merged, path, reference)}}
+      end
+    end)
+  end
 
-  def load(path, _input_values), do: {:error, {:invalid_workstream_path, path}}
+  defp workstream_source(path, :root, nil), do: read_yaml(path, :workstream)
+  defp workstream_source(path, :child, nil), do: read_yaml(path, :child_workstream)
+
+  defp workstream_source(_path, _mode, {canonical_path, source, document}) do
+    {:ok, canonical_path, source, document}
+  end
+
+  defp validate_child_stage_mode(stages, :root) do
+    child_stage_ids = for {id, %{type: :child}} <- stages, do: id
+
+    if length(child_stage_ids) <= 1 do
+      :ok
+    else
+      {:error, {:multiple_child_stages, child_stage_ids}}
+    end
+  end
+
+  defp validate_child_stage_mode(stages, :child) do
+    case Enum.find(stages, fn {_id, stage} -> stage.type == :child end) do
+      nil -> :ok
+      {id, _stage} -> {:error, {:nested_child_workstream, id}}
+    end
+  end
+
+  defp load_child_stages(stages, _parent_path, :child), do: {:ok, stages, %{}}
+
+  defp load_child_stages(stages, parent_path, :root) do
+    case Enum.find(stages, fn {_id, stage} -> stage.type == :child end) do
+      nil ->
+        {:ok, stages, %{}}
+
+      {stage_id, stage} ->
+        with {:ok, child_stage, definitions} <- load_child_stage(stage_id, stage, parent_path) do
+          {:ok, Map.put(stages, stage_id, child_stage), definitions}
+        end
+    end
+  end
+
+  defp load_child_stage(stage_id, stage, parent_path) do
+    child_path = Path.expand(stage.workstream, Path.dirname(parent_path))
+
+    with {:ok, canonical_child_path, source, document} <-
+           read_yaml(child_path, {:child_workstream, stage_id}),
+         :ok <- reject_child_cycle(canonical_child_path, parent_path, stage_id),
+         :ok <- exact_fields(document, ~w(version name inputs agents entry stages), :workstream),
+         :ok <- validate_version(Map.get(document, "version"), {:child_workstream, stage_id}),
+         {:ok, child_name} <-
+           required_name(Map.get(document, "name"), {:child_workstream_name, stage_id}),
+         :ok <- validate_child_workstream_name(child_name, stage_id),
+         {:ok, child_inputs} <- names(Map.get(document, "inputs"), {:child_workstream_inputs, stage_id}),
+         :ok <- reject_nested_child_definition(document, stage_id),
+         {:ok, placeholder_values} <- child_input_placeholders(stage, child_inputs),
+         {:ok, child_definition} <-
+           load_definition(
+             canonical_child_path,
+             placeholder_values,
+             :child,
+             {canonical_child_path, source, document}
+           ),
+         child_stage = Map.put(stage, :child_definition, child_definition) do
+      {:ok, child_stage, child_definition.definitions}
+    end
+  end
+
+  defp reject_child_cycle(child_path, parent_path, stage_id) do
+    if child_path == parent_path do
+      {:error, {:child_workstream_cycle, stage_id, child_path}}
+    else
+      :ok
+    end
+  end
+
+  defp validate_child_workstream_name("software-change", _stage_id), do: :ok
+
+  defp validate_child_workstream_name(name, stage_id),
+    do: {:error, {:invalid_child_workstream_name, stage_id, name}}
+
+  defp reject_nested_child_definition(document, stage_id) do
+    case Map.get(document, "stages") do
+      stages when is_list(stages) ->
+        case Enum.find(stages, fn
+               %{"type" => "child"} -> true
+               _stage -> false
+             end) do
+          nil -> :ok
+          _stage -> {:error, {:nested_child_workstream, stage_id}}
+        end
+
+      _stages ->
+        :ok
+    end
+  end
+
+  defp child_input_placeholders(stage, child_inputs) do
+    mapping = stage.input_mapping
+    mapping_keys = Map.keys(mapping)
+    missing = child_inputs -- mapping_keys
+    unknown = mapping_keys -- child_inputs
+    parent_sources = mapping |> Map.values() |> Enum.uniq()
+    declared_sources = Enum.sort(stage.inputs)
+
+    cond do
+      missing != [] ->
+        {:error, {:missing_child_input_mappings, stage.id, missing}}
+
+      unknown != [] ->
+        {:error, {:unknown_child_input_mappings, stage.id, unknown}}
+
+      Enum.sort(parent_sources) != declared_sources ->
+        {:error, {:child_stage_inputs_mismatch, stage.id, Enum.sort(parent_sources), declared_sources}}
+
+      true ->
+        {:ok, Map.new(child_inputs, &{&1, {:mapped_parent_input, Map.fetch!(mapping, &1)}})}
+    end
+  end
 
   @doc "Returns whether an agent stage is assigned to review a pinned checkout."
   @spec reviewer?(map()) :: boolean()
@@ -283,8 +419,57 @@ defmodule SymphonyElixir.Workstream do
     end
   end
 
+  defp normalize_stage(%{"type" => "child"} = stage) do
+    with :ok <-
+           exact_fields(
+             stage,
+             ~w(id type inputs outputs workstream input_mapping next),
+             {:stage, Map.get(stage, "id")}
+           ),
+         {:ok, id} <- required_name(Map.get(stage, "id"), :stage_id),
+         {:ok, inputs} <- names(Map.get(stage, "inputs"), {:stage_inputs, id}),
+         {:ok, outputs} <- names(Map.get(stage, "outputs"), {:stage_outputs, id}),
+         {:ok, workstream} <- child_workstream_path(Map.get(stage, "workstream"), id),
+         {:ok, input_mapping} <- child_input_mapping(Map.get(stage, "input_mapping"), id),
+         {:ok, next} <- stage_next(Map.get(stage, "next"), {:stage_next, id}) do
+      {:ok,
+       %{
+         id: id,
+         type: :child,
+         inputs: inputs,
+         outputs: outputs,
+         workstream: workstream,
+         input_mapping: input_mapping,
+         next: next
+       }}
+    end
+  end
+
   defp normalize_stage(%{"type" => type}), do: {:error, {:invalid_stage_type, type}}
   defp normalize_stage(stage), do: {:error, {:invalid_stage_definition, stage}}
+
+  defp child_workstream_path(path, stage_id) when is_binary(path) do
+    if relative_path?(path),
+      do: {:ok, path},
+      else: {:error, {:invalid_child_workstream_path, stage_id, path}}
+  end
+
+  defp child_workstream_path(path, stage_id),
+    do: {:error, {:invalid_child_workstream_path, stage_id, path}}
+
+  defp child_input_mapping(mapping, stage_id) when is_map(mapping) do
+    if Enum.all?(mapping, fn {child_input, parent_input} ->
+         is_binary(child_input) and String.trim(child_input) != "" and is_binary(parent_input) and
+           String.trim(parent_input) != ""
+       end) do
+      {:ok, mapping}
+    else
+      {:error, {:invalid_child_input_mapping, stage_id}}
+    end
+  end
+
+  defp child_input_mapping(_mapping, stage_id),
+    do: {:error, {:invalid_child_input_mapping, stage_id}}
 
   defp normalize_gate(%{"evaluator" => "review_checkout"} = gate, stage_id) do
     with :ok <- exact_fields(gate, ~w(evaluator validation_stage success failure), {:gate, stage_id}),
@@ -632,6 +817,22 @@ defmodule SymphonyElixir.Workstream do
       not Map.has_key?(stages, next) -> {:error, {:unknown_stage_transition, id, next}}
       stages[next].type != :check -> {:error, {:agent_must_transition_to_check, id, next}}
       true -> :ok
+    end
+  end
+
+  defp validate_stage_transition(id, %{type: :child, next: next}, stages) do
+    cond do
+      next == :complete ->
+        {:error, {:child_must_transition_to_reevaluation, id}}
+
+      not Map.has_key?(stages, next) ->
+        {:error, {:unknown_stage_transition, id, next}}
+
+      stages[next].type != :check ->
+        {:error, {:child_must_transition_to_check, id, next}}
+
+      true ->
+        :ok
     end
   end
 
@@ -1084,6 +1285,7 @@ defmodule SymphonyElixir.Workstream do
   end
 
   defp stage_success_targets(%{type: :agent, next: next}), do: [next]
+  defp stage_success_targets(%{type: :child, next: next}) when is_binary(next), do: [next]
   defp stage_success_targets(%{type: :human_wait, next: next}) when is_binary(next), do: [next]
   defp stage_success_targets(%{type: :human_wait}), do: []
   defp stage_success_targets(%{type: :check, gate: %{success: success}}) when is_binary(success), do: [success]

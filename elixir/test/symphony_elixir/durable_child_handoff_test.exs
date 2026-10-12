@@ -238,6 +238,66 @@ defmodule SymphonyElixir.DurableChildHandoffTest do
     end)
   end
 
+  test "stopping a parent cancels its live child worker without restarting the coordinator", context do
+    owner = self()
+    ordinary_executor = stage_executor(owner)
+    executor = fn stage, definition, run, opts ->
+      if stage.id == "implement" do
+        File.write!(Path.join(run.workspace, "live-worker.txt"), "retained fixture work\n")
+        send(owner, {:live_child_worker, run.id, run.current_attempt_id, self()})
+        receive do
+          :fixture_finish -> {:ok, %{candidate: "fixture candidate"}}
+        end
+      else
+        ordinary_executor.(stage, definition, run, opts)
+      end
+    end
+    canceller = fn run, operation, pid ->
+      send(owner, {:owned_child_cancel, run.id, operation.id, pid})
+      :terminated
+    end
+
+    initial = runtime(context, executor)
+    parent_id = queue_parent(initial, context)
+    wait_at_parent_approval(initial, parent_id)
+    waiting = coordinator_run(initial, parent_id)
+    persist_fixture_owner_approval(context, initial, parent_id, waiting)
+    recovered = runtime(context, executor, workstream_canceller: canceller)
+    assert :ok = Orchestrator.step_workstreams(recovered.coordinator)
+    parent = await_run(recovered, parent_id, :waiting_for_child, "implement-gap")
+    child_id = parent.child_handoff.child_run_id
+    assert :ok = Orchestrator.step_workstreams(recovered.coordinator)
+    assert_receive {:live_child_worker, ^child_id, child_attempt, child_pid}
+    assert Process.alive?(child_pid)
+    coordinator_pid = Process.whereis(recovered.coordinator)
+    child_monitor = Process.monitor(child_pid)
+
+    # The isolated test owner delivers a stop while the real supervised child is alive.
+    # This does not qualify external Linear stop delivery or remote termination.
+    :sys.replace_state(coordinator_pid, fn state ->
+      stopped = Map.merge(state.workstreams.runs[parent_id], %{status: :stopped, phase: :stopped, cancellation: %{termination: :terminated}})
+      :ok = WorkstreamStore.commit(state.workstreams.store, stopped, "fixture-live-parent-stop/#{parent_id}", %{kind: :test_fixture_owner_stop})
+      put_in(state.workstreams.runs[parent_id], stopped)
+    end)
+
+    assert :ok = Orchestrator.reconcile_workstreams(recovered.coordinator)
+    assert_receive {:owned_child_cancel, ^child_id, ^child_attempt, ^child_pid}
+    assert_receive {:DOWN, ^child_monitor, :process, ^child_pid, _reason}
+    stopped_child = await(fn ->
+      case lookup_run(recovered, child_id) do
+        %{status: :stopped, cancellation: %{termination: :terminated}} = run -> run
+        _ -> nil
+      end
+    end)
+    assert stopped_child.operations[child_attempt].status == :canceled
+    assert Process.whereis(recovered.coordinator) == coordinator_pid
+    assert is_map(GenServer.call(recovered.coordinator, :snapshot))
+    assert coordinator_run(recovered, parent_id).status == :stopped
+    refute Map.has_key?(:sys.get_state(coordinator_pid).workstreams.workers, child_attempt)
+    assert File.read!(Path.join(context.child_workspace, "live-worker.txt")) == "retained fixture work\n"
+    assert {:ok, %{status: :stopped}} = WorkstreamStore.fetch(store(recovered), child_id)
+  end
+
   test "a persisted child with mismatched lineage is not reconciled or dispatched after restart", context do
     executor = stage_executor(self())
     runtime = runtime(context, executor)

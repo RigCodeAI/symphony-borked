@@ -3759,7 +3759,8 @@ defmodule SymphonyElixir.Orchestrator do
       # A BEAM exit alone is not proof that a remote process tree has stopped.
       Task.Supervisor.terminate_child(state.task_supervisor, pid)
       if worker, do: Process.demonitor(worker.ref, [:flush])
-      state |> update_in([:workstreams, :workers], &Map.delete(&1, run.current_attempt_id)) |> reconcile_child_handoffs()
+      state = update_in(state.workstreams.workers, &Map.delete(&1, run.current_attempt_id))
+      reconcile_child_handoffs(state)
     else
       reconcile_child_handoffs(state)
     end

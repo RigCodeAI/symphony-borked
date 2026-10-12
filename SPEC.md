@@ -1133,6 +1133,32 @@ Failure semantics:
 
 ### 9.5 Safety Invariants
 
+Workspace removal uses the current configured workspace root as its authorization
+boundary, including for previously recorded paths. After a root change, old-root
+work is retained with an error until its recovery/cleanup is explicitly resolved.
+Removal must reject the root itself, outside paths and dangling links before
+running hooks. A genuinely absent direct path may return a successful no-op without
+running a hook or issuing a deletion; absence never authorizes recorded outside paths.
+
+The Elixir local and SSH removal paths require Python 3.11+ with Unix descriptor-relative
+operations and symlink-resistant `shutil.rmtree`. Missing or unsupported runtimes fail
+closed with an actionable error; there is no pathname-based deletion fallback. The
+guard opens ancestors without following links, checks root/ancestor/target identities
+after the hook, and deletes relative to retained directory descriptors. Hook failure
+and timeout remain logged and ignored, but path changes prevent deletion. Helper
+time and output are bounded, and hook output is not copied into removal logs.
+Mounted subtrees are retained: Linux removal checks kernel mount IDs for opened
+directories, including same-device bind mounts; macOS checks device boundaries.
+Other platforms or unavailable mount identity support fail closed. Streaming
+transport output is capped before it can accumulate beyond the response limit.
+Removal replies must match a fresh per-call nonce; static startup output cannot
+stand in for the helper's result. Hook timeout reaps ordinary process-group
+descendants, but a child escaping that group is not proof of termination.
+
+Issue-workspace cleanup returns removal/path errors and stops host fanout at the
+first failure. This does not add coordinator retries, prove worker termination,
+confirm a GitHub merge, or satisfy a permanent-archive gate.
+
 This is the most important portability constraint.
 
 Invariant 1: Run the coding agent only in the per-issue workspace path.

@@ -7,6 +7,220 @@ defmodule SymphonyElixir.Workspace do
   alias SymphonyElixir.{Config, PathSafety, SSH}
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
+  @remove_marker "__SYMPHONY_REMOVE__"
+  @remove_script ~S"""
+  import contextlib
+  import json
+  import os
+  import shutil
+  import signal
+  import stat
+  import subprocess
+  import sys
+
+  MARKER = "__SYMPHONY_REMOVE__"
+
+  class Rejected(Exception):
+      def __init__(self, reason, workspace=None, root=None):
+          self.reason, self.workspace, self.root = reason, workspace, root
+
+
+  def identity(info):
+      return info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode)
+
+
+  def absence(path):
+      # ENOENT is a no-op only if no dangling/looping ancestor link hides the path.
+      try:
+          os.lstat(path)
+          return False
+      except FileNotFoundError:
+          ancestor = os.path.dirname(path)
+          while ancestor != os.path.dirname(ancestor):
+              if os.path.islink(ancestor) and not os.path.exists(ancestor):
+                  raise Rejected("symlink_escape", path, os.path.dirname(ancestor))
+              ancestor = os.path.dirname(ancestor)
+          return True
+
+
+  def mount_identity(fd):
+      if sys.platform.startswith("linux"):
+          with open("/proc/self/fdinfo/" + str(fd), encoding="ascii") as info:
+              for line in info.read(8192).splitlines():
+                  if line.startswith("mnt_id:"):
+                      return line.split(":", 1)[1].strip()
+          raise Rejected("mount_identity_unavailable")
+      if sys.platform == "darwin":
+          return os.fstat(fd).st_dev
+      raise Rejected("unsupported_python")
+
+
+  def check_mount(fd, expected):
+      if mount_identity(fd) != expected:
+          raise Rejected("mount_boundary")
+
+
+  def verify_tree(fd, expected):
+      with os.scandir(fd) as entries:
+          for entry in entries:
+              if entry.is_dir(follow_symlinks=False):
+                  child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                  try:
+                      check_mount(child, expected)
+                      verify_tree(child, expected)
+                  finally:
+                      os.close(child)
+
+
+  def parent_fd(stack, root_fd, parts, expected_mount=None):
+      fd = root_fd
+      chain = []
+      for part in parts:
+          fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+          stack.callback(os.close, fd)
+          if expected_mount is not None:
+              check_mount(fd, expected_mount)
+          chain.append(identity(os.fstat(fd)))
+      return fd, chain
+
+
+  def supported_runtime():
+      return (sys.version_info >= (3, 11) and
+              getattr(shutil.rmtree, "avoids_symlink_attacks", False) and
+              hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY") and
+              hasattr(signal, "SIGALRM") and hasattr(signal, "setitimer") and
+              (sys.platform.startswith("linux") or sys.platform == "darwin"))
+
+
+  def remove(workspace, root, hook, timeout_ms, recorded):
+      if not supported_runtime():
+          raise Rejected("unsupported_python")
+      requested = os.path.abspath(workspace)
+      configured = os.path.abspath(root)
+      physical_root = os.path.realpath(configured)
+      physical_workspace = os.path.realpath(requested)
+      if physical_root == "/":
+          raise Rejected("unsafe_root", requested, physical_root)
+      if physical_workspace == physical_root:
+          raise Rejected("equals_root", physical_workspace, physical_root)
+      missing = absence(requested)
+      if missing and not recorded:
+          return None
+      if recorded:
+          parent = os.path.realpath(os.path.dirname(requested))
+          if not physical_workspace.startswith(parent + os.sep):
+              raise Rejected("symlink_escape", requested, parent)
+      if not physical_workspace.startswith(physical_root + os.sep):
+          raise Rejected("outside_root", physical_workspace, physical_root)
+      if missing:
+          return None
+      # A configured root may be an alias. No link below it is followed.
+      for prefix in (configured, physical_root):
+          if requested.startswith(prefix + os.sep):
+              relative = requested[len(prefix) + 1:]
+              break
+      else:
+          raise Rejected("symlink_escape", requested, physical_root)
+      parts = relative.split(os.sep)
+      if any(part in ("", ".", "..") for part in parts):
+          raise Rejected("unsafe_component", requested, physical_root)
+      with contextlib.ExitStack() as stack:
+          filesystem_fd = os.open(os.sep, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+          stack.callback(os.close, filesystem_fd)
+          root_fd, _ = parent_fd(stack, filesystem_fd, physical_root.strip(os.sep).split(os.sep))
+          root_identity = identity(os.fstat(root_fd))
+          allowed_mount = mount_identity(root_fd)
+          parent, chain = parent_fd(stack, root_fd, parts[:-1], allowed_mount)
+          name = parts[-1]
+          initial = os.stat(name, dir_fd=parent, follow_symlinks=False)
+          if stat.S_ISLNK(initial.st_mode):
+              raise Rejected("symlink_escape", requested, physical_root)
+          hook_result = None
+          if stat.S_ISDIR(initial.st_mode):
+              target_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+              stack.callback(os.close, target_fd)
+              check_mount(target_fd, allowed_mount)
+              if identity(os.fstat(target_fd)) != identity(initial):
+                  raise Rejected("path_changed", requested, physical_root)
+              verify_tree(target_fd, allowed_mount)
+          if hook and stat.S_ISDIR(initial.st_mode):
+              os.fchdir(target_fd)
+              process = subprocess.Popen(["sh", "-lc", hook], start_new_session=True,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+              finished = False
+              try:
+                  status = process.wait(timeout=timeout_ms / 1000)
+                  finished = True
+                  if status:
+                      hook_result = {"status": "failed", "exit_status": status}
+              except subprocess.TimeoutExpired:
+                  hook_result = {"status": "timeout"}
+              finally:
+                  if not finished:
+                      # Reap the hook and kill ordinary descendants on timeout/deadline.
+                      try:
+                          os.killpg(process.pid, signal.SIGKILL)
+                      except ProcessLookupError:
+                          pass
+                      process.wait(timeout=1)
+          # Re-open every ancestor without following links and compare identities.
+          if (os.path.realpath(configured) != physical_root or
+                  identity(os.stat(physical_root, follow_symlinks=False)) != root_identity):
+              raise Rejected("path_changed", requested, physical_root)
+          current_parent, current_chain = parent_fd(stack, root_fd, parts[:-1], allowed_mount)
+          if current_chain != chain or identity(os.stat(name, dir_fd=current_parent, follow_symlinks=False)) != identity(initial):
+              raise Rejected("path_changed", requested, physical_root)
+          # rmtree's fd implementation checks child identities and never follows links.
+          if stat.S_ISDIR(initial.st_mode):
+              # Scope every recursive open to this mount, including same-device
+              # Linux bind mounts. Existing retained fds survive namespace swaps.
+              original_open = os.open
+              def guarded_open(*args, **kwargs):
+                  opened = original_open(*args, **kwargs)
+                  try:
+                      if stat.S_ISDIR(os.fstat(opened).st_mode):
+                          check_mount(opened, allowed_mount)
+                      return opened
+                  except BaseException:
+                      os.close(opened)
+                      raise
+              os.open = guarded_open
+              try:
+                  shutil.rmtree(name, dir_fd=current_parent)
+              finally:
+                  os.open = original_open
+          else:
+              os.unlink(name, dir_fd=current_parent)
+          return hook_result
+
+
+  nonce = sys.argv[-1]
+  result = {"status": "error"}
+  result["nonce"] = nonce
+  try:
+      workspace, root, hook, timeout, recorded, nonce = sys.argv[1:]
+      timeout_ms = int(timeout)
+      if not supported_runtime():
+          raise Rejected("unsupported_python")
+      def deadline(_signal, _frame):
+          raise Rejected("timeout")
+      signal.signal(signal.SIGALRM, deadline)
+      signal.setitimer(signal.ITIMER_REAL, (timeout_ms + 5000) / 1000)
+      hook_result = remove(workspace, root, hook, timeout_ms, recorded == "true")
+      result = {"status": "ok", "hook": hook_result, "nonce": nonce}
+  except Rejected as error:
+      result.update(reason=error.reason, workspace=error.workspace, root=error.root)
+  except OSError as error:
+      # No hook output, command, environment or file contents enter this protocol.
+      result.update(reason="filesystem_error", errno=error.errno)
+  except Exception:
+      result.update(reason="helper_error")
+  finally:
+      if hasattr(signal, "setitimer"):
+          signal.setitimer(signal.ITIMER_REAL, 0)
+      print(MARKER + json.dumps(result, separators=(",", ":")))
+  sys.exit(0 if result["status"] == "ok" else 1)
+  """
 
   @type worker_host :: String.t() | nil
 
@@ -94,127 +308,196 @@ defmodule SymphonyElixir.Workspace do
   def remove(workspace), do: remove(workspace, nil)
 
   @spec remove(Path.t(), worker_host()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
-  def remove(workspace, nil) do
-    case File.exists?(workspace) do
-      true ->
-        case validate_workspace_path(workspace, nil) do
-          :ok ->
-            remove_local_workspace(workspace)
-
-          {:error, reason} ->
-            {:error, reason, ""}
-        end
-
-      false ->
-        File.rm_rf(workspace)
-    end
-  end
-
-  def remove(workspace, worker_host) when is_binary(worker_host) do
-    maybe_run_before_remove_hook(workspace, worker_host)
-
-    script =
-      [
-        remote_shell_assign("workspace", workspace),
-        "rm -rf \"$workspace\""
-      ]
-      |> Enum.join("\n")
-
-    case run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms) do
-      {:ok, {_output, 0}} ->
-        {:ok, []}
-
-      {:ok, {output, status}} ->
-        {:error, {:workspace_remove_failed, worker_host, status, output}, ""}
-
-      {:error, reason} ->
-        {:error, reason, ""}
-    end
-  end
+  def remove(workspace, worker_host), do: guarded_remove(workspace, worker_host, false)
 
   @doc false
   @spec remove_recorded(Path.t(), worker_host()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
   def remove_recorded(workspace, nil) when is_binary(workspace) do
-    if Path.type(workspace) == :absolute do
-      case validate_recorded_workspace_path(workspace) do
-        :ok ->
-          remove_local_workspace(workspace)
-
-        {:error, reason} ->
-          {:error, reason, ""}
-      end
-    else
-      {:error, {:workspace_path_unreadable, workspace, :not_absolute}, ""}
-    end
+    if Path.type(workspace) == :absolute,
+      do: guarded_remove(workspace, nil, true),
+      else: {:error, {:workspace_path_unreadable, workspace, :not_absolute}, ""}
   end
 
-  def remove_recorded(workspace, worker_host) when is_binary(workspace) and is_binary(worker_host) do
-    remove(workspace, worker_host)
-  end
+  def remove_recorded(workspace, worker_host) when is_binary(workspace) and is_binary(worker_host),
+    do: guarded_remove(workspace, worker_host, true)
 
-  def remove_recorded(workspace, _worker_host) do
-    {:error, {:workspace_path_unreadable, workspace, :invalid}, ""}
-  end
+  def remove_recorded(workspace, _worker_host), do: {:error, {:workspace_path_unreadable, workspace, :invalid}, ""}
 
-  defp remove_local_workspace(workspace) do
-    maybe_run_before_remove_hook(workspace, nil)
-    File.rm_rf(workspace)
-  end
-
-  @spec remove_issue_workspaces(term()) :: :ok
+  @spec remove_issue_workspaces(term()) :: :ok | {:error, term(), String.t()}
   def remove_issue_workspaces(identifier), do: remove_issue_workspaces(identifier, nil)
 
-  @spec remove_issue_workspaces(term(), worker_host()) :: :ok
-  def remove_issue_workspaces(%{id: _issue_id, identifier: _identifier} = issue, worker_host)
-      when is_binary(worker_host) do
-    case workspace_path_for_issue(workspace_key(issue), worker_host) do
-      {:ok, workspace} -> remove(workspace, worker_host)
-      {:error, _reason} -> :ok
-    end
+  @spec remove_issue_workspaces(term(), worker_host()) :: :ok | {:error, term(), String.t()}
+  def remove_issue_workspaces(%{id: _issue_id, identifier: _identifier} = issue, worker_host),
+    do: remove_issue_paths(workspace_key(issue), worker_host)
 
-    :ok
-  end
-
-  def remove_issue_workspaces(%{id: _issue_id, identifier: _identifier} = issue, nil) do
-    case Config.settings!().worker.ssh_hosts do
-      [] ->
-        case workspace_path_for_issue(workspace_key(issue), nil) do
-          {:ok, workspace} -> remove(workspace, nil)
-          {:error, _reason} -> :ok
-        end
-
-      worker_hosts ->
-        Enum.each(worker_hosts, &remove_issue_workspaces(issue, &1))
-    end
-
-    :ok
-  end
-
-  def remove_issue_workspaces(identifier, worker_host) when is_binary(identifier) and is_binary(worker_host) do
-    case workspace_path_for_issue(workspace_key(identifier), worker_host) do
-      {:ok, workspace} -> remove(workspace, worker_host)
-      {:error, _reason} -> :ok
-    end
-
-    :ok
-  end
-
-  def remove_issue_workspaces(identifier, nil) when is_binary(identifier) do
-    case Config.settings!().worker.ssh_hosts do
-      [] ->
-        case workspace_path_for_issue(workspace_key(identifier), nil) do
-          {:ok, workspace} -> remove(workspace, nil)
-          {:error, _reason} -> :ok
-        end
-
-      worker_hosts ->
-        Enum.each(worker_hosts, &remove_issue_workspaces(identifier, &1))
-    end
-
-    :ok
-  end
+  def remove_issue_workspaces(identifier, worker_host) when is_binary(identifier),
+    do: remove_issue_paths(workspace_key(identifier), worker_host)
 
   def remove_issue_workspaces(_identifier, _worker_host), do: :ok
+
+  defp remove_issue_paths(key, nil) do
+    case Config.settings!().worker.ssh_hosts do
+      [] ->
+        remove_issue_path(key, nil)
+
+      hosts ->
+        Enum.reduce_while(hosts, :ok, fn host, :ok ->
+          case remove_issue_path(key, host) do
+            :ok -> {:cont, :ok}
+            error -> {:halt, error}
+          end
+        end)
+    end
+  end
+
+  defp remove_issue_paths(key, host) when is_binary(host), do: remove_issue_path(key, host)
+  defp remove_issue_paths(_key, _host), do: :ok
+
+  defp remove_issue_path(key, host) do
+    with {:ok, workspace} <- workspace_path_for_issue(key, host) do
+      case remove(workspace, host) do
+        {:ok, _} -> :ok
+        error -> error
+      end
+    else
+      {:error, reason} -> {:error, reason, ""}
+    end
+  end
+
+  defp guarded_remove(workspace, host, recorded, run_hook? \\ true) do
+    settings = Config.settings!()
+    root = if is_nil(host), do: Config.local_workspace_root(), else: settings.workspace.root
+    hook = if run_hook?, do: settings.hooks.before_remove || "", else: ""
+    timeout = settings.hooks.timeout_ms
+    nonce = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+
+    with :ok <- validate_removal_input(workspace),
+         :ok <- validate_removal_input(root),
+         {:ok, {output, status}} <- run_remove_helper(workspace, root, hook, timeout, recorded, nonce, host) do
+      removal_result(output, status, workspace, host, nonce)
+    else
+      {:error, reason} -> {:error, reason, ""}
+    end
+  end
+
+  defp validate_removal_input(path) when is_binary(path) do
+    cond do
+      String.trim(path) == "" -> {:error, {:workspace_path_unreadable, path, :empty}}
+      String.contains?(path, ["\n", "\r", <<0>>]) -> {:error, {:workspace_path_unreadable, path, :invalid_characters}}
+      true -> :ok
+    end
+  end
+
+  defp validate_removal_input(path), do: {:error, {:workspace_path_unreadable, path, :invalid}}
+
+  defp run_remove_helper(workspace, root, hook, timeout, recorded, nonce, nil) do
+    case System.find_executable("python3") do
+      nil ->
+        {:error, {:workspace_remove_unavailable, :python3_not_found}}
+
+      python ->
+        args = ["-c", @remove_script, workspace, root, hook, to_string(timeout), to_string(recorded), nonce]
+        port = Port.open({:spawn_executable, String.to_charlist(python)}, [:binary, :exit_status, :stderr_to_stdout, args: Enum.map(args, &String.to_charlist/1)])
+        collect_removal_output(port, "", System.monotonic_time(:millisecond) + timeout + 6_000)
+    end
+  rescue
+    _error in [ArgumentError, ErlangError] -> {:error, {:workspace_remove_unavailable, :python3_spawn_failed}}
+  end
+
+  defp run_remove_helper(workspace, root, hook, timeout, recorded, nonce, host) when is_binary(host) do
+    missing = @remove_marker <> Jason.encode!(%{status: "error", reason: "python3_not_found", nonce: nonce})
+
+    script =
+      [
+        "removal_nonce=#{nonce}",
+        remote_shell_assign("workspace", workspace),
+        remote_shell_assign("workspace_root", root),
+        "command -v python3 >/dev/null 2>&1 || { printf '%s\\n' #{shell_escape(missing)}; exit 1; }",
+        "python3 -c #{shell_escape(@remove_script)} \"$workspace\" \"$workspace_root\" #{shell_escape(hook)} #{timeout} #{recorded} #{nonce}"
+      ]
+      |> Enum.join("\n")
+
+    with {:ok, port} <- SSH.start_port(host, script) do
+      collect_removal_output(port, "", System.monotonic_time(:millisecond) + timeout + 6_000)
+    end
+  rescue
+    _error in [ArgumentError, ErlangError] -> {:error, {:workspace_remove_unavailable, :ssh_spawn_failed}}
+  end
+
+  defp collect_removal_output(port, output, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {^port, {:data, data}} ->
+        if byte_size(output) + byte_size(data) <= 65_536 do
+          collect_removal_output(port, output <> data, deadline)
+        else
+          close_removal_port(port)
+          {:error, {:workspace_remove_failed, :output_limit}}
+        end
+
+      {^port, {:exit_status, status}} ->
+        {:ok, {output, status}}
+    after
+      remaining ->
+        close_removal_port(port)
+        {:error, {:workspace_remove_failed, :timeout}}
+    end
+  end
+
+  defp close_removal_port(port) do
+    Port.close(port)
+  rescue
+    ArgumentError -> :ok
+  end
+
+  defp removal_result(output, status, workspace, host, nonce) do
+    results =
+      if byte_size(output) <= 65_536 do
+        Enum.flat_map(String.split(output, "\n"), fn line ->
+          if String.starts_with?(line, @remove_marker) do
+            case Jason.decode(String.replace_prefix(line, @remove_marker, "")) do
+              {:ok, %{"nonce" => ^nonce} = result} -> [result]
+              _ -> []
+            end
+          else
+            []
+          end
+        end)
+      else
+        []
+      end
+
+    case results do
+      [%{"status" => "ok"} = result] when status == 0 ->
+        log_removal_hook(result["hook"], workspace, host)
+        {:ok, []}
+
+      [%{"status" => "error"} = result] ->
+        {:error, removal_error(result, workspace, host), ""}
+
+      _ ->
+        {:error, {:workspace_remove_failed, host, status, :invalid_result}, ""}
+    end
+  end
+
+  defp removal_error(%{"reason" => reason}, _workspace, _host) when reason in ["python3_not_found", "unsupported_python"],
+    do: {:workspace_remove_unavailable, if(reason == "python3_not_found", do: :python3_not_found, else: :python3_11_descriptor_support_required)}
+
+  defp removal_error(%{"reason" => "equals_root", "workspace" => path, "root" => root}, _workspace, _host), do: {:workspace_equals_root, path, root}
+  defp removal_error(%{"reason" => "outside_root", "workspace" => path, "root" => root}, _workspace, _host), do: {:workspace_outside_root, path, root}
+  defp removal_error(%{"reason" => "symlink_escape", "workspace" => path, "root" => root}, _workspace, _host), do: {:workspace_symlink_escape, path, root}
+  defp removal_error(result, workspace, host), do: {:workspace_remove_failed, host, result["reason"], result["errno"], workspace}
+
+  defp log_removal_hook(%{"status" => "failed", "exit_status" => status}, workspace, host),
+    do: Logger.warning("Workspace hook failed hook=before_remove #{removal_context(workspace)} workspace=#{workspace} worker_host=#{worker_host_for_log(host)} status=#{status}")
+
+  defp log_removal_hook(%{"status" => "timeout"}, workspace, host),
+    do: Logger.warning("Workspace hook timed out hook=before_remove #{removal_context(workspace)} workspace=#{workspace} worker_host=#{worker_host_for_log(host)}")
+
+  defp log_removal_hook(_hook, _workspace, _host), do: :ok
+
+  defp removal_context(workspace), do: issue_log_context(%{issue_id: nil, issue_identifier: Path.basename(workspace)})
 
   @spec run_before_run_hook(Path.t(), map() | String.t() | nil, worker_host()) ::
           :ok | {:error, term()}
@@ -306,88 +589,10 @@ defmodule SymphonyElixir.Workspace do
 
   defp cleanup_failed_new_workspace(_workspace, false, _worker_host), do: :ok
 
-  defp cleanup_failed_new_workspace(workspace, true, nil) do
-    case File.rm_rf(workspace) do
-      {:ok, _removed} ->
-        :ok
-
-      {:error, reason, path} ->
-        Logger.warning("Failed to remove partial workspace path=#{path} reason=#{inspect(reason)}")
-    end
-  end
-
-  defp cleanup_failed_new_workspace(workspace, true, worker_host) when is_binary(worker_host) do
-    script = [remote_shell_assign("workspace", workspace), "rm -rf \"$workspace\""] |> Enum.join("\n")
-
-    case run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms) do
-      {:ok, {_output, 0}} ->
-        :ok
-
-      result ->
-        Logger.warning("Failed to remove partial workspace worker_host=#{worker_host_for_log(worker_host)} result=#{inspect(result)}")
-    end
-  end
-
-  defp maybe_run_before_remove_hook(workspace, nil) do
-    hooks = Config.settings!().hooks
-
-    case File.dir?(workspace) do
-      true ->
-        case hooks.before_remove do
-          nil ->
-            :ok
-
-          command ->
-            run_hook(
-              command,
-              workspace,
-              %{issue_id: nil, issue_identifier: Path.basename(workspace)},
-              "before_remove",
-              nil
-            )
-            |> ignore_hook_failure()
-        end
-
-      false ->
-        :ok
-    end
-  end
-
-  defp maybe_run_before_remove_hook(workspace, worker_host) when is_binary(worker_host) do
-    hooks = Config.settings!().hooks
-
-    case hooks.before_remove do
-      nil ->
-        :ok
-
-      command ->
-        script =
-          [
-            remote_shell_assign("workspace", workspace),
-            "if [ -d \"$workspace\" ]; then",
-            "  cd \"$workspace\"",
-            "  #{command}",
-            "fi"
-          ]
-          |> Enum.join("\n")
-
-        run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms)
-        |> case do
-          {:ok, {output, status}} ->
-            handle_hook_command_result(
-              {output, status},
-              workspace,
-              %{issue_id: nil, issue_identifier: Path.basename(workspace)},
-              "before_remove"
-            )
-
-          {:error, {:workspace_hook_timeout, "before_remove", _timeout_ms} = reason} ->
-            {:error, reason}
-
-          {:error, reason} ->
-            {:error, reason}
-        end
-        |> ignore_hook_failure()
+  defp cleanup_failed_new_workspace(workspace, true, host) do
+    case guarded_remove(workspace, host, false, false) do
+      {:ok, _} -> :ok
+      {:error, reason, _path} -> Logger.warning("Failed to remove partial workspace worker_host=#{worker_host_for_log(host)} reason=#{inspect(reason)}")
     end
   end
 
@@ -474,10 +679,6 @@ defmodule SymphonyElixir.Workspace do
       true ->
         :ok
     end
-  end
-
-  defp validate_recorded_workspace_path(workspace) when is_binary(workspace) do
-    validate_local_workspace_path(workspace, Path.dirname(workspace))
   end
 
   defp validate_local_workspace_path(workspace, workspace_root)

@@ -5,7 +5,7 @@ defmodule SymphonyElixir.Publisher do
   A deterministic task branch and remote reconciliation survive lost responses.
   """
 
-  alias SymphonyElixir.{CandidateGit, CandidateTransfer, Config, Evidence, PathSafety, PublisherGithub, Validation, WorkstreamRun}
+  alias SymphonyElixir.{CandidateContext, CandidateGit, CandidateTransfer, Config, Evidence, PathSafety, PublisherGithub, Validation, WorkstreamRun}
 
   @begin "<!-- factory-evidence:start -->"
   @section_end "<!-- factory-evidence:end -->"
@@ -69,21 +69,26 @@ defmodule SymphonyElixir.Publisher do
 
   @spec eligible(map(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def eligible(run, stage, opts \\ []) do
-    with true <- run.status in [:executing, :reconciling] and run.stage_id == stage.id and stage.type == :publish,
+    with {:ok, run} <- CandidateContext.view(run, run.current_attempt_id),
+         true <- run.candidate_context_id == run.execution[:candidate_context_id],
+         true <- is_binary(run.candidate_context_id) or is_nil(run.execution[:repair_parent_sha]),
+         true <- run.status in [:executing, :reconciling] and run.stage_id == stage.id and stage.type == :publish,
          true <- run.definition.stages[stage.id] == stage and WorkstreamRun.compatible_policy?(run),
          validation_stage when is_map(validation_stage) <- run.definition.stages[stage.gate.validation_stage],
          true <- validation_stage.type == :check and validation_stage.gate[:evaluator] == :candidate_validation,
          attempt when is_map(attempt) <- latest_validation_attempt(run, validation_stage.id),
          true <- attempt.status == :completed and attempt.gate == :passed,
+         true <- CandidateContext.same_context?(run, run.current_attempt_id, attempt.id),
          %{"id" => _, "manifest_sha256" => _} = receipt <- get_in(attempt, [:result, :evidence, "receipt"]),
          {:ok, workspace} <- CandidateTransfer.workspace(run),
-         context = validation_context(run, attempt),
+         :ok <- repair_candidate_lineage(authorized_context(run), workspace),
+         {:ok, context} <- CandidateContext.validation_context(run, attempt.id),
          validation_opts = validation_options(run, workspace),
          {:ok, %{verdict: :passed}} <- Validation.verify_result({:ok, %{receipt: receipt}}, run.execution[:validation_policy], context, validation_stage.gate.required, validation_opts),
          {:ok, %{verdict: :passed} = gate} <- Validation.verify_result({:ok, %{receipt: receipt}}, run.execution[:validation_policy], context, stage.gate.required, validation_opts),
          {:ok, manifest} <- Validation.read_receipt(receipt, run.execution[:validation_archive]),
          {:ok, archive} <- archived(run, attempt.id, receipt, opts) do
-      {:ok, %{manifest: manifest, receipt: receipt, validation_attempt_id: attempt.id, archive: archive, gate: gate, workspace: workspace}}
+      {:ok, %{manifest: manifest, receipt: receipt, validation_attempt_id: attempt.id, archive: archive, gate: gate, workspace: workspace, candidate_context: authorized_context(run)}}
     else
       {:error, _} = error -> error
       _ -> {:error, :unqualified_publication_candidate}
@@ -107,6 +112,7 @@ defmodule SymphonyElixir.Publisher do
          %{number: number} <- result[:pr],
          {:ok, actual} <- transport.get_pr(config, number),
          :ok <- valid_pr(actual, result.branch, result.candidate_sha),
+         :ok <- repair_pr_identity(proof.candidate_context, actual),
          :ok <- valid_body(run, stage, proof, actual),
          {:ok, remote_sha} <- transport.branch_sha(config, result.branch),
          true <- remote_sha == result.candidate_sha,
@@ -182,7 +188,7 @@ defmodule SymphonyElixir.Publisher do
          {:ok, existing} <- transport.find_pr(config, branch),
          :ok <- open_or_absent(existing, branch),
          {:ok, remote_sha} <- transport.branch_sha(config, branch),
-         :ok <- expected_head(run, stage, remote_sha, sha, existing, proof.workspace),
+         :ok <- expected_head(run, stage, remote_sha, sha, existing, proof),
          :ok <- recheck(run, stage, proof, opts),
          :ok <- record_intent(run, stage, proof, opts),
          :ok <- push_unless_present(transport, config, proof.workspace, sha, branch, remote_sha),
@@ -190,10 +196,12 @@ defmodule SymphonyElixir.Publisher do
          true <- confirmed_sha == sha,
          {:ok, current} <- transport.find_pr(config, branch),
          :ok <- open_or_absent(current, branch),
+         :ok <- repair_pr_identity(proof.candidate_context, current),
          :ok <- recheck(run, stage, proof, opts),
          {:ok, pr} <- create_or_update(transport, config, run, stage, proof, current, opts),
          {:ok, actual} <- transport.get_pr(config, pr.number),
          :ok <- valid_pr(actual, branch, sha),
+         :ok <- repair_pr_identity(proof.candidate_context, actual),
          :ok <- valid_body(run, stage, proof, actual),
          {:ok, final_sha} <- transport.branch_sha(config, branch),
          true <- final_sha == sha,
@@ -255,9 +263,6 @@ defmodule SymphonyElixir.Publisher do
 
   defp latest_validation_attempt(run, id), do: run.attempts |> Enum.reverse() |> Enum.find(&(&1.stage == id))
 
-  defp validation_context(run, attempt),
-    do: %{task_id: run.task_id, run_id: run.id, attempt_id: attempt.id, base_sha: run.execution[:validation_base]}
-
   defp validation_options(run, workspace),
     do: [workspace: workspace, validation_archive: run.execution[:validation_archive], validation_scratch: run.execution[:validation_scratch]]
 
@@ -267,10 +272,49 @@ defmodule SymphonyElixir.Publisher do
   defp open_or_absent(%{state: "open", head_branch: branch, base_branch: "main"}, branch), do: :ok
   defp open_or_absent(_pr, _branch), do: {:error, :publication_pr_closed_or_mismatched}
 
-  defp expected_head(_run, _stage, nil, _sha, nil, _workspace), do: :ok
-  defp expected_head(_run, _stage, sha, sha, _pr, _workspace), do: :ok
+  defp authorized_context(run), do: Map.get(run, :candidate_contexts, %{})[run.candidate_context_id]
 
-  defp expected_head(run, stage, remote_sha, sha, existing, workspace) do
+  defp repair_pr_identity(nil, _pr), do: :ok
+
+  defp repair_pr_identity(context, pr) do
+    if is_map(pr) and
+         Map.take(pr, [:number, :url, :head_branch, :base_branch]) == %{
+           number: context.pr["number"],
+           url: context.pr["url"],
+           head_branch: context.pr["head_branch"],
+           base_branch: context.pr["base_branch"]
+         },
+       do: :ok,
+       else: {:error, :publication_repair_pr_mismatch}
+  end
+
+  defp repair_candidate_lineage(nil, _workspace), do: :ok
+
+  defp repair_candidate_lineage(context, workspace) do
+    with {:ok, sha} <- CandidateGit.run(workspace, ["rev-parse", "HEAD"]),
+         {:ok, parents} <- CandidateGit.run(workspace, ["show", "--no-patch", "--format=%P", String.trim(sha)]),
+         true <- String.split(parents) == [context.repair_parent_sha],
+         {:ok, _} <- CandidateGit.run(workspace, ["merge-base", "--is-ancestor", context.validation_base, String.trim(sha)]) do
+      :ok
+    else
+      _ -> {:error, :publication_repair_lineage_mismatch}
+    end
+  end
+
+  defp expected_head(_run, _stage, remote_sha, sha, existing, %{candidate_context: context}) when is_map(context) do
+    with :ok <- repair_pr_identity(context, existing),
+         true <- remote_sha in [context.repair_parent_sha, sha] and existing.head_sha == remote_sha do
+      :ok
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :publication_branch_changed_outside_run}
+    end
+  end
+
+  defp expected_head(_run, _stage, nil, _sha, nil, _proof), do: :ok
+  defp expected_head(_run, _stage, sha, sha, _pr, _proof), do: :ok
+
+  defp expected_head(run, stage, remote_sha, sha, existing, %{workspace: workspace}) do
     previous =
       run.attempts
       |> Enum.reverse()

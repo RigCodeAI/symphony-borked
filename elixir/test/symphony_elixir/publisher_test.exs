@@ -304,6 +304,142 @@ defmodule SymphonyElixir.PublisherTest do
     end
   end
 
+  test "a context-bound repair updates the original PR and survives replay" do
+    for parent_base <- [false, true] do
+      c = fixture()
+      remote = start_remote()
+      Process.put(:publisher_test_remote, remote)
+
+      try do
+        assert {:ok, first} = Publisher.publish(c.run, c.publish_stage)
+        repaired = repair_fixture(c, first, parent_base: parent_base)
+        restored = repaired.run |> :erlang.term_to_binary() |> :erlang.binary_to_term([:safe])
+        assert {:ok, result} = Publisher.publish(restored, c.publish_stage)
+        assert result.pr.number == first.pr.number
+        assert result.candidate_sha == repaired.candidate_sha
+        assert {:ok, same} = Publisher.publish(repaired.run, c.publish_stage)
+        assert same.publication_id == result.publication_id
+        assert :ok = Publisher.verify_completion(repaired.run, c.publish_stage, {:ok, result})
+        assert %{pushes: 2, creates: 1, updates: 1} = Agent.get(remote, & &1)
+        assert repaired.run.execution == c.run.execution
+      after
+        Process.delete(:publisher_test_remote)
+        Agent.stop(remote)
+      end
+    end
+  end
+
+  test "old receipts, changed contexts, unrelated main, and another PR block repair writes" do
+    for failure <- [:old_receipt, :context_tamper, :main_outside_parent, :another_pr, :missing_pr] do
+      c = fixture()
+      remote = start_remote()
+      Process.put(:publisher_test_remote, remote)
+
+      try do
+        assert {:ok, first} = Publisher.publish(c.run, c.publish_stage)
+        repaired = repair_fixture(c, first, outside_main: failure == :main_outside_parent)
+
+        run =
+          case failure do
+            :old_receipt ->
+              update_in(repaired.run, [:attempts], fn attempts ->
+                Enum.map(attempts, fn attempt ->
+                  if attempt.id == repaired.validation_attempt_id, do: %{attempt | result: c.validation_attempt.result}, else: attempt
+                end)
+              end)
+
+            :context_tamper ->
+              put_in(repaired.run, [:candidate_contexts, repaired.context_id, :validation_base], repaired.candidate_sha)
+
+            _ ->
+              repaired.run
+          end
+
+        if failure == :another_pr, do: Agent.update(remote, &put_in(&1, [:pull_request, :number], 42))
+        if failure == :missing_pr, do: Agent.update(remote, &%{&1 | pull_request: nil})
+        before = Agent.get(remote, & &1)
+        assert {:error, _} = Publisher.publish(run, c.publish_stage)
+        after_failure = Agent.get(remote, & &1)
+        assert Map.take(after_failure, [:pushes, :creates, :updates]) == Map.take(before, [:pushes, :creates, :updates])
+      after
+        Process.delete(:publisher_test_remote)
+        Agent.stop(remote)
+      end
+    end
+  end
+
+  # Synthetic service seals exercise consumer boundaries; they are not a live review.
+  defp repair_fixture(c, first, opts) do
+    parent = c.candidate_sha
+
+    base =
+      if Keyword.get(opts, :outside_main, false) do
+        git!(c.workspace, ["checkout", "--quiet", "--detach", c.base_sha])
+        File.write!(Path.join(c.workspace, "README.md"), "advanced main\n")
+        git!(c.workspace, ["add", "README.md"])
+        git!(c.workspace, ["commit", "--quiet", "-m", "unrelated main advance"])
+        git!(c.workspace, ["rev-parse", "HEAD"])
+      else
+        if Keyword.get(opts, :parent_base, false), do: parent, else: c.base_sha
+      end
+
+    git!(c.workspace, ["checkout", "--quiet", "--detach", parent])
+    File.write!(Path.join(c.workspace, "README.md"), "repaired candidate\n")
+    git!(c.workspace, ["add", "README.md"])
+    git!(c.workspace, ["commit", "--quiet", "-m", "repair"])
+    sha = git!(c.workspace, ["rev-parse", "HEAD"])
+    published = Jason.decode!(Jason.encode!(first))
+    review = %{"head_sha" => parent, "base_sha" => base}
+    publication = %{id: "publish-1", stage: "publish", type: :publish, status: :completed, gate: :passed, candidate_context_id: nil, result: %{evidence: published}}
+    reviewed = %{id: "review-1", stage: "review", type: :check, status: :completed, candidate_context_id: nil, result: %{evidence: review}}
+
+    context = %{
+      version: 1,
+      run_id: c.run.id,
+      task_id: c.run.task_id,
+      execution_sha256: context_digest(c.run.execution),
+      definition_sha256: context_digest(c.run.definition),
+      policy_sha256: context_digest(c.run.policy),
+      source_context_id: nil,
+      validation_base: base,
+      repair_parent_sha: parent,
+      publication_attempt_id: publication.id,
+      publication_sha256: context_digest(published),
+      review_attempt_id: reviewed.id,
+      review_sha256: context_digest(review),
+      pr: Map.take(published["pr"], ["number", "url", "head_branch", "base_branch"])
+    }
+
+    id = context_digest(context)
+    context = Map.put(context, :id, id)
+    key = File.read!(Path.join(c.run.execution.validation_archive, "producer.key"))
+    seal = :crypto.mac(:hmac, :sha256, key, "factory-candidate-context-v1\n" <> context_bytes(context)) |> Base.encode16(case: :lower)
+    context = Map.put(context, :seal, seal)
+    validation_id = "validate-2"
+    identity = %{task_id: c.run.task_id, run_id: c.run.id, attempt_id: validation_id, base_sha: base, candidate_context_id: id}
+    {receipt, manifest} = write_signed_contract(c.workspace, c.run.execution.validation_archive, c.run.execution.validation_policy, identity, base)
+    validated = %{c.validation_attempt | id: validation_id, result: %{evidence: %{"receipt" => receipt}}} |> Map.put(:candidate_context_id, id)
+    publishing = %{id: "publish-2", stage: "publish", type: :publish, status: :executing, candidate_context_id: id}
+
+    run = %{
+      c.run
+      | current_candidate_context_id: id,
+        candidate_contexts: %{id => context},
+        current_attempt_id: publishing.id,
+        attempts: c.run.attempts ++ [publication, reviewed, validated, publishing]
+    }
+
+    evidence_run = %{run | stage_id: "validate", current_attempt_id: validation_id}
+    :ok = Evidence.snapshot(evidence_run, "repair-validation-imported", %{"kind" => "validation_imported", "manifest_sha256" => receipt["manifest_sha256"]}, c.evidence_server)
+    :ok = Evidence.artifact(%{id: run.id, stage_id: "validate", current_attempt_id: validation_id}, "validation/" <> validation_id <> "/manifest.json", manifest, c.evidence_server)
+    {:ok, [view]} = Evidence.task(Evidence.task_key(run.task_id), c.evidence_server)
+    write_upload_receipt(Path.join(c.root, "evidence"), view)
+    %{run: run, candidate_sha: sha, context_id: id, validation_attempt_id: validation_id}
+  end
+
+  defp context_bytes(value), do: value |> Jason.encode!() |> Jason.decode!() |> :erlang.term_to_binary([:deterministic])
+  defp context_digest(value), do: value |> context_bytes() |> digest()
+
   defp fixture(opts \\ []) do
     root = Path.join(System.tmp_dir!(), "publisher-contract-#{System.unique_integer([:positive])}")
     seed = Path.join(root, "source")
@@ -388,7 +524,8 @@ defmodule SymphonyElixir.PublisherTest do
       "allowed_emails" => []
     }
 
-    {:ok, evidence_server} = Evidence.start_link(config: {:ok, evidence_config}, name: nil, receipt_uid: File.stat!(root).uid)
+    evidence_name = String.to_atom("publisher_evidence_#{System.unique_integer([:positive])}")
+    {:ok, evidence_server} = Evidence.start_link(config: {:ok, evidence_config}, name: evidence_name, receipt_uid: File.stat!(root).uid)
 
     on_exit(fn ->
       if Process.alive?(evidence_server), do: GenServer.stop(evidence_server)
@@ -402,7 +539,7 @@ defmodule SymphonyElixir.PublisherTest do
       validation_base: base_sha,
       publisher: %{app_id: 1, installation_id: 2, private_key_path: Path.join(root, "publisher.pem")},
       publisher_transport: SymphonyElixir.PublisherTest.Transport,
-      evidence_server: evidence_server,
+      evidence_server: evidence_name,
       evidence_url: "https://evidence.example.test/tasks/fixture"
     }
 
@@ -442,7 +579,7 @@ defmodule SymphonyElixir.PublisherTest do
       run: run,
       publish_stage: publish_stage,
       validation_attempt: validation_attempt,
-      evidence_server: evidence_server
+      evidence_server: evidence_name
     }
   end
 
@@ -706,7 +843,8 @@ defmodule SymphonyElixir.PublisherTest.Transport do
 
     if state.branch_sha == expected_sha do
       Agent.get_and_update(state.agent, fn value ->
-        updated = %{value | branch_sha: sha, pushes: value.pushes + 1, intent_at_push: value.publication_intent}
+        pr = if value.pull_request, do: %{value.pull_request | head_sha: sha}, else: nil
+        updated = %{value | branch_sha: sha, pull_request: pr, pushes: value.pushes + 1, intent_at_push: value.publication_intent}
 
         if value.fail_after_push do
           {{:error, {:git_push_unknown, :connection_lost_after_push}}, %{updated | fail_after_push: false}}

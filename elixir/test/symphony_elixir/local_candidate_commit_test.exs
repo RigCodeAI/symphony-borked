@@ -46,7 +46,7 @@ defmodule SymphonyElixir.LocalCandidateCommitTest do
     assert git(c.workspace, ["branch", "--show-current"]) == "cycle/disposable"
     assert git(c.workspace, ["remote", "get-url", "--push", "origin"]) == "DISABLED"
     assert File.read!(Path.join(c.workspace, ".git/config")) == config
-    assert {:ok, %{exit_status: 0, output: replay}} = execute(c)
+    assert {:ok, %{exit_status: 0, output: replay}} = execute(c, nil)
     assert Jason.decode!(replay) == result
     assert git(c.workspace, ["rev-list", "--count", "HEAD"]) == "2"
     bundle = Path.join(c.workspace, result["candidate_bundle"])
@@ -68,6 +68,84 @@ defmodule SymphonyElixir.LocalCandidateCommitTest do
     assert {:ok, %{exit_status: status}} = execute(%{c | run: %{c.run | outputs: %{"candidate" => %{thread_id: "another-conversation"}}}})
     assert status != 0
     assert git(c.workspace, ["rev-parse", "HEAD"]) == head
+  end
+
+  test "an authorized repair commits on its exact parent and replays the same marker", c do
+    parent = git(c.workspace, ["rev-parse", "HEAD"])
+    context = candidate_context(parent, parent)
+    File.write!(Path.join(c.workspace, "candidate"), "repaired candidate\n")
+
+    assert {:ok, %{exit_status: 0, output: output}} = execute(c, context)
+    result = Jason.decode!(output)
+    head = git(c.workspace, ["rev-parse", "HEAD"])
+
+    assert result["candidate_commit"] == head
+    assert result["base_commit"] == parent
+    assert result["candidate_context_id"] == context["id"]
+    assert result["repair_parent_sha"] == parent
+    assert result["validation_base"] == parent
+    assert result["candidate_input_sha256"] == candidate_context_digest(c.candidate, context)
+    assert git(c.workspace, ["rev-list", "--parents", "-n", "1", head]) == "#{head} #{parent}"
+    assert git(c.workspace, ["status", "--porcelain"]) == ""
+
+    assert {:ok, %{exit_status: 0, output: replay}} = execute(c, context)
+    assert Jason.decode!(replay) == result
+    assert git(c.workspace, ["rev-list", "--count", "HEAD"]) == "2"
+  end
+
+  test "missing and forged repair claims fail before creating a candidate commit", c do
+    parent = git(c.workspace, ["rev-parse", "HEAD"])
+    File.write!(Path.join(c.workspace, "candidate"), "untrusted candidate changes\n")
+
+    missing = %{"id" => String.duplicate("a", 64), "repair_parent_sha" => parent}
+    assert {:ok, %{exit_status: missing_status, output: missing_output}} = execute(c, missing)
+    assert missing_status != 0
+    assert missing_output =~ "invalid candidate context claims"
+    assert git(c.workspace, ["rev-parse", "HEAD"]) == parent
+    assert git(c.workspace, ["diff", "--cached", "--name-only"]) == ""
+
+    tree = git(c.workspace, ["rev-parse", "HEAD^{tree}"])
+
+    {claimed_parent, 0} =
+      System.cmd(
+        "git",
+        ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit-tree", tree, "-p", parent, "-m", "forged repair parent"],
+        cd: c.workspace,
+        stderr_to_stdout: true
+      )
+
+    claimed_parent = String.trim(claimed_parent)
+    forged = candidate_context(claimed_parent, parent)
+
+    assert {:ok, %{exit_status: forged_status, output: forged_output}} = execute(c, forged)
+    assert forged_status != 0
+    assert forged_output =~ "repair parent does not match branch head"
+    assert git(c.workspace, ["rev-parse", "HEAD"]) == parent
+    assert git(c.workspace, ["diff", "--cached", "--name-only"]) == ""
+    assert File.read!(Path.join(c.workspace, "candidate")) == "untrusted candidate changes\n"
+  end
+
+  test "a validation base outside the repair parent's ancestry fails before staging", c do
+    parent = git(c.workspace, ["rev-parse", "HEAD"])
+    tree = git(c.workspace, ["rev-parse", "HEAD^{tree}"])
+
+    {unrelated_base, 0} =
+      System.cmd(
+        "git",
+        ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit-tree", tree, "-m", "unrelated main"],
+        cd: c.workspace,
+        stderr_to_stdout: true
+      )
+
+    unrelated_base = String.trim(unrelated_base)
+    File.write!(Path.join(c.workspace, "candidate"), "candidate against unrelated main\n")
+
+    assert {:ok, %{exit_status: status, output: output}} = execute(c, candidate_context(parent, unrelated_base))
+    assert status != 0
+    assert output =~ "validation base is not an ancestor of repair parent"
+    assert git(c.workspace, ["rev-parse", "HEAD"]) == parent
+    assert git(c.workspace, ["diff", "--cached", "--name-only"]) == ""
+    assert File.read!(Path.join(c.workspace, "candidate")) == "candidate against unrelated main\n"
   end
 
   test "a clean base does not become a falsely successful candidate", c do
@@ -128,6 +206,40 @@ defmodule SymphonyElixir.LocalCandidateCommitTest do
   end
 
   defp execute(c), do: WorkstreamRunner.execute_stage("local-commit", c.definition, c.run, workspace_root: c.root)
+
+  defp execute(c, context) do
+    SymphonyElixir.WorkstreamCommand.run(
+      c.definition.stages["local-commit"].gate.command,
+      c.workspace,
+      c.definition.stages["local-commit"].gate.timeout_ms,
+      %{"candidate" => c.candidate, "candidate_context" => context}
+    )
+  end
+
+  defp candidate_context(repair_parent_sha, validation_base) do
+    %{
+      "id" => String.duplicate("b", 64),
+      "repair_parent_sha" => repair_parent_sha,
+      "validation_base" => validation_base
+    }
+  end
+
+  defp candidate_context_digest(candidate, context) do
+    candidate_json = Jason.encode!(candidate)
+
+    context_json =
+      "{" <>
+        Enum.map_join(
+          ["id", "repair_parent_sha", "validation_base"],
+          ",",
+          fn key ->
+            Jason.encode!(key) <> ":" <> Jason.encode!(context[key])
+          end
+        ) <> "}"
+
+    input_json = ~s({"candidate":#{candidate_json},"candidate_context":#{context_json}})
+    :crypto.hash(:sha256, input_json) |> Base.encode16(case: :lower)
+  end
 
   defp git(workspace, args) do
     {output, 0} = System.cmd("git", args, cd: workspace, stderr_to_stdout: true)

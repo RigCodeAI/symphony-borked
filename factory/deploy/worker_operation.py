@@ -863,6 +863,28 @@ class OperationController:
             candidate = inputs["candidate"]
             if not isinstance(candidate, dict) or not candidate.get("thread_id"):
                 return False
+            candidate_context = inputs.get("candidate_context")
+            if candidate_context is None:
+                input_value = candidate
+            else:
+                if (not isinstance(candidate_context, dict)
+                        or set(candidate_context) != {"id", "repair_parent_sha", "validation_base"}):
+                    return False
+                context_id = candidate_context.get("id")
+                repair_parent_sha = candidate_context.get("repair_parent_sha")
+                validation_base = candidate_context.get("validation_base")
+                if (not isinstance(context_id, str) or not _HEX_64_RE.fullmatch(context_id)
+                        or not isinstance(repair_parent_sha, str)
+                        or not (_HEX_40_RE.fullmatch(repair_parent_sha)
+                                or _HEX_64_RE.fullmatch(repair_parent_sha))
+                        or not isinstance(validation_base, str)
+                        or not (_HEX_40_RE.fullmatch(validation_base)
+                                or _HEX_64_RE.fullmatch(validation_base))):
+                    return False
+                input_value = {
+                    "candidate": candidate,
+                    "candidate_context": candidate_context,
+                }
             command_argv = argv[2:]
             command_digest = hashlib.sha256(
                 json.dumps(
@@ -873,7 +895,12 @@ class OperationController:
                 ).encode("utf-8")
             ).hexdigest()
             input_digest = hashlib.sha256(
-                json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                json.dumps(
+                    input_value,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode("utf-8")
             ).hexdigest()
         except (KeyError, TypeError, ValueError, UnicodeError, RecursionError):
             return False

@@ -3,6 +3,7 @@
 # allowed_domains/allowed_emails. Omit for ordinary upstream workflows. See
 # ../docs/private-evidence.md. Do not use this sample unchanged for Factory Setup.
 
+# Optional native child_workspaces issue-ID clone mapping: ../docs/linear-delegation.md.
 # Factory native delegation cloud_agents options: ../docs/dev-235-agent-mapping.md.
 # Factory review App reference and release choices: ../docs/review-repair.md.
 # This upstream sample is not Rig Factory Setup policy; see ../AGENTS.md.

@@ -40,6 +40,29 @@ linear_delegation:
     pilot-issue-uuid: /srv/factory/contained-workspaces/pilot-rig
 ```
 
+For a definition that contains a bounded child stage, operators may additionally set
+`child_workspaces` to a map from the same native issue ID to an absolute, separately
+prepared clone under `workspace_root`. The coordinator checks clone isolation and
+reserves it through the existing child preparation path; it never provisions a clone
+from issue text. Missing or mismatched mappings prevent child authorization.
+
+The source guard refreshes a five-second owned-child grant only after rechecking the
+parent's native delegate/session and human assignee and qualifying the child's pinned
+Cloud Agent settings and credential exclusions. The grant binds assignment revision,
+parent attempt, child ID, child stage attempt, candidate context, lineage and both
+pinned contexts. Creation, child dispatch,
+restart recovery and parent merge-proof acceptance require the current grant; expiry,
+restart, issue update, stop and reassignment revoke it. Expiry prevents new authorized
+actions; it does not prove an already-running worker has terminated. Reassignment of a
+waiting child handoff remains blocked until the existing owner can establish safe
+termination; it never switches a pinned child to another agent.
+
+Native intake remains restricted to `software-change` and the existing task input.
+This authorization source does not add Coverage intake, scenario/scoring contracts,
+child question/reply routing or live qualification. The held-recovery inspector keeps
+its strict saved-child definition schema; compatibility for bound native child
+snapshots remains a separate qualification boundary.
+
 The contained-workspace parent on the worker is root:factory-worker 0750. An
 operator must provision the worker-owned issue leaf and matching coordinator
 clone before adding the issue mapping. The worker can edit inside the leaf but

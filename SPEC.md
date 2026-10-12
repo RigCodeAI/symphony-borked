@@ -2840,6 +2840,18 @@ quality score and Linear replies MUST NOT authorize merge. Rig feedback ownershi
 MUST be released as one coordinated cutover so one system owns factory branch fixes.
 See [the source contract and unqualified live boundaries](docs/review-repair.md).
 
+Retained completion evidence MAY read an attempt's historical authenticated
+candidate context without changing the current selector or execution authority.
+The read MUST verify immutable context lineage and the attempt's position in it.
+Version-2 service completion seals MUST bind that context, exact external-worker
+identity and captured input producer identities. They MAY cover review checkout
+and submission checks, but MUST NOT waive fresh external-worker termination.
+Typed reviewer text MUST match a submitted authenticated report linked to the
+same reviewer and checkout attempts. Locations remain annotations, not file
+contents. Cleanup MUST require the latest publication and its archived validation
+to share the current authenticated context. Review directory deletion MUST remain
+disabled until its ownership contract is independently qualified.
+
 ## Bounded child workstream handoff
 
 A version-1 parent MAY declare one `child` stage with `id`, `inputs`, `outputs`,

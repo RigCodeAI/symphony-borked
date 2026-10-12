@@ -20,6 +20,53 @@ defmodule SymphonyElixir.CandidateContext do
     end
   end
 
+  @doc "Reads the authenticated context selected by a durable attempt without changing the run."
+  @spec evidence_context(map(), String.t()) :: {:ok, map()} | {:error, atom()}
+  def evidence_context(run, attempt_id) do
+    case find_attempt(run, attempt_id) do
+      attempt when is_map(attempt) ->
+        with {:ok, current_id} <- selected_context(run),
+             context_id = Map.get(attempt, :candidate_context_id),
+             {:ok, attempt_index} <- unique_attempt_index(run, attempt_id),
+             {:ok, expected_id} <- expected_context_id(run, current_id, attempt_index),
+             true <- context_id == expected_id,
+             {:ok, pins} <- resolve(run, context_id),
+             true <- is_nil(context_id) or context_id in context_ids(run, current_id) do
+          original = Map.get(run, :candidate_execution_original, run.execution)
+
+          lineage = %{
+            version: 1,
+            run_id: run.id,
+            task_id: run.task_id,
+            original_execution_sha256: digest(original),
+            definition_sha256: digest(run.definition),
+            policy_sha256: digest(run.policy),
+            context_ids: context_ids(run, context_id),
+            candidate_context_id: context_id,
+            validation_base: Map.get(pins, :validation_base, original[:validation_base]),
+            repair_parent_sha: pins[:repair_parent_sha]
+          }
+
+          {:ok,
+           %{
+             candidate_context_id: context_id,
+             validation_base: lineage.validation_base,
+             repair_parent_sha: lineage.repair_parent_sha,
+             lineage_sha256: digest(lineage)
+           }}
+        else
+          _ -> {:error, :candidate_context_not_authorized}
+        end
+
+      _ ->
+        {:error, :candidate_attempt_missing}
+    end
+  rescue
+    _ -> {:error, :candidate_context_not_authorized}
+  catch
+    _, _ -> {:error, :candidate_context_not_authorized}
+  end
+
   @spec validation_context(map(), String.t()) :: {:ok, map()} | {:error, term()}
   def validation_context(run, attempt_id) do
     with {:ok, view} <- view(run, attempt_id) do
@@ -130,6 +177,76 @@ defmodule SymphonyElixir.CandidateContext do
   end
 
   defp resolve(_run, _id), do: {:error, :candidate_context_not_authorized}
+
+  defp selected_context(run) do
+    contexts = Map.get(run, :candidate_contexts, %{})
+    id = Map.get(run, :current_candidate_context_id)
+
+    cond do
+      not is_map(contexts) -> {:error, :candidate_context_not_authorized}
+      is_nil(id) and map_size(contexts) == 0 -> {:ok, nil}
+      is_binary(id) -> with {:ok, _pins} <- resolve(run, id), do: {:ok, id}
+      true -> {:error, :candidate_context_not_authorized}
+    end
+  end
+
+  defp expected_context_id(_run, nil, _attempt_index), do: {:ok, nil}
+
+  defp expected_context_id(run, current_id, attempt_index) when is_binary(current_id) do
+    with {:ok, chain} <- context_chain(run, current_id) do
+      expected =
+        Enum.reduce_while(chain, nil, fn {context_id, origin_index}, selected ->
+          if attempt_index > origin_index, do: {:cont, context_id}, else: {:halt, selected}
+        end)
+
+      {:ok, expected}
+    end
+  end
+
+  defp expected_context_id(_run, _current_id, _attempt_index), do: {:error, :candidate_context_not_authorized}
+
+  defp context_chain(run, current_id) do
+    ids = context_ids(run, current_id) |> Enum.reverse()
+
+    result =
+      Enum.reduce_while(ids, {:ok, [], -1}, fn context_id, {:ok, chain, previous_index} ->
+        context = Map.fetch!(run.candidate_contexts, context_id)
+
+        case unique_attempt_index(run, context.review_attempt_id) do
+          {:ok, index} when index > previous_index ->
+            {:cont, {:ok, chain ++ [{context_id, index}], index}}
+
+          _ ->
+            {:halt, {:error, :candidate_context_not_authorized}}
+        end
+      end)
+
+    case result do
+      {:ok, chain, _previous_index} -> {:ok, chain}
+      {:error, _} = error -> error
+    end
+  rescue
+    _ -> {:error, :candidate_context_not_authorized}
+  end
+
+  defp unique_attempt_index(run, id) do
+    matches =
+      run.attempts
+      |> Enum.with_index()
+      |> Enum.filter(fn {attempt, _index} -> attempt.id == id end)
+
+    case matches do
+      [{_attempt, index}] -> {:ok, index}
+      _ -> {:error, :candidate_context_not_authorized}
+    end
+  end
+
+  defp context_ids(_run, nil), do: []
+
+  defp context_ids(run, id) do
+    context = Map.fetch!(Map.get(run, :candidate_contexts, %{}), id)
+    [id | context_ids(run, context.source_context_id)]
+  end
 
   defp attempt_context(run, nil), do: {:ok, Map.get(run, :current_candidate_context_id)}
 

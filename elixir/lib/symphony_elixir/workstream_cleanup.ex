@@ -6,7 +6,7 @@ defmodule SymphonyElixir.WorkstreamCleanup do
   A merge proof is read-only and does not require deleting a child workspace.
   """
 
-  alias SymphonyElixir.{Evidence, Publisher, PublisherGithub, ServiceCheckCompletion, WorkerOperation, Workspace, WorkstreamOutputs, WorkstreamRun}
+  alias SymphonyElixir.{CandidateContext, Evidence, Publisher, PublisherGithub, ServiceCheckCompletion, WorkerOperation, Workspace, WorkstreamOutputs, WorkstreamRun}
 
   @version 1
 
@@ -53,6 +53,7 @@ defmodule SymphonyElixir.WorkstreamCleanup do
          task_id: run.task_id,
          publication_id: publication.publication_id,
          publication_attempt_id: publication.attempt_id,
+         candidate_context: publication.candidate_context,
          repository: "RigCodeAI/rig",
          pr: publication.pr,
          published_head: publication.candidate_sha,
@@ -186,7 +187,10 @@ defmodule SymphonyElixir.WorkstreamCleanup do
              &(intent[&1] == value[Atom.to_string(&1)])
            ),
          %{"number" => number, "url" => url} <- value["pr"],
-         true <- is_integer(number) and number > 0 and url == "https://github.com/RigCodeAI/rig/pull/#{number}" do
+         true <- is_integer(number) and number > 0 and url == "https://github.com/RigCodeAI/rig/pull/#{number}",
+         {:ok, context} <- CandidateContext.evidence_context(run, attempt.id),
+         true <- context.candidate_context_id == run[:current_candidate_context_id],
+         {:ok, ^context} <- CandidateContext.evidence_context(run, value["validation_attempt_id"]) do
       {:ok,
        %{
          attempt_id: attempt.id,
@@ -195,6 +199,7 @@ defmodule SymphonyElixir.WorkstreamCleanup do
          publication_id: value["publication_id"],
          evidence_revision: value["evidence_revision"],
          validation_attempt_id: value["validation_attempt_id"],
+         candidate_context: context,
          pr: %{number: number, url: url}
        }}
     else

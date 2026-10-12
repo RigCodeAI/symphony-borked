@@ -131,6 +131,61 @@ defmodule SymphonyElixir.ValidationGithubTest do
     assert {:error, :check_run_results_exceeded} = ValidationGithub.checks_for_test(config, @sha, request_fun)
   end
 
+  test "normalizes documented check output separately from annotation metadata", %{config: config, key: key} do
+    output = %{"title" => "Validation passed", "summary" => "All required checks passed.", "text" => nil}
+    raw = check_run(77, 123, @sha, @external_id, "completed", "success", nil, output)
+    assert raw["output"]["annotations_count"] == 0
+    assert raw["output"]["annotations_url"] == "https://api.github.com/repos/RigCodeAI/rig/check-runs/77/annotations"
+
+    request_fun =
+      app_request_fun(key, fn :get, "/repos/RigCodeAI/rig/commits/#{@sha}/check-runs", _headers, _params, nil ->
+        {:ok, %{status: 200, body: %{"total_count" => 1, "check_runs" => [raw]}}}
+      end)
+
+    assert {:ok, [%{output: ^output}]} = ValidationGithub.checks_for_test(config, @sha, request_fun)
+  end
+
+  test "rejects malformed response content even with valid annotation metadata", %{config: config, key: key} do
+    for field <- ["title", "summary", "text"] do
+      raw = check_run(77, 123, @sha, @external_id, "completed", "success", nil, %{field => 123})
+
+      request_fun =
+        app_request_fun(key, fn :get, "/repos/RigCodeAI/rig/commits/#{@sha}/check-runs", _headers, _params, nil ->
+          {:ok, %{status: 200, body: %{"total_count" => 1, "check_runs" => [raw]}}}
+        end)
+
+      assert {:error, :invalid_check_run_response} = ValidationGithub.checks_for_test(config, @sha, request_fun)
+    end
+  end
+
+  test "an unrelated check with documented empty external ID does not block the factory check list", %{config: config, key: key} do
+    unrelated = put_in(check_run(76, 123, @sha, "", "completed", "neutral"), ["name"], "other-check")
+    factory = check_run(77, 123, @sha, @external_id, "completed", "success")
+
+    request_fun =
+      app_request_fun(key, fn :get, "/repos/RigCodeAI/rig/commits/#{@sha}/check-runs", _headers, _params, nil ->
+        {:ok, %{status: 200, body: %{"total_count" => 2, "check_runs" => [unrelated, factory]}}}
+      end)
+
+    assert {:ok, [%{external_id: "", name: "other-check"}, %{external_id: @external_id, name: "factory/validation"}]} =
+             ValidationGithub.checks_for_test(config, @sha, request_fun)
+
+    no_request = fn _method, _path, _headers, _params, _body -> flunk("empty outbound external ID must not call GitHub") end
+    payload = Map.put(completed_payload(), :external_id, "")
+    assert {:error, :invalid_check_payload} = ValidationGithub.create_check_for_test(config, payload, no_request)
+    assert {:error, :invalid_check_payload} = ValidationGithub.update_check_for_test(config, 77, payload, no_request)
+  end
+
+  test "response annotation metadata remains forbidden in outbound payloads", %{config: config} do
+    request_fun = fn _method, _path, _headers, _params, _body -> flunk("invalid payload must not call GitHub") end
+
+    for {field, value} <- [annotations_count: 0, annotations_url: "https://api.github.com/repos/RigCodeAI/rig/check-runs/77/annotations"] do
+      payload = update_in(completed_payload().output, &Map.put(&1, field, value))
+      assert {:error, :invalid_check_payload} = ValidationGithub.create_check_for_test(config, payload, request_fun)
+      assert {:error, :invalid_check_payload} = ValidationGithub.update_check_for_test(config, 77, payload, request_fun)
+    end
+  end
+
   test "rejects a check-run response from another App", %{config: config, key: key} do
     request_fun =
       app_request_fun(key, fn :get, "/repos/RigCodeAI/rig/commits/#{@sha}/check-runs", _headers, _params, nil ->
@@ -370,6 +425,10 @@ defmodule SymphonyElixir.ValidationGithubTest do
   end
 
   defp check_run(id, app_id, sha, external_id, status, conclusion, details_url \\ nil, output \\ nil) do
+    # GitHub's documented GET/list/create/update responses include this metadata.
+    output = Map.merge(%{"title" => nil, "summary" => nil, "text" => nil}, output || %{})
+    output = Map.merge(output, %{"annotations_count" => 0, "annotations_url" => "https://api.github.com/repos/RigCodeAI/rig/check-runs/#{id}/annotations"})
+
     %{
       "id" => id,
       "app" => %{"id" => app_id},

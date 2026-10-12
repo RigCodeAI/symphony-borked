@@ -215,6 +215,32 @@ defmodule SymphonyElixir.ValidationCheckTest do
     assert %{creates: 2} = Agent.get(c.remote, & &1)
   end
 
+  test "repeated reply reconciliation wakes retain one periodic timer", c do
+    assert {:ok, result} = ValidationCheck.reconcile(c.run, c.stage)
+    wait = WorkstreamRun.finish_stage(c.run, {:ok, result}) |> WorkstreamRun.start_stage()
+    assert {:ok, queued} = WorkstreamRun.wait_answer(wait, wait.pending_wait.id, %{"answer" => "done"})
+    Agent.update(c.remote, &Map.put(&1, :fail_reads, true))
+    coordinator = start_validation_runtime(c, queued)
+    assert await_observation(coordinator, queued.id, false).pending_validation_reply
+    {ref, token} = timer = :sys.get_state(coordinator).workstreams.validation_check_timer
+    assert is_integer(Process.read_timer(ref))
+
+    for _ <- 1..20, do: send(coordinator, :reconcile_validation_checks)
+    assert :sys.get_state(coordinator).workstreams.validation_check_timer == timer
+    assert is_integer(Process.read_timer(ref))
+
+    send(coordinator, {:validation_checks_tick, token})
+    {next_ref, next_token} = next_timer = :sys.get_state(coordinator).workstreams.validation_check_timer
+    refute next_ref == ref
+    refute next_token == token
+    assert Process.read_timer(ref) == false
+    assert is_integer(Process.read_timer(next_ref))
+
+    for _ <- 1..20, do: send(coordinator, {:validation_checks_tick, token})
+    assert :sys.get_state(coordinator).workstreams.validation_check_timer == next_timer
+    assert is_integer(Process.read_timer(next_ref))
+  end
+
   defp await_observation(coordinator, id, qualified, retries \\ 200)
 
   defp await_observation(coordinator, id, _qualified, 0) do

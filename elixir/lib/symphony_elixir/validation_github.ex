@@ -729,7 +729,7 @@ defmodule SymphonyElixir.ValidationGithub do
          true <- (is_integer(app_id) and app_id > 0) or {:error, :invalid_check_run_response},
          true <- (is_binary(name) and String.trim(name) != "") or {:error, :invalid_check_run_response},
          true <- valid_sha?(head_sha) or {:error, :invalid_check_run_response},
-         true <- is_nil(external_id) or valid_external_id?(external_id) or {:error, :invalid_check_run_response},
+         true <- is_nil(external_id) or external_id == "" or valid_external_id?(external_id) or {:error, :invalid_check_run_response},
          true <- status in @check_statuses or {:error, :invalid_check_run_response},
          true <- is_nil(conclusion) or conclusion in @check_conclusions or {:error, :invalid_check_run_response},
          true <- status == "completed" == not is_nil(conclusion) or {:error, :invalid_check_run_response},
@@ -758,11 +758,11 @@ defmodule SymphonyElixir.ValidationGithub do
   defp normalize_response_output(nil), do: {:ok, nil}
 
   defp normalize_response_output(output) when is_map(output) do
-    allowed = ["title", "summary", "text"]
+    # Annotation counts and URLs are response metadata, not validation content.
+    content = Map.take(output, ["title", "summary", "text"])
 
-    if Enum.all?(Map.keys(output), &(&1 in allowed)) and
-         Enum.all?(output, fn {_key, value} -> is_binary(value) or is_nil(value) end) do
-      {:ok, output}
+    if Enum.all?(content, fn {_key, value} -> is_binary(value) or is_nil(value) end) do
+      {:ok, content}
     else
       {:error, :invalid_check_run_response}
     end

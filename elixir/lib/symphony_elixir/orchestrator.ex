@@ -77,7 +77,7 @@ defmodule SymphonyElixir.Orchestrator do
 
         case initialized do
           {:ok, state} ->
-            state = recover_workstreams(state)
+            state = state |> recover_workstreams() |> schedule_validation_checks_tick()
             if state.workstreams, do: send(self(), :reconcile_validation_checks)
 
             if state.polling_enabled do
@@ -119,9 +119,14 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_info(:reconcile_validation_checks, state) do
-    if state.workstreams, do: Process.send_after(self(), :reconcile_validation_checks, 60_000)
     {:noreply, reconcile_validation_checks(state)}
   end
+
+  def handle_info({:validation_checks_tick, token}, %{workstreams: %{validation_check_timer: {_ref, token}}} = state) do
+    {:noreply, state |> reconcile_validation_checks() |> schedule_validation_checks_tick()}
+  end
+
+  def handle_info({:validation_checks_tick, _token}, state), do: {:noreply, state}
 
   def handle_info({ref, {:validation_observation, run_id, artifacts, result}}, state) when is_reference(ref) do
     {:noreply, accept_validation_observation(state, ref, run_id, artifacts, result)}
@@ -2531,6 +2536,15 @@ defmodule SymphonyElixir.Orchestrator do
       {:error, reason} ->
         exit({:durable_workstream_commit_failed, reason})
     end
+  end
+
+  defp schedule_validation_checks_tick(%{workstreams: nil} = state), do: state
+
+  defp schedule_validation_checks_tick(state) do
+    if previous = Map.get(state.workstreams, :validation_check_timer), do: Process.cancel_timer(elem(previous, 0))
+    token = make_ref()
+    ref = Process.send_after(self(), {:validation_checks_tick, token}, 60_000)
+    put_in(state.workstreams[:validation_check_timer], {ref, token})
   end
 
   defp reconcile_validation_checks(state), do: reconcile_validation_checks(state, false)

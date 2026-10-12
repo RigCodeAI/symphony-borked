@@ -132,6 +132,44 @@ defmodule SymphonyElixir.BackupCapture do
     end
   end
 
+  @doc "Reads the exact verified images under an independently supplied manifest digest."
+  @spec read_images(Path.t(), String.t(), [Path.t()], String.t()) ::
+          {:ok, %{manifest: map(), images: map()}} | :not_found | {:error, atom()}
+  def read_images(root, capture_id, workspace_roots, manifest_sha256) do
+    with true <- is_binary(manifest_sha256) and Regex.match?(~r/\A[0-9a-f]{64}\z/, manifest_sha256),
+         {:ok, root} <- validate_root(root),
+         :ok <- validate_capture_id(capture_id),
+         :ok <- validate_workspace_roots(root, workspace_roots) do
+      verify_from_root(root, capture_id, manifest_sha256)
+    else
+      false -> {:error, :invalid_capture_anchor}
+      error -> error
+    end
+  end
+
+  @doc "Runs a trusted inspector on a bounded, read-only, in-memory SQLite image."
+  @spec inspect_image(binary(), (Sqlite3.db() -> term())) :: term()
+  def inspect_image(bytes, inspector) when is_binary(bytes) and byte_size(bytes) <= @max_database_bytes and is_function(inspector, 1) do
+    with :ok <- standalone_database_header(bytes), {:ok, db} <- Sqlite3.open(":memory:") do
+      try do
+        with :ok <- Sqlite3.deserialize(db, "main", bytes),
+             :ok <- Sqlite3.execute(db, "PRAGMA temp_store=MEMORY; PRAGMA query_only=ON") do
+          run_database_with_deadline(db, fn -> inspector.(db) end)
+        else
+          _ -> {:error, :invalid_capture_database}
+        end
+      after
+        _ = safe_close(db)
+      end
+    end
+  rescue
+    _ -> {:error, :invalid_capture_database}
+  catch
+    _, _ -> {:error, :invalid_capture_database}
+  end
+
+  def inspect_image(_bytes, _inspector), do: {:error, :invalid_capture_database}
+
   @doc "Creates a standalone SQLite copy from the supplied owner connection."
   @spec snapshot(Sqlite3.db(), Path.t()) :: {:ok, database_snapshot()} | {:error, atom()}
   def snapshot(db, target) do
@@ -287,7 +325,7 @@ defmodule SymphonyElixir.BackupCapture do
       if(parent == "", do: String.starts_with?(path, "/"), else: String.starts_with?(path, parent <> "/"))
   end
 
-  defp verify_from_root(root, capture_id) do
+  defp verify_from_root(root, capture_id, expected_digest \\ nil) do
     directory = Path.join(root, capture_id)
 
     case File.lstat(directory) do
@@ -298,9 +336,9 @@ defmodule SymphonyElixir.BackupCapture do
         with :ok <- private_owned_directory(stat),
              :ok <- no_symlink_ancestry(directory),
              :ok <- exact_capture_files(directory),
-             {:ok, manifest} <- read_manifest(Path.join(directory, "manifest.json"), capture_id),
-             :ok <- verify_manifest_databases(directory, manifest) do
-          {:ok, manifest}
+             {:ok, manifest} <- read_manifest(Path.join(directory, "manifest.json"), capture_id, expected_digest),
+             {:ok, images} <- verify_manifest_databases(directory, manifest, not is_nil(expected_digest)) do
+          if is_nil(expected_digest), do: {:ok, manifest}, else: {:ok, %{manifest: manifest, images: images}}
         else
           {:error, _reason} = error -> error
           _other -> {:error, :invalid_capture}
@@ -338,11 +376,12 @@ defmodule SymphonyElixir.BackupCapture do
     end
   end
 
-  defp read_manifest(path, capture_id) do
+  defp read_manifest(path, capture_id, expected_digest) do
     with {:ok, stat} <- private_file_stat(path),
          true <- stat.size > 0 and stat.size <= @max_manifest_bytes,
          {:ok, bytes} <- read_bounded_file(path, @max_manifest_bytes),
          true <- byte_size(bytes) == stat.size,
+         true <- is_nil(expected_digest) or digest_bytes(bytes) == expected_digest,
          :ok <- unchanged_private_file(path, stat),
          {:ok, decoded} <- Jason.decode(bytes, objects: :ordered_objects, strings: :copy),
          {:ok, manifest} <- decode_json_without_duplicate_keys(decoded),
@@ -408,16 +447,16 @@ defmodule SymphonyElixir.BackupCapture do
 
   defp validate_database_record(_record, _filename, _identity), do: {:error, :invalid_manifest}
 
-  defp verify_manifest_databases(directory, manifest) do
+  defp verify_manifest_databases(directory, manifest, include_images) do
     checks = [
       {"state", "state.sqlite"},
       {"evidence", "evidence.sqlite"}
     ]
 
-    Enum.reduce_while(checks, :ok, fn {key, filename}, :ok ->
+    Enum.reduce_while(checks, {:ok, %{}}, fn {key, filename}, {:ok, images} ->
       record = manifest["databases"][key]
 
-      case inspect_database(Path.join(directory, filename)) do
+      case inspect_database(Path.join(directory, filename), include_images) do
         {:ok, actual} ->
           expected = %{
             "file" => filename,
@@ -428,7 +467,7 @@ defmodule SymphonyElixir.BackupCapture do
           }
 
           if Map.take(record, Map.keys(expected)) == expected,
-            do: {:cont, :ok},
+            do: {:cont, {:ok, if(include_images, do: Map.put(images, key, actual.image), else: images)}},
             else: {:halt, {:error, :capture_integrity_failed}}
 
         {:error, _reason} ->
@@ -731,7 +770,7 @@ defmodule SymphonyElixir.BackupCapture do
     end
   end
 
-  defp inspect_database(path) do
+  defp inspect_database(path, include_image \\ false) do
     with {:ok, stat} <- private_file_stat(path),
          true <- stat.size > 0 and stat.size <= @max_database_bytes,
          {:ok, bytes} <- read_bounded_file(path, @max_database_bytes),
@@ -740,12 +779,13 @@ defmodule SymphonyElixir.BackupCapture do
          {:ok, schema} <- verify_sqlite_bytes(bytes),
          :ok <- unchanged_private_file(path, stat),
          :ok <- no_sqlite_sidecars(path) do
-      {:ok,
-       %{
-         bytes: byte_size(bytes),
-         sha256: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower),
-         schema: schema
-       }}
+      result = %{
+        bytes: byte_size(bytes),
+        sha256: digest_bytes(bytes),
+        schema: schema
+      }
+
+      {:ok, if(include_image, do: Map.put(result, :image, bytes), else: result)}
     else
       {:error, _reason} = error -> error
       _other -> {:error, :invalid_capture_database}
@@ -755,6 +795,8 @@ defmodule SymphonyElixir.BackupCapture do
   catch
     _kind, _reason -> {:error, :invalid_capture_database}
   end
+
+  defp digest_bytes(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
 
   defp standalone_database_header(<<"SQLite format 3", 0, _page_size::binary-size(2), 1, 1, _rest::binary>>),
     do: :ok

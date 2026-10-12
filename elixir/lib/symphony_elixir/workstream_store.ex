@@ -18,6 +18,13 @@ defmodule SymphonyElixir.WorkstreamStore do
   @evidence_payload_limit 10 * 1024 * 1024
   @evidence_entry_limit 32 * 1024 * 1024
   @evidence_event_id_limit 1_024
+  @recovery_image_bytes_limit 256 * 1024 * 1024
+  @recovery_payload_bytes_limit 128 * 1024 * 1024
+  @recovery_payload_limit 4 * 1024 * 1024
+  @recovery_term_depth_limit 64
+  @recovery_term_nodes_limit 100_000
+  @recovery_run_limit 128
+  @recovery_row_limit 10_000
 
   @migration_v1 """
   CREATE TABLE runs (
@@ -149,6 +156,35 @@ defmodule SymphonyElixir.WorkstreamStore do
           {:ok, %{events: %{optional(String.t()) => map()}, tasks: %{optional(String.t()) => map()}}}
           | {:error, term()}
   def linear_load(server), do: safe_call(server, :linear_load)
+
+  @doc "Inspects a captured Store image without opening or migrating a filesystem database."
+  @spec inspect_recovery_image(binary()) ::
+          {:ok,
+           %{
+             runs: [run_map()],
+             linear: %{events: map(), tasks: map()},
+             run_ids: [String.t()],
+             operation_ids: [String.t()],
+             linear_delivery_ids: [String.t()]
+           }}
+          | {:error, :invalid_recovery_image | :snapshot_timeout | :unsupported_recovery_schema}
+  def inspect_recovery_image(bytes) when is_binary(bytes) do
+    with true <- byte_size(bytes) <= @recovery_image_bytes_limit,
+         true <- standalone_recovery_image?(bytes),
+         {:ok, result} <- BackupCapture.inspect_image(bytes, &inspect_recovery_database/1) do
+      {:ok, result}
+    else
+      {:error, :unsupported_recovery_schema} = error -> error
+      {:error, :snapshot_timeout} = error -> error
+      _other -> {:error, :invalid_recovery_image}
+    end
+  rescue
+    _error -> {:error, :invalid_recovery_image}
+  catch
+    _kind, _reason -> {:error, :invalid_recovery_image}
+  end
+
+  def inspect_recovery_image(_bytes), do: {:error, :invalid_recovery_image}
 
   @doc "Atomically updates a known Linear event and optionally upserts its task."
   @spec linear_commit(GenServer.server(), map(), map() | nil) :: :ok | {:error, term()}
@@ -1382,6 +1418,417 @@ defmodule SymphonyElixir.WorkstreamStore do
   rescue
     error -> {:error, {:term_decode_failed, error}}
   end
+
+  defp standalone_recovery_image?(bytes) when byte_size(bytes) >= 100 do
+    case bytes do
+      <<"SQLite format 3", 0, page_size::unsigned-big-16, 1, 1, _rest::binary>> ->
+        page_size in [1, 512, 1_024, 2_048, 4_096, 8_192, 16_384, 32_768]
+
+      _other ->
+        false
+    end
+  end
+
+  defp standalone_recovery_image?(_bytes), do: false
+
+  defp inspect_recovery_database(db) do
+    with {:ok, [[1]]} <- query(db, "PRAGMA query_only"),
+         {:ok, [["ok"]]} <- query(db, "PRAGMA integrity_check"),
+         {:ok, version} <- schema_version(db),
+         :ok <- supported_recovery_schema_version(version),
+         :ok <- verify_recovery_schema_inventory(db),
+         :ok <- validate_recovery_payload_budget(db),
+         {:ok, result} <- inspect_recovery_rows(db) do
+      {:ok, result}
+    else
+      {:error, :unsupported_recovery_schema} = error -> error
+      _other -> {:error, :invalid_recovery_image}
+    end
+  rescue
+    _error -> {:error, :invalid_recovery_image}
+  catch
+    _kind, _reason -> {:error, :invalid_recovery_image}
+  end
+
+  defp supported_recovery_schema_version(version) when version == length(@migrations), do: :ok
+  defp supported_recovery_schema_version(_version), do: {:error, :unsupported_recovery_schema}
+
+  defp verify_recovery_schema_inventory(db) do
+    with {:ok, actual} <- recovery_schema_inventory(db),
+         {:ok, expected} <- expected_recovery_schema_inventory(),
+         true <- actual === expected do
+      :ok
+    else
+      _other -> {:error, :invalid_recovery_image}
+    end
+  end
+
+  defp recovery_schema_inventory(db),
+    do: query(db, "SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY type,name")
+
+  defp expected_recovery_schema_inventory do
+    case Sqlite3.open(":memory:") do
+      {:ok, db} ->
+        try do
+          with :ok <- apply_recovery_schema(db),
+               {:ok, inventory} <- recovery_schema_inventory(db) do
+            {:ok, inventory}
+          else
+            _other -> {:error, :invalid_recovery_image}
+          end
+        after
+          _ = Sqlite3.close(db)
+        end
+
+      {:error, _reason} ->
+        {:error, :invalid_recovery_image}
+    end
+  rescue
+    _error -> {:error, :invalid_recovery_image}
+  catch
+    _kind, _reason -> {:error, :invalid_recovery_image}
+  end
+
+  defp apply_recovery_schema(db) do
+    Enum.reduce_while(@migrations, :ok, fn {version, sql}, :ok ->
+      case Sqlite3.execute(db, sql) do
+        :ok ->
+          case Sqlite3.execute(db, "PRAGMA user_version = #{version}") do
+            :ok -> {:cont, :ok}
+            _other -> {:halt, {:error, :invalid_recovery_image}}
+          end
+
+        _other ->
+          {:halt, {:error, :invalid_recovery_image}}
+      end
+    end)
+  end
+
+  defp validate_recovery_payload_budget(db) do
+    limits = [
+      {"runs", @recovery_run_limit},
+      {"events", @recovery_row_limit},
+      {"stage_attempts", @recovery_row_limit},
+      {"operations", @recovery_row_limit},
+      {"linear_events", @recovery_row_limit},
+      {"linear_tasks", @recovery_row_limit}
+    ]
+
+    Enum.reduce_while(limits, {:ok, 0}, fn {table, row_limit}, {:ok, total_bytes} ->
+      sql = "SELECT COUNT(*),COALESCE(SUM(length(payload)),0),COALESCE(MAX(length(payload)),0) FROM #{table}"
+
+      case query(db, sql) do
+        {:ok, [[rows, bytes, max_payload]]}
+        when is_integer(rows) and is_integer(bytes) and is_integer(max_payload) and
+               rows <= row_limit and bytes >= 0 and max_payload <= @recovery_payload_limit ->
+          next_bytes = total_bytes + bytes
+
+          if next_bytes <= @recovery_payload_bytes_limit,
+            do: {:cont, {:ok, next_bytes}},
+            else: {:halt, {:error, :invalid_recovery_image}}
+
+        _other ->
+          {:halt, {:error, :invalid_recovery_image}}
+      end
+    end)
+    |> case do
+      {:ok, _bytes} ->
+        case query(db, "SELECT COUNT(*) FROM evidence_outbox") do
+          {:ok, [[0]]} -> :ok
+          _other -> {:error, :invalid_recovery_image}
+        end
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp inspect_recovery_rows(db) do
+    with {:ok, run_rows} <- query(db, "SELECT run_id,task_id,payload FROM runs ORDER BY run_id"),
+         {:ok, runs} <- decode_recovery_run_rows(run_rows),
+         run_ids <- Enum.map(runs, fn {id, _run} -> id end),
+         {:ok, attempt_rows} <-
+           query(db, "SELECT run_id,attempt_id,payload FROM stage_attempts ORDER BY run_id,attempt_id"),
+         :ok <- recovery_attempts_match?(attempt_rows, runs),
+         {:ok, operation_rows} <- query(db, "SELECT operation_id,run_id,payload FROM operations ORDER BY operation_id"),
+         :ok <- recovery_operations_match?(operation_rows, runs),
+         {:ok, event_rows} <- query(db, "SELECT event_id,run_id,payload FROM events ORDER BY event_id"),
+         :ok <- validate_recovery_events(event_rows, MapSet.new(run_ids)),
+         {:ok, linear_event_rows} <- query(db, "SELECT delivery_id,payload FROM linear_events ORDER BY delivery_id"),
+         {:ok, linear_events} <- decode_recovery_linear_event_rows(linear_event_rows),
+         {:ok, linear_task_rows} <- query(db, "SELECT issue_id,payload FROM linear_tasks ORDER BY issue_id"),
+         {:ok, linear_tasks} <- decode_recovery_linear_task_rows(linear_task_rows) do
+      {:ok,
+       %{
+         runs: Enum.map(runs, fn {_id, run} -> run end),
+         linear: %{events: linear_events, tasks: linear_tasks},
+         run_ids: run_ids,
+         operation_ids: Enum.map(operation_rows, fn [id, _run_id, _payload] -> id end),
+         linear_delivery_ids: Map.keys(linear_events) |> Enum.sort()
+       }}
+    else
+      _other -> {:error, :invalid_recovery_image}
+    end
+  end
+
+  defp decode_recovery_run_rows(rows) when is_list(rows) do
+    Enum.reduce_while(rows, {:ok, []}, fn
+      [run_id, task_id, payload], {:ok, runs} ->
+        with true <- valid_recovery_id?(run_id) and valid_recovery_id?(task_id),
+             {:ok, run} <- decode_recovery_run(payload),
+             true <- field(run, :id) == run_id and field(run, :task_id) == task_id,
+             true <- valid_attempts_for_recovery?(field(run, :attempts)),
+             true <- valid_operations_for_recovery?(field(run, :operations)) do
+          {:cont, {:ok, [{run_id, run} | runs]}}
+        else
+          _other -> {:halt, {:error, :invalid_recovery_image}}
+        end
+
+      _row, _acc ->
+        {:halt, {:error, :invalid_recovery_image}}
+    end)
+    |> case do
+      {:ok, runs} -> {:ok, Enum.reverse(runs)}
+      error -> error
+    end
+  end
+
+  defp decode_recovery_run(payload) when is_binary(payload) do
+    with {:ok, run} when is_map(run) <- decode_recovery_term(payload) do
+      {:ok, Map.merge(%{questions: %{}, inbox: [], activity_ids: %{}, continuation: nil}, run)}
+    else
+      _other -> {:error, :invalid_recovery_image}
+    end
+  end
+
+  defp decode_recovery_run(_payload), do: {:error, :invalid_recovery_image}
+
+  defp valid_attempts_for_recovery?(attempts) when is_list(attempts),
+    do: length(attempts) <= @recovery_row_limit and Enum.all?(attempts, &valid_attempt?/1)
+
+  defp valid_attempts_for_recovery?(_attempts), do: false
+
+  defp valid_operations_for_recovery?(operations) when is_map(operations),
+    do: map_size(operations) <= @recovery_row_limit and Enum.all?(operations, &valid_operation?/1)
+
+  defp valid_operations_for_recovery?(_operations), do: false
+
+  defp recovery_attempts_match?(rows, runs) do
+    expected =
+      Enum.flat_map(runs, fn {run_id, run} ->
+        Enum.map(run.attempts, fn attempt -> {run_id, field(attempt, :id), attempt} end)
+      end)
+
+    with true <- length(expected) == length(rows),
+         true <- unique_recovery_keys?(expected, fn {run_id, attempt_id, _attempt} -> {run_id, attempt_id} end),
+         {:ok, actual} <- decode_recovery_attempt_rows(rows),
+         true <- MapSet.new(expected) == MapSet.new(actual) do
+      :ok
+    else
+      _other -> {:error, :invalid_recovery_image}
+    end
+  end
+
+  defp decode_recovery_attempt_rows(rows) do
+    Enum.reduce_while(rows, {:ok, []}, fn
+      [run_id, attempt_id, payload], {:ok, attempts} ->
+        with true <- valid_recovery_id?(run_id) and valid_recovery_id?(attempt_id),
+             {:ok, attempt} when is_map(attempt) <- decode_recovery_term(payload),
+             true <- field(attempt, :id) == attempt_id do
+          {:cont, {:ok, [{run_id, attempt_id, attempt} | attempts]}}
+        else
+          _other -> {:halt, {:error, :invalid_recovery_image}}
+        end
+
+      _row, _acc ->
+        {:halt, {:error, :invalid_recovery_image}}
+    end)
+    |> reverse_recovery_rows()
+  end
+
+  defp recovery_operations_match?(rows, runs) do
+    expected =
+      Enum.flat_map(runs, fn {run_id, run} ->
+        Enum.map(run.operations, fn {operation_id, operation} -> {operation_id, run_id, operation} end)
+      end)
+
+    with true <- length(expected) == length(rows),
+         true <- unique_recovery_keys?(expected, fn {operation_id, _run_id, _operation} -> operation_id end),
+         {:ok, actual} <- decode_recovery_operation_rows(rows),
+         true <- MapSet.new(expected) == MapSet.new(actual) do
+      :ok
+    else
+      _other -> {:error, :invalid_recovery_image}
+    end
+  end
+
+  defp decode_recovery_operation_rows(rows) do
+    Enum.reduce_while(rows, {:ok, []}, fn
+      [operation_id, run_id, payload], {:ok, operations} ->
+        with true <- valid_recovery_id?(operation_id) and valid_recovery_id?(run_id),
+             {:ok, operation} when is_map(operation) <- decode_recovery_term(payload) do
+          {:cont, {:ok, [{operation_id, run_id, operation} | operations]}}
+        else
+          _other -> {:halt, {:error, :invalid_recovery_image}}
+        end
+
+      _row, _acc ->
+        {:halt, {:error, :invalid_recovery_image}}
+    end)
+    |> reverse_recovery_rows()
+  end
+
+  defp unique_recovery_keys?(rows, key_fun) do
+    MapSet.size(MapSet.new(Enum.map(rows, key_fun))) == length(rows)
+  end
+
+  defp validate_recovery_events(rows, run_ids) do
+    Enum.reduce_while(rows, :ok, fn
+      [event_id, run_id, payload], :ok ->
+        case decode_recovery_term(payload) do
+          {:ok, event} when is_map(event) and is_binary(run_id) ->
+            if valid_recovery_id?(event_id) and MapSet.member?(run_ids, run_id),
+              do: {:cont, :ok},
+              else: {:halt, {:error, :invalid_recovery_image}}
+
+          _other ->
+            {:halt, {:error, :invalid_recovery_image}}
+        end
+
+      _row, _acc ->
+        {:halt, {:error, :invalid_recovery_image}}
+    end)
+  end
+
+  defp decode_recovery_linear_event_rows(rows) do
+    Enum.reduce_while(rows, {:ok, %{}}, fn
+      [delivery_id, payload], {:ok, events} ->
+        with true <- valid_recovery_id?(delivery_id),
+             {:ok, record} when is_map(record) <- decode_recovery_term(payload),
+             true <- field(record, :id) == delivery_id,
+             true <- is_map(field(record, :event)),
+             true <- has_field?(record, :status),
+             true <- safe_persistent_term?(record) do
+          {:cont, {:ok, Map.put(events, delivery_id, record)}}
+        else
+          _other -> {:halt, {:error, :invalid_recovery_image}}
+        end
+
+      _row, _acc ->
+        {:halt, {:error, :invalid_recovery_image}}
+    end)
+  end
+
+  defp decode_recovery_linear_task_rows(rows) do
+    Enum.reduce_while(rows, {:ok, %{}}, fn
+      [issue_id, payload], {:ok, tasks} ->
+        with true <- valid_recovery_id?(issue_id),
+             {:ok, task} when is_map(task) <- decode_recovery_term(payload),
+             true <- field(task, :issue_id) == issue_id,
+             true <- safe_persistent_term?(task) do
+          {:cont, {:ok, Map.put(tasks, issue_id, task)}}
+        else
+          _other -> {:halt, {:error, :invalid_recovery_image}}
+        end
+
+      _row, _acc ->
+        {:halt, {:error, :invalid_recovery_image}}
+    end)
+  end
+
+  defp decode_recovery_term(payload)
+       when is_binary(payload) and byte_size(payload) > 0 and byte_size(payload) <= @recovery_payload_limit do
+    if match?(<<131, 80, _rest::binary>>, payload) do
+      {:error, :invalid_recovery_image}
+    else
+      case decode_term(payload) do
+        {:ok, term} ->
+          if bounded_recovery_term?(term), do: {:ok, term}, else: {:error, :invalid_recovery_image}
+
+        _other ->
+          {:error, :invalid_recovery_image}
+      end
+    end
+  end
+
+  defp decode_recovery_term(_payload), do: {:error, :invalid_recovery_image}
+
+  defp bounded_recovery_term?(term) do
+    case visit_recovery_term(term, 0, 0, 0) do
+      {:ok, _nodes, _bytes} -> true
+      :error -> false
+    end
+  rescue
+    _error -> false
+  catch
+    _kind, _reason -> false
+  end
+
+  defp visit_recovery_term(_term, depth, _nodes, _bytes) when depth > @recovery_term_depth_limit, do: :error
+
+  defp visit_recovery_term(term, depth, nodes, bytes) do
+    nodes = nodes + 1
+
+    cond do
+      nodes > @recovery_term_nodes_limit ->
+        :error
+
+      is_pid(term) or is_port(term) or is_reference(term) or is_function(term) ->
+        :error
+
+      is_binary(term) ->
+        next_bytes = bytes + byte_size(term)
+        if next_bytes <= @recovery_payload_limit, do: {:ok, nodes, next_bytes}, else: :error
+
+      is_number(term) or is_atom(term) ->
+        {:ok, nodes, bytes}
+
+      is_list(term) ->
+        visit_recovery_list(term, depth + 1, nodes, bytes)
+
+      is_tuple(term) ->
+        visit_recovery_tuple(term, 0, depth + 1, nodes, bytes)
+
+      is_map(term) ->
+        visit_recovery_map(:maps.to_list(term), depth + 1, nodes, bytes)
+
+      true ->
+        :error
+    end
+  end
+
+  defp visit_recovery_list([], _depth, nodes, bytes), do: {:ok, nodes, bytes}
+
+  defp visit_recovery_list([head | tail], depth, nodes, bytes) do
+    with {:ok, nodes, bytes} <- visit_recovery_term(head, depth, nodes, bytes) do
+      visit_recovery_list(tail, depth, nodes, bytes)
+    end
+  end
+
+  defp visit_recovery_list(_improper_list, _depth, _nodes, _bytes), do: :error
+
+  defp visit_recovery_tuple(tuple, index, depth, nodes, bytes) when index < tuple_size(tuple) do
+    with {:ok, nodes, bytes} <- visit_recovery_term(elem(tuple, index), depth, nodes, bytes) do
+      visit_recovery_tuple(tuple, index + 1, depth, nodes, bytes)
+    end
+  end
+
+  defp visit_recovery_tuple(_tuple, _index, _depth, nodes, bytes), do: {:ok, nodes, bytes}
+
+  defp visit_recovery_map([], _depth, nodes, bytes), do: {:ok, nodes, bytes}
+
+  defp visit_recovery_map([{key, value} | rest], depth, nodes, bytes) do
+    with {:ok, nodes, bytes} <- visit_recovery_term(key, depth, nodes, bytes),
+         {:ok, nodes, bytes} <- visit_recovery_term(value, depth, nodes, bytes) do
+      visit_recovery_map(rest, depth, nodes, bytes)
+    end
+  end
+
+  defp reverse_recovery_rows({:ok, rows}), do: {:ok, Enum.reverse(rows)}
+  defp reverse_recovery_rows({:error, _reason} = error), do: error
+
+  defp valid_recovery_id?(value),
+    do: is_binary(value) and byte_size(value) in 1..4_096 and String.valid?(value)
 
   defp link_and_monitor_owner(owner) do
     owner_ref = Process.monitor(owner)

@@ -79,6 +79,103 @@ defmodule SymphonyElixir.WorkstreamStoreTest do
     assert :ok = GenServer.stop(store)
   end
 
+  test "inspects a captured current image without changing its bytes", context do
+    expected = run("run-1", "task-1")
+    {source_path, bytes} = captured_store_image(context, expected)
+    digest = digest(bytes)
+
+    assert {:ok, inspected} = WorkstreamStore.inspect_recovery_image(bytes)
+    assert inspected.runs == [expected]
+    assert inspected.linear == %{events: %{}, tasks: %{}}
+    assert inspected.run_ids == ["run-1"]
+    assert inspected.operation_ids == ["op-1"]
+    assert inspected.linear_delivery_ids == []
+    assert File.read!(source_path) == bytes
+    assert digest(File.read!(source_path)) == digest
+  end
+
+  test "rejects invalid recovery image payloads without changing the captured source", context do
+    run = run("run-1", "task-1")
+    {source_path, original_bytes} = captured_store_image(context, run)
+    source_digest = digest(original_bytes)
+
+    compressed_run = :erlang.term_to_binary(run, compressed: 1)
+    pid_run = :erlang.term_to_binary(Map.put(run, :unsafe, self()))
+    reference_run = :erlang.term_to_binary(Map.put(run, :unsafe, make_ref()))
+    function_run = :erlang.term_to_binary(Map.put(run, :unsafe, &String.length/1))
+    deep_run = :erlang.term_to_binary(Map.put(run, :unsafe, nested_term(:value, 65)))
+
+    oversized_run =
+      :erlang.term_to_binary(Map.put(run, :unsafe, :binary.copy("x", 4 * 1024 * 1024 + 1)))
+
+    cases = [
+      {
+        "SQL run ID mismatch",
+        {:sql,
+         "UPDATE runs SET run_id = 'other-run' WHERE run_id = 'run-1'; " <>
+           "UPDATE events SET run_id = 'other-run'; " <>
+           "UPDATE stage_attempts SET run_id = 'other-run'; " <>
+           "UPDATE operations SET run_id = 'other-run'"},
+        :invalid_recovery_image
+      },
+      {
+        "SQL task ID mismatch",
+        {:sql, "UPDATE runs SET task_id = 'other-task' WHERE run_id = 'run-1'"},
+        :invalid_recovery_image
+      },
+      {
+        "orphan event",
+        {:sql, "UPDATE events SET run_id = 'missing-run' WHERE event_id = 'initial'"},
+        :invalid_recovery_image
+      },
+      {
+        "changed attempt row",
+        {:table_payload, "stage_attempts", "attempt_id", "attempt-1", :erlang.term_to_binary(%{id: "different-attempt"})},
+        :invalid_recovery_image
+      },
+      {
+        "changed operation row",
+        {:table_payload, "operations", "operation_id", "op-1", :erlang.term_to_binary(%{kind: :different})},
+        :invalid_recovery_image
+      },
+      {"extra table", {:sql, "CREATE TABLE recovery_extra (value TEXT)"}, :invalid_recovery_image},
+      {
+        "extra trigger",
+        {:sql, "CREATE TRIGGER recovery_extra AFTER INSERT ON runs BEGIN SELECT 1; END"},
+        :invalid_recovery_image
+      },
+      {
+        "unsupported schema version",
+        {:sql, "PRAGMA user_version = 4"},
+        :unsupported_recovery_schema
+      },
+      {
+        "nonempty evidence outbox",
+        {:sql, "INSERT INTO evidence_outbox (event_id,snapshot,event) VALUES ('pending',x'01',x'01')"},
+        :invalid_recovery_image
+      },
+      {"compressed ETF", {:run_payload, compressed_run}, :invalid_recovery_image},
+      {"pid ETF value", {:run_payload, pid_run}, :invalid_recovery_image},
+      {"reference ETF value", {:run_payload, reference_run}, :invalid_recovery_image},
+      {"function ETF value", {:run_payload, function_run}, :invalid_recovery_image},
+      {"deep ETF value", {:run_payload, deep_run}, :invalid_recovery_image},
+      {"oversized ETF value", {:run_payload, oversized_run}, :invalid_recovery_image}
+    ]
+
+    cases
+    |> Enum.with_index()
+    |> Enum.each(fn {{name, mutation, expected_error}, index} ->
+      copy_path = Path.join(context.root, "mutated-#{index}.sqlite")
+      :ok = File.cp(source_path, copy_path)
+      apply_recovery_mutation(copy_path, mutation)
+      bytes = File.read!(copy_path)
+
+      assert {:error, ^expected_error} = WorkstreamStore.inspect_recovery_image(bytes), name
+      assert File.read!(source_path) == original_bytes
+      assert digest(File.read!(source_path)) == source_digest
+    end)
+  end
+
   test "loading a legacy run adds empty reply state without replacing pinned state", context do
     expected =
       run("run-1", "task-1")
@@ -358,4 +455,53 @@ defmodule SymphonyElixir.WorkstreamStoreTest do
     :ok = Sqlite3.release(db, statement)
     :ok = Sqlite3.close(db)
   end
+
+  defp captured_store_image(context, expected_run) do
+    assert {:ok, store} = start_store(context.path)
+    assert :ok = WorkstreamStore.commit(store, expected_run, "initial", %{kind: :queued})
+
+    directory = Path.join(context.root, "inspection-capture")
+    File.mkdir!(directory)
+    File.chmod!(directory, 0o700)
+    target = Path.join(directory, "state.sqlite")
+    token = make_ref()
+
+    assert :ok = WorkstreamStore.begin_capture(store, token, self(), target)
+    assert {:ok, %{schema: %{"user_version" => 3}}} = WorkstreamStore.snapshot_capture(store, token)
+    assert :ok = WorkstreamStore.end_capture(store, token)
+    assert :ok = GenServer.stop(store)
+
+    {target, File.read!(target)}
+  end
+
+  defp mutate_recovery_copy(path, sql) do
+    {:ok, db} = Sqlite3.open(path)
+    :ok = Sqlite3.execute(db, sql)
+    :ok = Sqlite3.close(db)
+  end
+
+  defp apply_recovery_mutation(path, {:sql, sql}), do: mutate_recovery_copy(path, sql)
+
+  defp apply_recovery_mutation(path, {:run_payload, payload}),
+    do: replace_recovery_run_payload(path, payload)
+
+  defp apply_recovery_mutation(path, {:table_payload, table, column, id, payload}),
+    do: replace_recovery_payload(path, table, column, id, payload)
+
+  defp replace_recovery_run_payload(path, payload),
+    do: replace_recovery_payload(path, "runs", "run_id", "run-1", payload)
+
+  defp replace_recovery_payload(path, table, identity_column, identity, payload) do
+    {:ok, db} = Sqlite3.open(path)
+    {:ok, statement} = Sqlite3.prepare(db, "UPDATE #{table} SET payload = ?1 WHERE #{identity_column} = ?2")
+    :ok = Sqlite3.bind(statement, [{:blob, payload}, identity])
+    :done = Sqlite3.step(db, statement)
+    :ok = Sqlite3.release(db, statement)
+    :ok = Sqlite3.close(db)
+  end
+
+  defp nested_term(term, depth) when depth > 0, do: nested_term([term], depth - 1)
+  defp nested_term(term, _depth), do: term
+
+  defp digest(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
 end

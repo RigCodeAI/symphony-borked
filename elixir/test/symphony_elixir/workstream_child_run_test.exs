@@ -89,6 +89,9 @@ defmodule SymphonyElixir.WorkstreamChildRunTest do
 
     completed_child = %{linked | status: :complete}
     assert :ok = WorkstreamChild.inspect_recovery_links([parent, completed_child])
+
+    altered = put_in(parent.operations[intent.parent_attempt_id].side_effect_id, "unowned-handoff")
+    assert {:error, :invalid_child_recovery_link} = WorkstreamChild.inspect_recovery_links([altered, completed_child])
   end
 
   test "matching result identity and child completion do not by themselves finish the parent stage" do

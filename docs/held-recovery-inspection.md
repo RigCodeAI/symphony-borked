@@ -278,3 +278,13 @@ failure came from a fixture-only event atom absent in a fresh VM; the fixture no
 uses the existing production `queued` event. No atom was admitted from operator
 JSON or untrusted ETF. `validation_docker` remained excluded. No model turn,
 provider mutation, state installation or dispatch release was performed.
+
+
+A final self-review tightened historical completion inspection so it cannot skip
+base attempt/operation identity checks. The correction passed compilation,
+public specs, full format and **24 focused child/capture tests**, seed `756912`,
+including the fresh application rehearsal. Its diagnostic log is
+`/private/tmp/dev242-startup-final-fix-tests.log`. The earlier 157-test regression
+covered the preceding head; the final correction was verified with this focused
+set, without repeating the broad local run. The container was stopped again
+immediately afterward.

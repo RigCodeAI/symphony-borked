@@ -441,10 +441,10 @@ defmodule SymphonyElixir.WorkstreamChild do
         operation[:side_effect_id] == intent.handoff_id and operation[:transport_retries] == 0 and
         operation[:worker] == nil and operation[:child_handoff] === intent
 
-    if base_valid and operation[:status] == :waiting_for_child do
-      waiting_parent_valid?(parent, child, attempt, operation, intent, stage)
-    else
-      completed_parent_valid?(attempt, operation, child, intent)
+    cond do
+      not base_valid -> {:error, :invalid_child_recovery_link}
+      operation[:status] == :waiting_for_child -> waiting_parent_valid?(parent, child, attempt, operation, intent, stage)
+      true -> completed_parent_valid?(attempt, operation, child, intent)
     end
   end
 

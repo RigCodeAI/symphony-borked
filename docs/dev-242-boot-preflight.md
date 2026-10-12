@@ -149,7 +149,7 @@ complete merely because this preflight aligns or a capability PR merges.
 
 | Remaining step | Boundary |
 | --- | --- |
-| Integrate DEV-240's review/context shapes into held inspection and test real child capture/startup. | Source work owned by DEV-240; preserve existing exact linkage checks. |
+| Qualify held inspection of [PR #28](https://github.com/RigCodeAI/symphony/pull/28) native bound-child definitions, including saved agent selection and routing/authorization linkage, with native child capture and held application boot/restart. | Separate DEV-242 source seam after merged `bfadf93`; preserve the exact unbound schema and validate added bindings without reviving authorization. |
 | Bind deployment workflow, reference and release identities to a complete owner-capture contract. | Source work; do not infer missing historical digests from new files. |
 | Wire approved held selection into cold-boot/service entry before normal activation or credential/intake startup. | Source work plus later boot qualification; ordinary `gcp-startup.sh` still invokes activation. |
 | Export complete owner captures to immutable backup storage, verify readback, persist success and expose freshness/failure/disabled-schedule diagnostics. | Source work; the legacy cloud v1 backup remains a separate contract. |
@@ -160,6 +160,12 @@ complete merely because this preflight aligns or a capability PR merges.
 | Select exact approved releases, pinned secret references, disposable resource names and cost/retention/cleanup bounds. | Approval-dependent live preparation; existing cloud/IAM/budget boundaries persist. |
 | Recreate disposable compute from IaC, apply held boot selection, restore during a wait and after an external action, and show old/new definition pins. | Approval-dependent live rehearsal; no deployment or IAM change ran here. |
 | Demonstrate a stale/unreachable worker, one writer/PR/review lineage, retained counters/approval artifacts, backup freshness/failure alerts and archive lookup. | Full DEV-242 live acceptance; compare before/after identities before any continuation release. |
+
+[PR #28](https://github.com/RigCodeAI/symphony/pull/28) supplies native child authorization source, but its bound definitions add
+agent-selection pins that the current held inspector does not yet accept. This
+is separate from DEV-240's optional nil candidate-context attempt shape,
+integrated in [PR #25](https://github.com/RigCodeAI/symphony/pull/25). Native held inspection needs its own schema/linkage qualification;
+current definitions, a stored grant or a matching route must not authorize replay.
 
 Keep the same PR/branch and human GitHub merge authority. Release a continuation
 only through a separately qualified service-owned fencing/reconciliation

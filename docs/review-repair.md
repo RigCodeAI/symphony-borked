@@ -329,8 +329,20 @@ cleanup stays disabled (`merged_cleanup` is omitted or false).
    distinct identities and passed check links. End at **ready for human merge**;
    the human decides whether to merge. Retain the workspaces and evidence.
 
+The proposed DEV-239 demo fixes Rust double-quote character-literal masking in
+`tools/architecture.py`, with tests in `tools/test_architecture.py` covering
+escaped/byte characters and a lifetime control. DEV-239 owns the frozen Python
+validation policy and its fit to those two files. The shipped workstream expects
+`architecture-tests` with `test_count == 1`; a policy reporting four tests requires
+matching reviewed assertions (or a genuine single unittest with subTests). Pin
+the actual protected workstream/policy/image/base before dispatch and preserve
+real reported counts. The package's shipped-definition hash is not a claim that
+a different protected demo definition was qualified.
+
 A first PR with no actionable review finding proves review execution but does not
-prove the required fix loop. Missing or malformed review evidence, stale heads,
+prove the required fix loop. Report that review pass truthfully. Qualify repair
+separately only with an explicitly identified and approved seeded test if needed;
+do not manufacture findings or weaken a correct implementation to claim repair. Missing or malformed review evidence, stale heads,
 unsupported completion or readiness failure must remain visible as a blocker;
 they cannot be reported as first-alpha completion. The broader recovery, Coverage,
 scaling and cleanup plans remain later work rather than prerequisites to this demo.

@@ -560,3 +560,8 @@ Active publication archive waits use the coordinator's bounded delayed reconcili
 path (ten seconds, thirty checks across retries/restarts). Exhaustion remains visible
 as `publication_archive_wait_exhausted`; stopped work is not resumed. See
 [trusted publication](../docs/trusted-publication.md) for the full boundary.
+
+A stopped pre-intent local publisher can retain a slot after its owner has ended.
+The [offline termination command](../docs/stopped-local-publisher.md) requires fresh
+owner proof and exclusive store ownership, preserves stopped status and pins, and
+uses existing termination bookkeeping. It does not resume or publish stopped work.

@@ -2669,6 +2669,17 @@ remote responses MUST reconcile the existing branch/PR rather than create a new 
 Closed, ambiguous or unexpectedly changed remote state MUST block. Completion MUST
 confirm the actual GitHub PR and branch SHA, not accept agent prose.
 
+An offline service-owned maintenance command MAY confirm termination of a stopped
+local publisher with a saved pre-intent archive-wait receipt. It MUST require exact
+run/attempt/worker identity, supported historical source policy, original-host
+attribution, fresh proof the fixed coordinator unit/cgroup and service UID have no
+surviving owner, and exclusive store ownership. Any publication intent or external
+process in that publication's retry history MUST prevent this confirmation. It MUST
+preserve stopped status, artifacts and pins; commit termination and its evidence
+outbox atomically; and replay without duplicate events. It MUST NOT publish, resume
+stopped work, disregard remote uncertainty, or alter the capacity limit. See
+[stopped local publisher maintenance](docs/stopped-local-publisher.md).
+
 For contained workers, the coordinator MUST consume only a bundle from the exact
 terminated successful service commit-preparation operation. The read-only worker RPC
 MUST derive its path from a protected operation descriptor and authenticated input

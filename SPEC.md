@@ -2663,6 +2663,13 @@ separate coordinator-owned snapshot MUST bound metadata copying and imported tre
 sizes and verify candidate SHA and parent/base before
 validation or publication, preserving the worker's original clone.
 
+Remote executable checks retain the ordinary 4 KiB per-argument limit. Only the
+exact service-pinned candidate producer command (`/usr/bin/python3 -I -c`) MAY use
+an inline script up to 8 KiB. The coordinator MUST bind that allowance to the
+saved producer stage and command digest, including wrapped launch validation; the
+worker broker MUST independently match its protected producer digest. Command
+shape, UTF-8, NUL, total-size, input identity and ancestry checks remain required.
+
 Publisher App/private-key credentials MUST stay outside agent and validator processes,
 mounts and cloud metadata reach. Publication uses a selected-repository GitHub App
 installation for RigCodeAI/rig; no PAT fallback, automatic review, protection changes

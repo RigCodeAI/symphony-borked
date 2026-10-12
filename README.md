@@ -91,6 +91,10 @@ GCS archive receipts. Durable capture, restart replay and native Linear links ar
 locally tested against merged main; live qualification remains pending. See [private task evidence](docs/private-evidence.md) for configuration,
 retention and the current acceptance boundary.
 
+The remote local-commit producer has an 8 KiB script allowance tied to its service
+and broker command pins; ordinary arguments retain their 4 KiB limit. See
+[local candidate commits](docs/local-candidate-commits.md) for verification and rollout.
+
 DEV-242 adds source for a private local capture of the workstream and Evidence
 databases at a quiet boundary. Its [owner capture contract](docs/dev-242-capture-barrier.md)
 passed compilation and 85 focused tests on the PR #18 baseline; merged cleanup

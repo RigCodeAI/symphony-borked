@@ -48,6 +48,7 @@ MAX_CONFIG_BYTES = 32 * 1024
 MAX_MANIFEST_BYTES = 64 * 1024
 MAX_ARGV_BYTES = 32 * 1024
 MAX_ARGUMENT_BYTES = 4096
+MAX_CANDIDATE_PRODUCER_SCRIPT_BYTES = 8192
 MAX_CANDIDATE_BUNDLE_BYTES = 64 * 1024 * 1024
 CANDIDATE_BUNDLE_CHUNK_BYTES = 64 * 1024
 MAX_REVIEW_PREPARATION_SCRIPT_BYTES = 16 * 1024
@@ -183,7 +184,36 @@ def validate_identity(value: Any) -> dict[str, str]:
     return {key: identity[key] for key in sorted(IDENTITY_KEYS)}
 
 
-def validate_prepare_request(value: Any) -> dict[str, Any]:
+def _candidate_producer_wrapper_shape(argv: Any) -> bool:
+    return bool(
+        isinstance(argv, list)
+        and len(argv) == 6
+        and argv[0] == "/usr/bin/env"
+        and isinstance(argv[1], str)
+        and argv[1].startswith("WORKSTREAM_INPUTS_JSON=")
+        and argv[2:5] == ["/usr/bin/python3", "-I", "-c"]
+        and isinstance(argv[5], str)
+        and "\x00" not in argv[5]
+    )
+
+
+def _candidate_producer_command_is_pinned(argv: Any, command_sha256: Any) -> bool:
+    if (not _candidate_producer_wrapper_shape(argv)
+            or not isinstance(command_sha256, str)
+            or not _HEX64_RE.fullmatch(command_sha256)):
+        return False
+    try:
+        return hashlib.sha256(_compact_json(argv[2:])).hexdigest() == command_sha256
+    except ProtocolError:
+        return False
+
+
+def validate_prepare_request(
+    value: Any,
+    *,
+    candidate_producer_command_sha256: str | None = None,
+    allow_candidate_producer_envelope: bool = False,
+) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ProtocolError("invalid operation request")
     _require_exact_keys(value, REQUEST_KEYS, "operation request")
@@ -192,12 +222,28 @@ def validate_prepare_request(value: Any) -> dict[str, Any]:
     workspace = value.get("workspace")
     if not isinstance(argv, list) or not argv or len(argv) > 128:
         raise ProtocolError("invalid operation argv")
+    candidate_wrapper = _candidate_producer_wrapper_shape(argv)
+    candidate_script_forwardable = (
+        candidate_wrapper
+        and allow_candidate_producer_envelope
+    )
+    candidate_script_pinned = _candidate_producer_command_is_pinned(
+        argv, candidate_producer_command_sha256
+    )
     argv_bytes = 0
-    for argument in argv:
+    for index, argument in enumerate(argv):
         if not isinstance(argument, str) or not argument or "\x00" in argument:
             raise ProtocolError("invalid operation argv")
-        size = len(argument.encode("utf-8", errors="strict"))
-        if size > MAX_ARGUMENT_BYTES:
+        try:
+            size = len(argument.encode("utf-8", errors="strict"))
+        except UnicodeEncodeError as error:
+            raise ProtocolError("invalid operation argv") from error
+        maximum_argument_size = (
+            MAX_CANDIDATE_PRODUCER_SCRIPT_BYTES
+            if index == 5 and (candidate_script_forwardable or candidate_script_pinned)
+            else MAX_ARGUMENT_BYTES
+        )
+        if size > maximum_argument_size:
             raise ProtocolError("invalid operation argv")
         argv_bytes += size
     if argv_bytes > MAX_ARGV_BYTES:
@@ -312,7 +358,12 @@ def validate_review_preparation_request(value: Any) -> dict[str, Any]:
     }
 
 
-def validate_rpc_request(value: Any) -> dict[str, Any]:
+def validate_rpc_request(
+    value: Any,
+    *,
+    candidate_producer_command_sha256: str | None = None,
+    allow_candidate_producer_envelope: bool = False,
+) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ProtocolError("invalid RPC request")
     action = value.get("action")
@@ -323,7 +374,11 @@ def validate_rpc_request(value: Any) -> dict[str, Any]:
         _require_exact_keys(value, frozenset({"action", "request", "expected_release"}), "prepare request")
         return {
             "action": action,
-            "request": validate_prepare_request(value.get("request")),
+            "request": validate_prepare_request(
+                value.get("request"),
+                candidate_producer_command_sha256=candidate_producer_command_sha256,
+                allow_candidate_producer_envelope=allow_candidate_producer_envelope,
+            ),
             "expected_release": validate_release(value.get("expected_release")),
         }
     if action == "prepare_review_workspace":
@@ -402,7 +457,8 @@ def parse_ssh_original_command(command: Any) -> tuple[str, dict[str, Any]]:
         raise ProtocolError("invalid SSH command")
     decoded = decode_json_object(_decode_base64url(parts[2]))
     if parts[1] == "rpc":
-        return "rpc", validate_rpc_request(decoded)
+        # This only permits bounded forwarding; root-side pin checks authorize execution.
+        return "rpc", validate_rpc_request(decoded, allow_candidate_producer_envelope=True)
     _require_exact_keys(decoded, frozenset({"identity", "expected_release"}), "stream request")
     return "stream", {
         "identity": validate_identity(decoded.get("identity")),
@@ -1023,7 +1079,15 @@ class OperationBroker:
                 return
             try:
                 decoded = decode_json_object(request)
-                validated = validate_rpc_request(decoded)
+                candidate_command_pin = None
+                if getattr(self.controller, "candidate_bundle_available", False) is True:
+                    configured_pin = getattr(self.controller, "candidate_producer_command_sha256", None)
+                    if isinstance(configured_pin, str) and _HEX64_RE.fullmatch(configured_pin):
+                        candidate_command_pin = configured_pin
+                validated = validate_rpc_request(
+                    decoded,
+                    candidate_producer_command_sha256=candidate_command_pin,
+                )
             except ProtocolError:
                 # Stream requests use the same connection but a distinct, fixed
                 # envelope. Validate them separately after the regular RPC path.

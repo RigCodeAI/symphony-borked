@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.WorkerOperationTest do
   use ExUnit.Case, async: true
 
-  alias SymphonyElixir.WorkerOperation
+  alias SymphonyElixir.{WorkerOperation, Workstream}
 
   @config %{
     "host" => "worker-a",
@@ -264,6 +264,83 @@ defmodule SymphonyElixir.WorkerOperationTest do
     assert :terminated =
              WorkerOperation.stop(@config, identity, rpc_fun: fn _config, %{"action" => "stop"} -> {:ok, terminal_payload(identity)} end)
   end
+
+  test "the shipped pinned candidate producer reaches remote prepare and launch" do
+    command = shipped_candidate_command()
+    assert byte_size(List.last(command)) == 6_994
+    pin = command_sha256(command)
+    assert pin == "a7bf9930b1e99665d598a30c94db43896d9056a3aaeaf28347d5a1a12a1a1ed9"
+    identity = identity()
+    inputs = %{"candidate" => %{"thread_id" => "implementation-thread"}}
+
+    rpc = fn _, %{"action" => action} = request ->
+      case action do
+        "prepare" ->
+          ["/usr/bin/env", assignment | actual] = request["request"]["argv"]
+          assert actual == command
+          assert Jason.decode!(String.replace_prefix(assignment, "WORKSTREAM_INPUTS_JSON=", "")) == inputs
+          send(self(), :candidate_prepared)
+          {:ok, identity}
+
+        "release" ->
+          {:ok, released_payload(identity)}
+
+        "status" ->
+          {:ok, terminal_payload(identity)}
+      end
+    end
+
+    assert {:ok, %{exit_status: 0}} =
+             WorkerOperation.run_check(command, @workspace, 1_000, @operation_id, @config, fn _ -> :ok end, inputs,
+               candidate_producer_command_sha256: pin,
+               rpc_fun: rpc,
+               stream_start_fun: fn _, _, _ -> {:ok, fake_port(stream_script(~s(echo '{"ok":"stream_ready"}'), "exit 0"))} end
+             )
+
+    assert_receive :candidate_prepared
+  end
+
+  test "larger candidate scripts require the exact pin and never relax ordinary bounds" do
+    command = shipped_candidate_command()
+    pin = command_sha256(command)
+    oversized = ["/usr/bin/python3", "-I", "-c", String.duplicate("#", 8_193)]
+    altered = List.update_at(command, 3, &String.replace_prefix(&1, "import", "#mport"))
+    opts = [rpc_fun: fn _, _ -> flunk("rejected command must not prepare a worker") end]
+
+    for {argv, supplied_pin} <- [
+          {command, nil},
+          {command, String.duplicate("a", 64)},
+          {altered, pin},
+          {oversized, command_sha256(oversized)},
+          {["check.sh", String.duplicate("x", 4_097)], pin},
+          {["/usr/bin/python3", "-c", List.last(command)], pin},
+          {["/usr/bin/python3", "-I", "-c", String.duplicate("#", 4_097) <> <<0>>], pin},
+          {["/usr/bin/python3", "-I", "-c", String.duplicate("#", 4_097) <> <<255>>], pin}
+        ] do
+      assert {:error, :invalid_worker_check_command} =
+               WorkerOperation.run_check(
+                 argv,
+                 @workspace,
+                 1_000,
+                 @operation_id,
+                 @config,
+                 fn _ -> :ok end,
+                 %{"candidate_producer_command_sha256" => pin},
+                 Keyword.put(opts, :candidate_producer_command_sha256, supplied_pin)
+               )
+    end
+
+    assert {:error, :invalid_worker_argv} =
+             WorkerOperation.validate_config(Map.put(@config, "argv", ["/usr/bin/python3", String.duplicate("x", 4_097)]))
+  end
+
+  defp shipped_candidate_command do
+    path = Path.expand("../../../factory/workstreams/software-change.yaml", __DIR__)
+    {:ok, definition} = Workstream.load(path, %{"task" => "remote validation regression"})
+    definition.stages["local-commit"].gate.command
+  end
+
+  defp command_sha256(command), do: :crypto.hash(:sha256, Jason.encode!(command)) |> Base.encode16(case: :lower)
 
   test "review preparation sends identity without caller target paths and registers before release" do
     identity = identity()

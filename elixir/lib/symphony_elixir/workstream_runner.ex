@@ -222,8 +222,16 @@ defmodule SymphonyElixir.WorkstreamRunner do
     inputs = state.outputs |> Map.take(stage.inputs) |> producer_inputs(stage, state)
 
     case opts[:worker_control] do
-      nil -> WorkstreamCommand.run(stage.gate.command, workspace, stage.gate.timeout_ms, inputs)
-      control -> WorkerOperation.run_check(stage.gate.command, workspace, stage.gate.timeout_ms, state.current_attempt_id, control, opts[:on_process_start], inputs)
+      nil ->
+        WorkstreamCommand.run(stage.gate.command, workspace, stage.gate.timeout_ms, inputs)
+
+      control ->
+        check_opts =
+          if stage.id == state.execution[:candidate_producer_stage],
+            do: [candidate_producer_command_sha256: state.execution[:candidate_producer_command_sha256]],
+            else: []
+
+        WorkerOperation.run_check(stage.gate.command, workspace, stage.gate.timeout_ms, state.current_attempt_id, control, opts[:on_process_start], inputs, check_opts)
     end
   end
 

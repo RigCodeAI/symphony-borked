@@ -18,6 +18,7 @@ defmodule SymphonyElixir.WorkerOperation do
 
   @max_argv_count 64
   @max_arg_bytes 4_096
+  @max_candidate_script_bytes 8_192
   @max_argv_bytes 16_384
   @max_workspace_bytes 4_096
   @max_operation_id_bytes 200
@@ -206,7 +207,7 @@ defmodule SymphonyElixir.WorkerOperation do
   def run_check(command, workspace, timeout_ms, operation_id, control, on_process_start, inputs, opts)
       when is_list(opts) do
     with :ok <- validate_config(control),
-         :ok <- validate_check_request(command, workspace, timeout_ms, operation_id, inputs),
+         :ok <- validate_check_request(command, workspace, timeout_ms, operation_id, inputs, opts),
          :ok <- validate_registration_callback(on_process_start),
          {:ok, input_json} <- encode_inputs(inputs),
          argv <- ["/usr/bin/env", "WORKSTREAM_INPUTS_JSON=" <> input_json | command],
@@ -311,7 +312,7 @@ defmodule SymphonyElixir.WorkerOperation do
   defp sha256(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
 
   defp launch(workspace, operation_id, control, argv, on_process_start, opts) do
-    with :ok <- validate_launch_argv(argv),
+    with :ok <- validate_launch_argv(argv, opts),
          {:ok, identity} <- prepare(control, workspace, operation_id, argv, opts) do
       start_prepared(control, operation_id, identity, on_process_start, opts)
     else
@@ -805,8 +806,8 @@ defmodule SymphonyElixir.WorkerOperation do
     end
   end
 
-  defp validate_check_request(command, workspace, timeout_ms, operation_id, inputs) do
-    with :ok <- validate_command(command),
+  defp validate_check_request(command, workspace, timeout_ms, operation_id, inputs, opts) do
+    with :ok <- validate_command(command, opts),
          :ok <- validate_workspace(workspace),
          true <- is_integer(timeout_ms) and timeout_ms > 0 and timeout_ms <= @max_check_timeout_ms,
          :ok <- validate_operation_id(operation_id),
@@ -856,15 +857,26 @@ defmodule SymphonyElixir.WorkerOperation do
     end
   end
 
-  defp validate_command(command) when is_list(command) and length(command) in 1..@max_argv_count do
-    if Enum.all?(command, &valid_argument?/1) and Enum.sum(Enum.map(command, &byte_size/1)) <= @max_argv_bytes do
+  defp validate_command(command, opts) when is_list(command) and length(command) in 1..@max_argv_count do
+    if (Enum.all?(command, &valid_argument?/1) or pinned_candidate_command?(command, opts)) and
+         Enum.sum(Enum.map(command, &byte_size/1)) <= @max_argv_bytes do
       :ok
     else
       {:error, :invalid_worker_check_command}
     end
   end
 
-  defp validate_command(_command), do: {:error, :invalid_worker_check_command}
+  defp validate_command(_command, _opts), do: {:error, :invalid_worker_check_command}
+
+  defp pinned_candidate_command?(["/usr/bin/python3", "-I", "-c", script] = command, opts)
+       when is_binary(script) and byte_size(script) in 1..@max_candidate_script_bytes do
+    pin = opts[:candidate_producer_command_sha256]
+
+    valid_sha256?(pin) and String.valid?(script) and not String.contains?(script, <<0>>) and
+      sha256(Jason.encode!(command)) == pin
+  end
+
+  defp pinned_candidate_command?(_command, _opts), do: false
 
   defp validate_host(host) when is_binary(host) and byte_size(host) in 1..255 do
     if String.valid?(host) and String.trim(host) == host and Regex.match?(~r/\A[A-Za-z0-9\[][A-Za-z0-9_.@:\-\[\]]*\z/, host), do: :ok, else: {:error, :invalid_worker_host}
@@ -908,10 +920,14 @@ defmodule SymphonyElixir.WorkerOperation do
 
   defp validate_argv(_argv), do: {:error, :invalid_worker_argv}
 
-  defp validate_launch_argv(argv) when is_list(argv) and length(argv) in 1..(@max_argv_count + 2)//1 do
+  defp validate_launch_argv(argv, opts) when is_list(argv) and length(argv) in 1..(@max_argv_count + 2)//1 do
     first = hd(argv)
+    candidate_pinned = pinned_candidate_launch?(argv, opts)
 
-    if is_binary(first) and Path.type(first) == :absolute and Enum.all?(argv, &valid_launch_argument?/1) and
+    if is_binary(first) and Path.type(first) == :absolute and
+         Enum.all?(Enum.with_index(argv), fn {value, index} ->
+           (candidate_pinned and index == 5) or valid_launch_argument?(value)
+         end) and
          Enum.sum(Enum.map(argv, &byte_size/1)) <= @max_output_bytes + @max_argv_bytes do
       :ok
     else
@@ -919,7 +935,12 @@ defmodule SymphonyElixir.WorkerOperation do
     end
   end
 
-  defp validate_launch_argv(_argv), do: {:error, :invalid_worker_argv}
+  defp validate_launch_argv(_argv, _opts), do: {:error, :invalid_worker_argv}
+
+  defp pinned_candidate_launch?(["/usr/bin/env", "WORKSTREAM_INPUTS_JSON=" <> _ | command], opts),
+    do: pinned_candidate_command?(command, opts)
+
+  defp pinned_candidate_launch?(_argv, _opts), do: false
 
   defp valid_launch_argument?("WORKSTREAM_INPUTS_JSON=" <> value) do
     byte_size(value) <= @max_output_bytes and not String.contains?(value, <<0>>)

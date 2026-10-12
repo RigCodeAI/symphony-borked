@@ -6,6 +6,8 @@ only in memory, exposes their saved runs through the existing coordinator, and
 holds every continuation. It does not install a database, reconcile providers,
 fence another coordinator, or release dispatch. Compilation and 109 focused
 tests passed in the isolated Docker runtime; deployed recovery remains pending.
+The full-service startup path below is locally qualified by its separate
+157-test rehearsal. It is not deployed recovery or a dispatch-release contract.
 
 ## Trusted input and startup
 
@@ -34,11 +36,66 @@ rehearsal. Omit `workstream_store_path`; a mutable Store and held inspection
 cannot be combined. Polling must be disabled. The source uses the same early
 startup branch after every supervisor restart.
 
-This is an isolated runtime-supervisor rehearsal. Ordinary full application
-startup still starts its separately configured Evidence child, which opens its
-index and schedules local flushes. This increment does not install a full-service
-or deployment activation path for held recovery. Do not point that normal child
-at capture files. The held runtime never opens an Evidence root.
+The first qualified rehearsal used an isolated runtime supervisor. Ordinary
+application startup without a recovery plan still starts its configured Evidence
+child and schedules local flushes. Do not point that normal child at capture
+files. The held runtime never opens an Evidence root.
+
+## Full application startup source
+
+An explicit `--recovery-plan` CLI option selects held mode before application
+children start. The plan must be an absolute, regular, single-link JSON file of
+at most 64 KiB, mode 0600, owned by the invoking service UID. Its immediate parent
+must be owned by that UID with mode 0700. Symlink ancestry, traversal, changed
+file identity, duplicate JSON keys and unknown plan/policy fields reject.
+These remain bounded preflight/post-read checks, not atomic no-follow opens.
+
+The exact JSON keys are `version`, `mode`, `root`, `id`, `workspace_roots`,
+`manifest_sha256`, `service_revision` and `policy`. Version is 1; mode is
+`held_inspection`. The other values are the independently accepted anchors from
+the startup map above. The policy object has only `version: 1`,
+`gate_policy: "exit-status-v1"`, `lifecycle_sha256`, `executor_sha256`,
+`child_sha256` and `validation_sha256`. The exact legacy shape without
+`child_sha256` can also be inspected; it stays incompatible with current policy
+and is never upgraded. Hashes are lowercase SHA-256 values. Parsing uses fixed
+key mappings; it does not create atoms from operator JSON.
+
+This command uses the existing required acknowledgement flag:
+
+```sh
+./bin/symphony \
+  --i-understand-that-this-will-be-running-without-the-usual-guardrails \
+  --recovery-plan /absolute/service-private/recovery/accepted.json \
+  --logs-root /absolute/private/recovery-logs \
+  /absolute/path/to/WORKFLOW.md
+```
+
+The CLI requires an existing workflow path for compatibility, but held application
+startup does not start WorkflowStore or load its runtime settings. The plan flag
+requires a cold BEAM startup: it rejects an already-running local Symphony
+supervisor or coordinator instead of labeling a normal runtime held. It sets the
+trusted `:recovery_plan_path` application setting, which application startup and
+the existing direct runtime entry point reload. An invalid configured plan fails;
+there is no fallback to normal startup. OTP application restart retains that
+setting and loads the plan again. A later OS/service restart must retain the same
+explicit startup selection; deployment activation is not changed here.
+
+Held full application mode starts only the existing AgentRuntimeSupervisor with
+the recovery capture option. It omits mutable Evidence, current WorkflowStore,
+OAuth, HTTP/LiveView, the separate webhook listener, PubSub and the normal terminal
+dashboard. This avoids both webhook routes and IAP key lookup; it does not expose
+normal zero-worker counts as a recovered service. The regular startup tree stays
+unchanged when no recovery setting is present.
+
+After successful held startup, the ordinary rotating log records
+`recovery_dispatch_held`, the capture ID and policy compatibility, with
+`dispatch_allowed=false` and `restore_ready=false`. In the command above, inspect
+`/absolute/private/recovery-logs/log/symphony.log*`. Read-only run and recovery
+reports remain available through the existing in-node coordinator APIs. Log files
+are local diagnostics; this mode does not open capture files for writing.
+
+The full cold-boot source rehearsal is pending. It creates no service installation,
+provider action or dispatch-release capability.
 
 ## What is checked and preserved
 
@@ -71,9 +128,17 @@ files. The current service policy is compared with each saved policy. A mismatch
 is reported through `policy_compatible: false` and `incompatible_run_ids`; it does
 not replace a saved policy, reset a run or synthesize an approval.
 
+Saved child stages are checked against their frozen software-change definition
+and resource pins. Linked runs must retain the owned attempt, operation, lineage
+and paired atomic handoff events. Waiting child records remain waiting, and
+historical completion records remain saved data. These checks verify structural
+linkage within the anchored capture; they do not recompute a progressed handoff
+fingerprint, fetch merge/archive proof or authorize parent continuation. Child
+proof freshness and post-capture events remain unreconciled.
+
 This is structural inspection under trusted anchors, not complete qualification
-of every evaluator or future child/review contract. Child and review replay must
-be integrated with their owners after those contracts merge.
+of every evaluator or review contract. Child and review replay require separate
+qualification through their owners before any later dispatch release.
 
 ## Held behavior and diagnostics
 
@@ -160,3 +225,56 @@ The container was stopped and the build slot released after the focused pass.
 The default `validation_docker` exclusion remained active. No model turns,
 provider mutations, state installation or dispatch release ran. Broad CI follows
 the alpha non-blocking policy; strict Credo/full CI are not claimed green.
+
+
+### Full application and child inspection qualification
+
+The full application selection and merged child-owner integration passed **157
+tests, zero failures**, seed `427532`, in the same Elixir 1.19.5/OTP 28 container.
+The final focused command extended the prior eight-file regression set above with:
+
+```sh
+mix test test/symphony_elixir/backup_capture_test.exs \
+  test/symphony_elixir/backup_capture_owner_test.exs \
+  test/symphony_elixir/evidence_test.exs \
+  test/symphony_elixir/workstream_store_test.exs \
+  test/symphony_elixir/workstream_cleanup_test.exs \
+  test/symphony_elixir/validation_check_test.exs \
+  test/symphony_elixir/durable_workstream_test.exs \
+  test/symphony_elixir/durable_publication_test.exs \
+  test/symphony_elixir/recovery_plan_test.exs \
+  test/symphony_elixir/cli_test.exs \
+  test/symphony_elixir/workstream_child_run_test.exs \
+  test/symphony_elixir/workstream_child_store_test.exs \
+  test/symphony_elixir/durable_child_handoff_test.exs \
+  test/symphony_elixir/durable_child_proof_test.exs \
+  test/symphony_elixir/workstream_child_completion_test.exs --seed 427532
+```
+
+Warnings-as-errors compilation, `mix build`, public specs, full format and
+PR-body validation also passed. The test container was stopped after these
+checks, releasing the shared heavy-build slot.
+
+The diagnostic log is `/private/tmp/dev242-startup-regression.log`. The fresh BEAM
+rehearsal used the real CLI, private plan loader and full OTP application startup.
+Only the task supervisor and held coordinator started. It checked retained
+selection across application restart, rejected a warm CLI reselection and an
+invalid selected plan, verified the held log message, and observed no normal
+Evidence, Workflow, OAuth, web intake or dispatch tasks. Both captured images,
+the manifest and source owner files stayed unchanged.
+
+The child fixture used frozen parent/software-change definitions, the real
+`begin_child` operation and atomic Store handoff, then captured and inspected
+those owner records. Prior research/qualification/human-approval stages were
+simulated by positioning the test parent at its child stage with mapped outputs;
+this is not a complete Coverage Factory run. Missing/changed lineage and deleted,
+cross-owned or changed paired Store events were rejected using disposable image
+copies. Historical completion checks remain structural; no external proof was
+fetched. Legacy five-key policies stayed saved and incompatible.
+
+The first runs exposed a duplicate CLI option being silently collapsed and two
+fixture construction errors; the final pass includes their fixes. A cold-only
+failure came from a fixture-only event atom absent in a fresh VM; the fixture now
+uses the existing production `queued` event. No atom was admitted from operator
+JSON or untrusted ETF. `validation_docker` remained excluded. No model turn,
+provider mutation, state installation or dispatch release was performed.

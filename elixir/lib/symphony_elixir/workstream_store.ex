@@ -10,7 +10,7 @@ defmodule SymphonyElixir.WorkstreamStore do
   use GenServer
 
   alias Exqlite.Sqlite3
-  alias SymphonyElixir.{BackupCapture, Config, Evidence}
+  alias SymphonyElixir.{BackupCapture, Config, Evidence, WorkstreamChild}
 
   @busy_timeout_ms 100
   @directory_mode 0o700
@@ -1801,15 +1801,18 @@ defmodule SymphonyElixir.WorkstreamStore do
          :ok <- recovery_attempts_match?(attempt_rows, runs),
          {:ok, operation_rows} <- query(db, "SELECT operation_id,run_id,payload FROM operations ORDER BY operation_id"),
          :ok <- recovery_operations_match?(operation_rows, runs),
+         run_maps <- Enum.map(runs, fn {_id, run} -> run end),
+         :ok <- WorkstreamChild.inspect_recovery_links(run_maps),
          {:ok, event_rows} <- query(db, "SELECT event_id,run_id,payload FROM events ORDER BY event_id"),
          :ok <- validate_recovery_events(event_rows, MapSet.new(run_ids)),
+         :ok <- validate_recovery_child_events(event_rows, run_maps),
          {:ok, linear_event_rows} <- query(db, "SELECT delivery_id,payload FROM linear_events ORDER BY delivery_id"),
          {:ok, linear_events} <- decode_recovery_linear_event_rows(linear_event_rows),
          {:ok, linear_task_rows} <- query(db, "SELECT issue_id,payload FROM linear_tasks ORDER BY issue_id"),
          {:ok, linear_tasks} <- decode_recovery_linear_task_rows(linear_task_rows) do
       {:ok,
        %{
-         runs: Enum.map(runs, fn {_id, run} -> run end),
+         runs: run_maps,
          linear: %{events: linear_events, tasks: linear_tasks},
          run_ids: run_ids,
          operation_ids: Enum.map(operation_rows, fn [id, _run_id, _payload] -> id end),
@@ -1947,6 +1950,76 @@ defmodule SymphonyElixir.WorkstreamStore do
       _row, _acc ->
         {:halt, {:error, :invalid_recovery_image}}
     end)
+  end
+
+  defp validate_recovery_child_events(rows, runs) do
+    with {:ok, expected} <- expected_recovery_child_events(runs),
+         child_rows <-
+           Enum.filter(rows, fn
+             [event_id, _run_id, _payload] when is_binary(event_id) -> String.starts_with?(event_id, "child-handoff/")
+             _row -> false
+           end),
+         true <- length(child_rows) == map_size(expected),
+         {:ok, actual} <- decode_recovery_child_event_rows(child_rows, expected),
+         true <- MapSet.new(actual) == MapSet.new(Map.to_list(expected)) do
+      :ok
+    else
+      _other -> {:error, :invalid_recovery_image}
+    end
+  end
+
+  defp expected_recovery_child_events(runs) do
+    Enum.reduce_while(runs, {:ok, %{}}, fn parent, {:ok, expected} ->
+      operations = parent[:operations]
+
+      child_operations =
+        if is_map(operations), do: Enum.filter(operations, fn {_id, operation} -> is_map(operation) and operation[:type] == :child end), else: []
+
+      Enum.reduce_while(child_operations, {:ok, expected}, fn {_attempt_id, operation}, {:ok, current} ->
+        intent = operation[:child_handoff]
+        child = if is_map(intent), do: Enum.find(runs, &(&1[:id] == intent[:child_run_id])), else: nil
+
+        if is_map(child) do
+          {parent_id, parent_event, child_id, child_event} = child_handoff_events(intent, child)
+          events = [{parent_id, parent[:id], parent_event}, {child_id, child[:id], child_event}]
+
+          if Enum.any?(events, fn {event_id, _run_id, _event} -> Map.has_key?(current, event_id) end) do
+            {:halt, {:error, :invalid_recovery_image}}
+          else
+            updated = Enum.reduce(events, current, fn {event_id, run_id, event}, acc -> Map.put(acc, event_id, {run_id, event}) end)
+            {:cont, {:ok, updated}}
+          end
+        else
+          {:halt, {:error, :invalid_recovery_image}}
+        end
+      end)
+      |> case do
+        {:ok, updated} -> {:cont, {:ok, updated}}
+        error -> {:halt, error}
+      end
+    end)
+  rescue
+    _error -> {:error, :invalid_recovery_image}
+  end
+
+  defp decode_recovery_child_event_rows(rows, expected) do
+    Enum.reduce_while(rows, {:ok, []}, fn
+      [event_id, run_id, payload], {:ok, events} ->
+        case {Map.fetch(expected, event_id), decode_recovery_term(payload)} do
+          {{:ok, {^run_id, expected_event}}, {:ok, event}} when event === expected_event ->
+            {:cont, {:ok, [{event_id, {run_id, event}} | events]}}
+
+          _other ->
+            {:halt, {:error, :invalid_recovery_image}}
+        end
+
+      _row, _acc ->
+        {:halt, {:error, :invalid_recovery_image}}
+    end)
+    |> case do
+      {:ok, events} -> {:ok, Enum.reverse(events)}
+      error -> error
+    end
   end
 
   defp decode_recovery_linear_event_rows(rows) do

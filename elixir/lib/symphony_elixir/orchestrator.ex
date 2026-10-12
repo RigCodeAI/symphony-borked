@@ -2513,6 +2513,8 @@ defmodule SymphonyElixir.Orchestrator do
           workers: %{},
           cancellations: %{},
           publications: %{},
+          child_proofs: %{},
+          child_proof_timer: nil,
           validation_checks: %{},
           validation_check_timer: nil,
           cleanup: %{jobs: %{}, timer: nil},

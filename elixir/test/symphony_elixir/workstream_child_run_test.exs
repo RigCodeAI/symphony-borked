@@ -36,6 +36,61 @@ defmodule SymphonyElixir.WorkstreamChildRunTest do
     assert map_size(waiting.operations) == 1
   end
 
+  test "recovery inspection validates exact child lineage and rejects a detached waiting operation" do
+    {waiting, linked, intent} = recovery_link()
+
+    assert :ok = WorkstreamChild.inspect_recovery_links([waiting, linked])
+
+    detached_parent = Map.delete(waiting, :child_handoff)
+    assert {:error, :invalid_child_recovery_link} = WorkstreamChild.inspect_recovery_links([detached_parent, linked])
+
+    crossed_child = put_in(linked.parent_handoff.fingerprint, String.duplicate("f", 64))
+    assert {:error, :invalid_child_recovery_link} = WorkstreamChild.inspect_recovery_links([waiting, crossed_child])
+
+    assert intent.child_run_id == linked.id
+  end
+
+  test "recovery inspection correlates a historical child attempt through its operation" do
+    {waiting, linked, intent} = recovery_link()
+    publication_id = String.duplicate("a", 64)
+    merge_commit = String.duplicate("b", 40)
+
+    proof = %{
+      version: 1,
+      run_id: linked.id,
+      task_id: linked.task_id,
+      repository: "RigCodeAI/rig",
+      publication_id: publication_id,
+      merge: %{commit: merge_commit},
+      retained_outputs_complete: true
+    }
+
+    attempt = %{
+      List.last(waiting.attempts)
+      | status: :completed,
+        result: %{
+          status: :ok,
+          evidence: %{"child_run_id" => linked.id, "merge" => %{"commit" => merge_commit}}
+        },
+        gate: :passed,
+        gate_detail: %{child_run_id: linked.id, publication_id: publication_id, merge_commit: merge_commit}
+    }
+
+    operation = Map.merge(waiting.operations[intent.parent_attempt_id], %{status: :completed, completion_proof: proof})
+
+    parent =
+      waiting
+      |> Map.put(:status, :ready)
+      |> Map.put(:phase, :queued)
+      |> Map.put(:stage_id, "re-evaluate")
+      |> Map.put(:current_attempt_id, nil)
+      |> Map.put(:attempts, [attempt])
+      |> Map.put(:operations, %{intent.parent_attempt_id => operation})
+
+    completed_child = %{linked | status: :complete}
+    assert :ok = WorkstreamChild.inspect_recovery_links([parent, completed_child])
+  end
+
   test "matching result identity and child completion do not by themselves finish the parent stage" do
     assert {:ok, waiting, linked, intent} = WorkstreamRun.begin_child(parent(), child())
     completed_child = %{linked | status: :complete}
@@ -117,5 +172,18 @@ defmodule SymphonyElixir.WorkstreamChildRunTest do
       branch: "cycle/test-child",
       codex_command: "never-executed"
     )
+  end
+
+  defp recovery_link do
+    assert {:ok, waiting, linked, intent} = WorkstreamRun.begin_child(parent(), child())
+
+    pinned_child =
+      linked.definition
+      |> Map.put(:version, 1)
+      |> Map.put(:input_values, %{"task" => {:mapped_parent_input, "approved-gap"}})
+
+    waiting = put_in(waiting.definition.stages["capability-fix"].child_definition, pinned_child)
+    linked = Map.update!(linked, :definition, &Map.put(&1, :version, 1))
+    {waiting, linked, intent}
   end
 end

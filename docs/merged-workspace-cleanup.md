@@ -212,6 +212,9 @@ the temporary main workspace and leave the review checkout retained.
 
 Warnings-as-errors compilation, full formatting and public specs passed in the
 same immutable image documented below. All 30 executor source pins remain present.
+The strict deployment helper executor pin is refreshed from the same complete
+30-source union; its lifecycle, child and validation pins are unchanged. The
+helper still rejects saved runs with incompatible policy and never rewrites them.
 The new completion seal binds the contained-preparation result fields from PR29;
 no broker deployment, live review-directory enrollment or deletion is qualified.
 Earlier fixture setup failures were fixed before the final passing run. Broad

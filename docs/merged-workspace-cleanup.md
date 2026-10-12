@@ -34,13 +34,20 @@ explicit registration contract. Current-root changes and old service-policy pins
 also retain work; stored pins are never rewritten to match a new build.
 
 The coordinator records a durable `service_completion` attestation only after
-recomputing an authenticated `candidate_validation` or `github_validation` gate.
-The seal binds the run/task, pinned policy/definitions/execution, stage, attempt,
-result and gate. Cleanup authenticates it with the service-only validation key;
+recomputing an authenticated `candidate_validation`, `github_validation`,
+`review_checkout` or `review_publication` gate during active completion.
+Version 2 seals bind the run/task, pinned policy/definitions/execution, stage,
+attempt, result, gate, authenticated candidate context, external-worker identity
+and exact input producer identities. Captured inputs remain fixed when later
+attempts replace the current output map. Legacy version 1 seals remain readable
+only for their original context-free validation contract, without an external
+worker. Cleanup authenticates seals with the service-only validation key;
 it does not require an open PR or a still-present candidate checkout. Invalid
 receipts and observations produce no seal. Authenticated failed candidate checks
 can also record completion, without becoming passing validation decisions.
 Unknown agents and executable checks still require fresh contained termination.
+An external operation on a sealed service check also requires fresh containment
+proof; the service seal cannot replace it.
 Every executed attempt must retain its matching operation record; an absent
 record is uncertainty, not evidence of termination.
 Old runs with no seal retain their directories; there is no retrofit.
@@ -56,7 +63,8 @@ an overlapping path during observation or deletion.
 ## Merge, archive and deletion
 
 Only a completed passing publish attempt with the matching durable publication
-intent qualifies. The current GitHub response must name the same Rig PR, branch
+intent qualifies. Its context must be current and match the exact archived
+validation attempt. The current GitHub response must name the same Rig PR, branch
 and candidate head, target `main`, and report a merge commit, time and a user
 account merger. Closed-but-unmerged PRs, changed heads, missing metadata, Bot
 accounts and bot login suffixes deny cleanup. Symphony performs read-only GitHub
@@ -113,6 +121,7 @@ The result schema is:
   task_id: "recorded task",
   publication_id: "recorded publication digest",
   publication_attempt_id: "recorded publish attempt",
+  candidate_context: %{candidate_context_id: nil, validation_base: "pinned base", repair_parent_sha: nil, lineage_sha256: "digest"},
   repository: "RigCodeAI/rig",
   pr: %{number: 123, url: "https://github.com/RigCodeAI/rig/pull/123"},
   published_head: "40-character SHA",
@@ -145,13 +154,26 @@ A version 2 reference adds `version: 2` and `kind`. Its JSON payload is:
 ```
 
 The service derives the type from the pinned producer stage and exact output
-identity. Supported types are `agent_metadata`, `command_log`,
-`candidate_validation`, `github_validation`, `publication` and `inline` numeric,
+identity. Supported types are `agent_metadata`, `repair_agent_metadata`,
+`review_agent_report`, `command_log`, `candidate_validation`, `github_validation`,
+`review_checkout`, `review_publication`, `publication` and `inline` numeric,
 boolean or null data. Agent metadata removes the disposable workspace locator
 and accepts only the Runner's known ID/model fields. Service validation outputs
 require the authenticated completion seal. Unknown fields and output identities
 fail closed. Redacted projections retain their original source digest without
 claiming byte equality to secret-bearing originals.
+
+Ordinary metadata may include the Runner's pinned `validation_base`. Repair
+metadata must match the attempt's authenticated context ID, validation base and
+prior published parent, with its bounded feedback fields. Historical context
+reads verify signed lineage and the attempt's original position; they never
+change the current selector or authorize execution of an older candidate.
+Reviewer JSON must match the exact authenticated submitted report, reviewer IDs
+and captured checkout input. The report retains text and validated source
+annotations without exporting source files. Checkout projections remove their
+disposable root, workspace and source-workspace locators. These reads need no surviving checkout.
+Review directories remain unregistered and retained until the broker ownership
+contract is qualified; typed outputs do not authorize their deletion.
 
 `command_log` retains actual stdout text. A printed bundle or report filename
 remains text; it grants no file handle and promises no file contents. Candidate
@@ -178,7 +200,24 @@ must stop new observation/deletion scheduling and the final ownership check.
 The source checks a non-nil `workstreams.capture`. DEV-242's capture APIs are
 merged in PR21; combined qualification of this follow-up remains pending.
 
-## Verification
+## Review-output follow-up verification
+
+This follow-up is based on merged PR29 `1362cb463a0d65ea82a50b08b43afc4fdf2ffb45`.
+The final isolated run passed 130 tests with zero failures (seed `658343`). It
+covered review outputs, candidate context history/tampering, cleanup, authenticated
+validation, review execution, durable runs, capture ownership and child result
+consumers. The new tests use real stage completion, SQLite restart and retained
+artifact bytes with synthetic review and root-upload receipts. They remove only
+the temporary main workspace and leave the review checkout retained.
+
+Warnings-as-errors compilation, full formatting and public specs passed in the
+same immutable image documented below. All 30 executor source pins remain present.
+The new completion seal binds the contained-preparation result fields from PR29;
+no broker deployment, live review-directory enrollment or deletion is qualified.
+Earlier fixture setup failures were fixed before the final passing run. Broad
+hosted CI is reviewed separately; source checks do not establish live acceptance.
+
+## Earlier validation-output verification
 
 The service-completion and version 2 output follow-up is qualified on merged
 DEV-239 revision `9fb13f8acf701f444e7a8a6f6e323193632a9d17` and DEV-242 revision

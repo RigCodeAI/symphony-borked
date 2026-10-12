@@ -173,6 +173,62 @@ defmodule SymphonyElixir.WorkstreamCleanupTest do
     assert {:ok, _} = WorkstreamCleanup.merge_proof(planned, c.options)
   end
 
+  test "a service seal never waives fresh external-worker termination", c do
+    run = service_completed(c)
+    id = hd(run.attempts).id
+    run = put_in(run.operations[id][:external_process], %{"kind" => "systemd-unit", "operation_id" => id})
+    run = ServiceCheckCompletion.record(%{run | status: :executing, current_attempt_id: id})
+    run = %{run | status: :complete, current_attempt_id: nil}
+    assert ServiceCheckCompletion.verified?(run, id)
+
+    for state <- [:unknown, :running] do
+      opts = Keyword.put(c.options, :cleanup_worker_reconciler, fn _, _ -> state end)
+      assert {:error, :worker_termination_unknown} = WorkstreamCleanup.prepare(run, opts)
+    end
+
+    assert {:ok, _} = WorkstreamCleanup.prepare(run, c.options)
+    assert File.dir?(c.workspace)
+  end
+
+  test "terminal snapshots cannot mint a service completion retrospectively", c do
+    run = service_completed(c)
+    id = hd(run.attempts).id
+    run = update_in(run.operations[id], &Map.delete(&1, :service_completion))
+    terminal = %{run | current_attempt_id: id}
+    assert ServiceCheckCompletion.record(terminal) == terminal
+    refute ServiceCheckCompletion.verified?(terminal, id)
+  end
+
+  test "publication and archived validation must belong to the current context", c do
+    validation = hd(c.run.attempts)
+    publication = List.last(c.run.attempts)
+
+    for changed <- [
+          %{c.run | current_candidate_context_id: "unknown-context"},
+          %{c.run | attempts: Enum.map(c.run.attempts, fn a -> if a.id == publication.id, do: Map.put(a, :candidate_context_id, "unknown-context"), else: a end)},
+          %{c.run | attempts: Enum.map(c.run.attempts, fn a -> if a.id == validation.id, do: Map.put(a, :candidate_context_id, "unknown-context"), else: a end)}
+        ] do
+      assert {:error, _} = WorkstreamCleanup.merge_proof(changed, c.options)
+      assert {:error, _} = WorkstreamCleanup.prepare(changed, c.options)
+    end
+
+    assert File.dir?(c.workspace)
+  end
+
+  test "ordinary Cloud Agent metadata accepts only its pinned validation base", c do
+    stage = %{id: "implement", type: :agent, outputs: ["candidate"]}
+    base = String.duplicate("b", 40)
+    run = c.run
+    run = put_in(run.execution[:validation_base], base)
+    value = %{"thread_id" => "thread-1", "workspace" => c.workspace, "validation_base" => base}
+    valid = add_output(run, stage, value)
+    assert {:ok, %{"kind" => "agent_metadata", "value" => %{"validation_base" => ^base}}} = WorkstreamOutputs.projection(valid, "candidate")
+
+    for changed <- [Map.put(value, "validation_base", String.duplicate("f", 40)), Map.put(value, "repair_explanation", "unbound repair")] do
+      assert {:error, :workspace_outputs_not_retained} = WorkstreamOutputs.projection(add_output(run, stage, changed), "candidate")
+    end
+  end
+
   test "untyped files and producer identity changes cannot be preserved as metadata", c do
     stage = %{id: "implement", type: :agent, outputs: ["candidate"]}
 
@@ -486,9 +542,9 @@ defmodule SymphonyElixir.WorkstreamCleanupTest do
     run = put_in(run.execution[:validation_archive], archive)
     run = put_in(run.definition.stages["validate"][:gate], %{evaluator: :candidate_validation})
     run = update_in(run.operations[id], &Map.delete(&1, :external_process))
-    run = %{run | attempts: Enum.map(run.attempts, fn a -> if a.id == id, do: Map.put(a, :gate_detail, %{verified: true}), else: a end), current_attempt_id: id}
+    run = %{run | status: :executing, attempts: Enum.map(run.attempts, fn a -> if a.id == id, do: Map.put(a, :gate_detail, %{verified: true}), else: a end), current_attempt_id: id}
     run = ServiceCheckCompletion.record(run)
-    %{run | current_attempt_id: nil}
+    %{run | status: :complete, current_attempt_id: nil}
   end
 
   defp add_output(run, stage, value) do

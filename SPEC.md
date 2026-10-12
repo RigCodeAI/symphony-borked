@@ -2706,3 +2706,37 @@ changed wait/artifact identity or stopped ownership MUST retain but not consume
 the reply. Stage completion remote verification MUST run outside the coordinator;
 the coordinator authenticates the domain-separated service seal and current local
 proof, with a bounded observation age. GitHub reads MUST NOT block reply callbacks.
+
+## 24. Optional local owner capture
+
+The durable manual coordinator MAY expose a service-owned local capture action
+through trusted startup options. It MUST NOT expose capture to candidate code or
+treat it as restoration, publication, worker fencing or a gate verdict.
+
+Admission MUST reject active or unresolved workers, outgoing publication,
+cancellation, Linear activity, validation-check work and active or uncertain cleanup
+jobs. Terminal status alone does not prove an external operation settled.
+
+The coordinator MUST hold advancement and reject new mutating calls without
+acknowledging unpersisted input. Both SQLite owners MUST enforce the same hold on
+their write handlers, including direct evidence producers and future child-run
+commits. The evidence outbox MUST be empty and the Evidence snapshots MUST match
+the saved runs before capture starts. The original exclusive Store owner MUST
+retain its connection and lock throughout capture. The coordinator MUST cancel
+and invalidate its periodic validation timer while held and rearm exactly one
+periodic chain after release. Expired or stale tokens MUST NOT restart it while
+held or create another chain after release. Immediate reconciliation wakes MUST
+remain separate from periodic scheduling.
+
+Snapshots MUST come from those existing connections into fixed private files
+outside issue workspaces. Completion MUST verify both standalone copies and
+record their digests, schema versions, included identities and evidence watermark
+before writing the local manifest last. Partial or altered captures MUST reject;
+an ID MUST NOT be reused for a different boundary. Stale tokens and caller timeout
+MUST NOT release a newer hold or an outstanding SQLite operation.
+
+The local manifest MUST say `restore_ready: false`. A release revision supplied
+by the operator MUST be identified as an operator pin, not proof of the deployed
+binary. Provider reconciliation, remote archival, old-writer fencing, compatible
+payload validation and a dispatch-held restore remain separate requirements.
+See [the capture source and qualification boundary](docs/dev-242-capture-barrier.md).

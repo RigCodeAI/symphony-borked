@@ -1,5 +1,5 @@
 defmodule SymphonyElixir.ValidationCheckTest do
-  use ExUnit.Case, async: false
+  use SymphonyElixir.TestSupport
   alias SymphonyElixir.{Evidence, Validation, ValidationPolicy, ValidationCheck, WorkstreamRun, WorkstreamStore}
 
   # Authenticated synthetic contract receipts and simulated GitHub only.

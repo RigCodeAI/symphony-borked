@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, Evidence, StatusDashboard, Tracker, WorkstreamCleanup, WorkstreamRun, WorkstreamRunner, WorkstreamStore}
+  alias SymphonyElixir.{AgentRunner, BackupCapture, Config, Evidence, StatusDashboard, Tracker, WorkstreamCleanup, WorkstreamRun, WorkstreamRunner, WorkstreamStore}
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.Linear.Coordinator, as: LinearCoordinator
 
@@ -98,6 +98,58 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @impl true
+  def handle_info({:backup_capture_result, token, pid, result}, %{workstreams: %{capture: %{token: token, pid: pid} = capture}} = state) do
+    Process.demonitor(capture.ref, [:flush])
+    {:noreply, finish_backup_capture(state, capture, result)}
+  end
+
+  def handle_info({:backup_capture_result, _token, _pid, _result}, state), do: {:noreply, state}
+
+  def handle_info({:DOWN, ref, :process, pid, _reason}, %{workstreams: %{capture: %{ref: ref, pid: pid} = capture}} = state) do
+    GenServer.cast(state.workstreams.store, {:capture_settle, capture.token})
+    GenServer.cast(capture.evidence_server, {:capture_settle, capture.token})
+    {:noreply, put_in(state.workstreams.capture, Map.put(capture, :settled, MapSet.new()))}
+  end
+
+  def handle_info({:backup_capture_settled, token, kind, pid}, %{workstreams: %{capture: %{token: token, settled: settled} = capture}} = state)
+      when kind in [:store, :evidence] do
+    expected = if kind == :store, do: state.workstreams.store, else: GenServer.whereis(capture.evidence_server)
+
+    if pid == expected do
+      settled = MapSet.put(settled, kind)
+
+      if MapSet.size(settled) == 2,
+        do: {:noreply, finish_backup_capture(state, capture, {:error, :capture_worker_failed})},
+        else: {:noreply, put_in(state.workstreams.capture.settled, settled)}
+    else
+      {:noreply, state}
+    end
+  end
+
+  def handle_info({:backup_capture_settled, _token, _kind, _pid}, state), do: {:noreply, state}
+
+  def handle_info(message, %{workstreams: %{capture: capture}} = state)
+      when not is_nil(capture) and message in [:advance_workstreams, :linear_process, :linear_tick, :observe_stopped_publications, :reconcile_validation_checks, :reconcile_merged_cleanup],
+      do: {:noreply, state}
+
+  def handle_info(
+        {ref, {:validation_stage_verified, _id, _attempt, _pid, _artifacts, _result}},
+        %{workstreams: %{capture: capture}} = state
+      )
+      when not is_nil(capture) and is_reference(ref),
+      do: {:noreply, state}
+
+  def handle_info(
+        {ref, {:validation_observation, _id, _artifacts, _result}},
+        %{workstreams: %{capture: capture}} = state
+      )
+      when not is_nil(capture) and is_reference(ref),
+      do: {:noreply, state}
+
+  def handle_info({:validation_checks_tick, _token}, %{workstreams: %{capture: capture}} = state)
+      when not is_nil(capture),
+      do: {:noreply, state}
+
   def handle_info(message, %{polling_enabled: false} = state) when message in [:tick, :run_poll_cycle], do: {:noreply, state}
   def handle_info({:tick, _token}, %{polling_enabled: false} = state), do: {:noreply, state}
 
@@ -1519,6 +1571,18 @@ defmodule SymphonyElixir.Orchestrator do
   @spec reconcile_workstreams(GenServer.server()) :: :ok
   def reconcile_workstreams(server), do: GenServer.call(server, :reconcile_workstreams)
 
+  @doc "Starts a local owner capture using trusted startup options; never authorizes restore."
+  @spec capture_backup(GenServer.server(), String.t()) :: {:ok, map()} | {:error, term()}
+  def capture_backup(server, id), do: GenServer.call(server, {:backup_capture, id}, 30_000)
+
+  @spec backup_capture_status(GenServer.server(), String.t()) :: {:ok, map()} | {:error, term()}
+  def backup_capture_status(server, id), do: GenServer.call(server, {:backup_capture_status, id})
+
+  @doc "Shared owner predicate for publication and validation-check callbacks."
+  @spec capture_held?(map()) :: boolean()
+  def capture_held?(%{workstreams: %{capture: capture}}), do: not is_nil(capture)
+  def capture_held?(_state), do: false
+
   @doc "True while cleanup owns an active job or a deletion outcome remains uncertain."
   @spec cleanup_active_or_uncertain?(map()) :: boolean()
   def cleanup_active_or_uncertain?(%{workstreams: nil}), do: false
@@ -1534,6 +1598,43 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @impl true
+  def handle_call({:backup_capture, id}, _from, state), do: begin_backup_capture(state, id)
+
+  def handle_call({:backup_capture_status, id}, _from, %{workstreams: workstreams} = state) when not is_nil(workstreams) do
+    result =
+      case workstreams.capture do
+        %{id: ^id, error: error} -> {:error, error}
+        %{id: ^id, settled: _} -> {:error, :capture_worker_failed_held}
+        %{id: ^id} -> {:ok, %{id: id, status: :capturing, restore_ready: false}}
+        _ -> Map.get(workstreams.capture_results, id, {:error, :capture_not_found})
+      end
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:backup_capture_status, _id}, _from, state), do: {:reply, {:error, :durable_workstreams_disabled}, state}
+
+  def handle_call(message, _from, %{workstreams: %{capture: capture}} = state)
+      when not is_nil(capture) and is_tuple(message) and
+             elem(message, 0) in [
+               :linear_event,
+               :queue_workstream,
+               :answer_workstream,
+               :workstream_question,
+               :workstream_process,
+               :workstream_wait,
+               :workstream_publication_check,
+               :workstream_publication_intent,
+               :validation_monitor_owner,
+               :validation_stage_verifier_owner,
+               :workstream_cleanup_check
+             ],
+      do: {:reply, {:error, :capture_in_progress}, state}
+
+  def handle_call(message, _from, %{workstreams: %{capture: capture}} = state)
+      when not is_nil(capture) and message in [:step_workstreams, :reconcile_workstreams],
+      do: {:reply, {:error, :capture_in_progress}, state}
+
   def handle_call({:linear_event, event}, _from, state) do
     case LinearCoordinator.receive_event(state, event, &stop_linear_workstream/2) do
       {:ok, updated, reply} -> {:reply, reply, updated}
@@ -2366,6 +2467,8 @@ defmodule SymphonyElixir.Orchestrator do
               publications: %{},
               validation_checks: %{},
               cleanup: %{jobs: %{}, timer: nil},
+              capture: nil,
+              capture_results: %{},
               opts: opts
             }
 
@@ -2378,11 +2481,231 @@ defmodule SymphonyElixir.Orchestrator do
   defp durable_run(%{workstreams: nil}, _id), do: nil
   defp durable_run(state, id), do: Map.get(state.workstreams.runs, id)
 
+  defp begin_backup_capture(%{workstreams: nil} = state, _id),
+    do: {:reply, {:error, :durable_workstreams_disabled}, state}
+
+  defp begin_backup_capture(%{workstreams: %{capture: %{id: id, error: error}}} = state, id),
+    do: {:reply, {:error, error}, state}
+
+  defp begin_backup_capture(%{workstreams: %{capture: %{id: id, settled: _}}} = state, id),
+    do: {:reply, {:error, :capture_worker_failed_held}, state}
+
+  defp begin_backup_capture(%{workstreams: %{capture: %{id: id}}} = state, id),
+    do: {:reply, {:ok, %{id: id, status: :capturing, restore_ready: false}}, state}
+
+  defp begin_backup_capture(state, id) do
+    with :ok <- capture_admission(state),
+         {:ok, config} <- capture_config(state),
+         {:ok, plan} <- BackupCapture.prepare(config.root, id, capture_workspace_roots(state, config)) do
+      launch_backup_capture(state, plan, config)
+    else
+      {:completed, manifest} ->
+        updated = put_in(state.workstreams.capture_results[id], {:ok, manifest})
+        {:reply, {:ok, manifest}, updated}
+
+      {:error, _} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  defp capture_config(state) do
+    case Keyword.get(state.workstreams.opts, :backup_capture) do
+      %{root: root, service_revision: revision, workspace_roots: roots, cleanup: cleanup_mode} = config
+      when is_binary(root) and is_binary(revision) and is_list(roots) and roots != [] and cleanup_mode in [:disabled, :enabled] ->
+        if Path.type(root) == :absolute and Regex.match?(~r/\A[a-f0-9]{40}([a-f0-9]{24})?\z/, revision) and
+             Enum.all?(roots, &(is_binary(&1) and Path.type(&1) == :absolute)) and
+             cleanup_mode == :enabled == cleanup_enabled?(state) do
+          server = Map.get(config, :evidence_server, Evidence)
+          if is_atom(server) or is_pid(server), do: {:ok, Map.put(config, :evidence_server, server)}, else: {:error, :capture_not_configured}
+        else
+          {:error, :capture_not_configured}
+        end
+
+      _ ->
+        {:error, :capture_not_configured}
+    end
+  end
+
+  defp capture_workspace_roots(state, config) do
+    config.workspace_roots ++
+      Enum.flat_map(state.workstreams.runs, fn {_id, run} ->
+        Enum.filter([run.workspace, run.execution[:workspace_root]], &is_binary/1)
+      end)
+  end
+
+  defp capture_admission(state) do
+    workstreams = state.workstreams
+    known_fields = [:store, :store_path, :runs, :workers, :cancellations, :publications, :cleanup, :opts, :capture, :capture_results, :validation_checks, :validation_check_timer]
+
+    cond do
+      not is_nil(workstreams.capture) -> {:error, :capture_in_progress}
+      state.polling_enabled or map_size(state.running) != 0 -> {:error, :capture_requires_durable_manual_mode}
+      map_size(workstreams.runs) > 128 -> {:error, :capture_inventory_limit}
+      cleanup_active_or_uncertain?(state) -> {:error, :capture_cleanup_active_or_uncertain}
+      Enum.any?(Map.keys(workstreams), &(&1 not in known_fields)) -> {:error, :capture_owner_integration_required}
+      map_size(workstreams.workers) != 0 or map_size(workstreams.cancellations) != 0 -> {:error, :capture_work_active}
+      map_size(Map.get(workstreams, :validation_checks, %{})) != 0 -> {:error, :capture_validation_active}
+      Enum.any?(workstreams.publications, fn {_id, job} -> is_reference(job[:ref]) end) -> {:error, :capture_publication_active}
+      not capture_linear_quiet?(state.linear) -> {:error, :capture_linear_unresolved}
+      Enum.any?(workstreams.runs, fn {_id, run} -> not capture_run_quiet?(run) end) -> {:error, :capture_operation_unresolved}
+      true -> :ok
+    end
+  end
+
+  defp capture_linear_quiet?(nil), do: true
+
+  defp capture_linear_quiet?(linear) do
+    is_nil(linear.job) and
+      Enum.all?(linear.tasks, fn {_id, task} ->
+        task.status in [:acknowledged, :stopped, :blocked] and is_nil(task[:pending_reassignment]) and
+          task[:error] != :linear_acknowledgement_pending and
+          Enum.all?(task[:publications] || %{}, fn {_key, publication} -> publication.status == :published end)
+      end)
+  end
+
+  defp capture_run_quiet?(run) do
+    run.status in [:ready, :waiting_for_answer, :complete, :blocked, :policy_blocked, :stopped] and
+      is_nil(run[:retry_operation_id]) and
+      Enum.all?(run.operations, fn {_id, operation} ->
+        settled =
+          operation.status in [:completed, :not_applied] or
+            (operation.status == :canceled and get_in(operation, [:cancellation, :termination]) == :terminated)
+
+        publication =
+          is_nil(operation[:publication_intent]) or
+            Enum.any?(run.attempts, &capture_publication_verified?(&1, operation.publication_intent)) or
+            capture_stopped_publication_verified?(run, operation)
+
+        settled and publication
+      end)
+  end
+
+  defp capture_publication_verified?(attempt, intent) do
+    evidence = get_in(attempt, [:result, :evidence]) || %{}
+
+    attempt.type == :publish and attempt.status == :completed and attempt.gate == :passed and
+      evidence["publication_id"] == intent[:publication_id] and evidence["candidate_sha"] == intent[:candidate_sha] and
+      evidence["evidence_revision"] == intent[:evidence_revision]
+  end
+
+  defp capture_stopped_publication_verified?(run, operation) do
+    observation = operation[:publication_observation] || %{}
+    intent = operation[:publication_intent] || %{}
+
+    run.status == :stopped and observation[:status] == :observed and
+      observation[:publication_id] == intent[:publication_id] and observation[:candidate_sha] == intent[:candidate_sha]
+  end
+
+  defp launch_backup_capture(state, plan, config) do
+    owner = self()
+    token = make_ref()
+
+    case Task.Supervisor.start_child(state.task_supervisor, fn ->
+           receive do
+             {:capture_start, ^token, store, metadata} ->
+               result = execute_backup_capture(store, config.evidence_server, token, plan, metadata)
+               send(owner, {:backup_capture_result, token, self(), result})
+           end
+         end) do
+      {:ok, pid} ->
+        ref = Process.monitor(pid)
+
+        with :ok <- WorkstreamStore.begin_capture(state.workstreams.store, token, pid, plan.state_path),
+             {:ok, inventory} <- WorkstreamStore.capture_inventory(state.workstreams.store, token),
+             :ok <- capture_inventory_matches(state, inventory),
+             :ok <- Evidence.begin_capture(config.evidence_server, token, pid, plan.evidence_path, Map.values(state.workstreams.runs)) do
+          metadata = capture_metadata(config, inventory)
+          capture = %{id: plan.id, token: token, pid: pid, ref: ref, evidence_server: config.evidence_server}
+          state = pause_capture_timers(state)
+          state = put_in(state.workstreams.capture, capture)
+          send(pid, {:capture_start, token, state.workstreams.store, metadata})
+          {:reply, {:ok, %{id: plan.id, status: :capturing, restore_ready: false}}, state}
+        else
+          {:error, _} = error ->
+            _ = release_capture_lease(fn -> WorkstreamStore.end_capture(state.workstreams.store, token) end)
+            _ = release_capture_lease(fn -> Evidence.end_capture(config.evidence_server, token) end)
+            Task.Supervisor.terminate_child(state.task_supervisor, pid)
+            Process.demonitor(ref, [:flush])
+            {:reply, error, state}
+        end
+
+      _ ->
+        {:reply, {:error, :capture_worker_unavailable}, state}
+    end
+  end
+
+  defp pause_capture_timers(state) do
+    if state.workstreams.cleanup.timer, do: Process.cancel_timer(state.workstreams.cleanup.timer)
+    state = put_in(state.workstreams.cleanup.timer, nil)
+
+    if timer = state.workstreams[:validation_check_timer], do: Process.cancel_timer(elem(timer, 0))
+    state = put_in(state.workstreams[:validation_check_timer], nil)
+
+    if state.linear do
+      if state.linear.timer, do: Process.cancel_timer(state.linear.timer)
+      put_in(state.linear.timer, nil)
+    else
+      state
+    end
+  end
+
+  defp capture_inventory_matches(state, inventory) do
+    if Enum.sort(Map.keys(state.workstreams.runs)) == inventory.run_ids,
+      do: :ok,
+      else: {:error, :capture_store_snapshot_mismatch}
+  end
+
+  defp capture_metadata(config, inventory) do
+    Map.merge(inventory, %{
+      service_revision: config.service_revision,
+      service_revision_source: "operator_pin",
+      service_version: to_string(Application.spec(:symphony_elixir, :vsn)),
+      policy: WorkstreamRun.policy(),
+      pending_evidence_outbox: 0
+    })
+  end
+
+  defp execute_backup_capture(store, evidence, token, plan, metadata) do
+    with {:ok, _state_snapshot} <- WorkstreamStore.snapshot_capture(store, token),
+         {:ok, evidence_snapshot} <- Evidence.snapshot_capture(evidence, token) do
+      BackupCapture.complete(plan, Map.merge(metadata, %{evidence_event_watermark: evidence_snapshot.event_watermark, evidence_bundles: evidence_snapshot.bundles}))
+    end
+  rescue
+    _ -> {:error, :capture_failed}
+  catch
+    _, _ -> {:error, :capture_source_unavailable}
+  end
+
+  defp finish_backup_capture(state, capture, result) do
+    with :ok <- release_capture_lease(fn -> WorkstreamStore.end_capture(state.workstreams.store, capture.token) end),
+         :ok <- release_capture_lease(fn -> Evidence.end_capture(capture.evidence_server, capture.token) end) do
+      state = put_in(state.workstreams.capture, nil)
+      state = put_in(state.workstreams.capture_results[capture.id], result)
+      state = schedule_validation_checks_tick(state)
+      send(self(), :advance_workstreams)
+      send(self(), :linear_tick)
+      send(self(), :observe_stopped_publications)
+      if cleanup_enabled?(state), do: send(self(), :reconcile_merged_cleanup)
+      if Map.has_key?(state.workstreams, :validation_checks), do: send(self(), :reconcile_validation_checks)
+      state
+    else
+      _ ->
+        state = put_in(state.workstreams.capture, Map.put(capture, :error, :capture_release_unconfirmed))
+        put_in(state.workstreams.capture_results[capture.id], {:error, :capture_release_unconfirmed})
+    end
+  end
+
+  defp release_capture_lease(fun) do
+    fun.()
+  catch
+    :exit, _ -> {:error, :capture_owner_unavailable}
+  end
+
   defp cleanup_enabled?(%{workstreams: nil}), do: false
   defp cleanup_enabled?(state), do: Keyword.get(state.workstreams.opts, :merged_cleanup, false) == true
 
   defp capture_holds_cleanup?(state),
-    do: (Map.get(state, :capture_hold) || state.workstreams[:capture_hold] || state.workstreams[:capture]) not in [nil, false]
+    do: capture_held?(state) or (Map.get(state, :capture_hold) || state.workstreams[:capture_hold]) not in [nil, false]
 
   defp cleanup_evidence_server(state), do: Keyword.get(state.workstreams.opts, :cleanup_evidence_server, Evidence)
 

@@ -14,6 +14,27 @@ defmodule SymphonyElixir.EvidenceTest do
     %{root: root, store: pid, opts: opts}
   end
 
+  test "capture blocks direct producers and flush and rejects stale tokens", c do
+    assert :ok = GenServer.stop(c.store)
+    assert {:ok, store} = Evidence.start_link(Keyword.put(c.opts, :capture_owner, self()))
+    original = run("run-1", "task-1")
+    assert :ok = Evidence.snapshot(original, "initial", %{kind: :queued}, store)
+    destination = Path.join(c.root, "evidence.sqlite")
+    token = make_ref()
+    assert :ok = Evidence.begin_capture(store, token, self(), destination, [original])
+    assert {:error, :capture_in_progress} = Evidence.snapshot(original, "later", %{kind: :queued}, store)
+    assert {:error, :capture_in_progress} = Evidence.artifact(original, "later", "bytes", store)
+    assert {:error, :capture_in_progress} = Evidence.retained(original, store)
+    assert {:error, :capture_in_progress} = GenServer.call(store, {:event, original.id, "later", %{}})
+    send(store, :flush)
+    assert {:ok, %{snapshot: %{schema: %{"user_version" => 1}}, bundles: [%{run_id: "run-1"}], event_watermark: 1}} = Evidence.snapshot_capture(store, token)
+    assert {:error, :capture_not_authorized} = Evidence.end_capture(store, make_ref())
+    assert :ok = Evidence.end_capture(store, token)
+    assert :ok = Evidence.artifact(original, "after", "bytes", store)
+    assert {:error, :capture_not_authorized} = Evidence.snapshot_capture(store, token)
+    assert :ok = GenServer.stop(store)
+  end
+
   test "redacts credentials and excludes hidden reasoning before database and bundle persistence", c do
     System.put_env("FACTORY_TEST_SECRET", "fixture-secret-12345")
     on_exit(fn -> System.delete_env("FACTORY_TEST_SECRET") end)

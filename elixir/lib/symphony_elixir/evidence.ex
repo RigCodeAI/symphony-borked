@@ -9,7 +9,7 @@ defmodule SymphonyElixir.Evidence do
   require Logger
 
   alias Exqlite.Sqlite3
-  alias SymphonyElixir.{Config, EvidenceRedaction, PathSafety, WorkstreamRun, WorkstreamStore}
+  alias SymphonyElixir.{BackupCapture, Config, EvidenceRedaction, PathSafety, WorkstreamRun, WorkstreamStore}
 
   @limit 10 * 1024 * 1024
   @identity_keys ~w(task_id definitions pinned_definitions agents policy agent_selection stage_agents)
@@ -321,6 +321,17 @@ defmodule SymphonyElixir.Evidence do
     end
   end
 
+  @doc "Holds evidence mutations for the configured coordinator's local capture."
+  @spec begin_capture(GenServer.server(), reference(), pid(), Path.t(), [map()]) :: :ok | {:error, term()}
+  def begin_capture(server, token, worker, destination, runs),
+    do: call(server, {:capture_begin, token, worker, destination, runs})
+
+  @spec snapshot_capture(GenServer.server(), reference()) :: {:ok, map()} | {:error, term()}
+  def snapshot_capture(server, token), do: GenServer.call(server, {:capture_snapshot, token}, :infinity)
+
+  @spec end_capture(GenServer.server(), reference()) :: :ok | {:error, term()}
+  def end_capture(server, token), do: GenServer.call(server, {:capture_end, token}, :infinity)
+
   @doc "Verifies the current archive bytes and exact expected sanitized run snapshot."
   @spec retained(map(), GenServer.server()) :: {:ok, map()} | {:error, atom()}
   def retained(run, server \\ __MODULE__), do: call(server, {:retained, report(run)})
@@ -345,14 +356,54 @@ defmodule SymphonyElixir.Evidence do
          true <- version in [0, 1],
          :ok <- Sqlite3.execute(db, @schema) do
       File.chmod!(Path.join(root, "index.sqlite"), 0o600)
-      Process.send_after(self(), :flush, 10_000)
-      {:ok, %{root: root, db: db, receipt_uid: Keyword.get(opts, :receipt_uid, 0)}}
+      timer = Process.send_after(self(), :flush, 10_000)
+      {:ok, %{root: root, db: db, receipt_uid: Keyword.get(opts, :receipt_uid, 0), flush_timer: timer, capture: nil, capture_owner: Keyword.get(opts, :capture_owner, SymphonyElixir.Orchestrator)}}
     else
       _ -> {:stop, :evidence_startup_failed}
     end
   end
 
   @impl true
+  def handle_call({:capture_begin, token, worker, destination, runs}, {caller, _}, %{capture: nil} = state)
+      when is_reference(token) and is_pid(worker) and is_binary(destination) and is_list(runs) do
+    if GenServer.whereis(state.capture_owner) == caller and capture_snapshots_match?(state, runs) do
+      if state.flush_timer, do: Process.cancel_timer(state.flush_timer)
+      ref = Process.monitor(caller)
+      capture = %{token: token, worker: worker, destination: destination, owner: caller, ref: ref}
+      {:reply, :ok, %{state | capture: capture, flush_timer: nil}}
+    else
+      {:reply, {:error, :capture_not_authorized}, state}
+    end
+  end
+
+  def handle_call({:capture_begin, _token, _worker, _destination, _runs}, _from, state),
+    do: {:reply, {:error, :capture_not_authorized}, state}
+
+  def handle_call({:capture_snapshot, token}, {caller, _}, %{capture: %{token: token, worker: caller, destination: path}} = state) do
+    result =
+      with {:ok, rows} <- query(state.db, "SELECT run_id FROM evidence_runs ORDER BY run_id", []),
+           {:ok, bundles} <- capture_bundles(state, rows),
+           {:ok, [[watermark]]} <- query(state.db, "SELECT COALESCE(MAX(seq),0) FROM evidence_events", []),
+           {:ok, snapshot} <- BackupCapture.snapshot(state.db, path) do
+        {:ok, %{snapshot: snapshot, event_watermark: watermark, bundles: bundles}}
+      end
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:capture_snapshot, _token}, _from, state), do: {:reply, {:error, :capture_not_authorized}, state}
+
+  def handle_call({:capture_end, token}, {caller, _}, %{capture: %{token: token, owner: caller, ref: ref}} = state) do
+    Process.demonitor(ref, [:flush])
+    {:reply, :ok, release_capture(state)}
+  end
+
+  def handle_call({:capture_end, _token}, _from, state), do: {:reply, {:error, :capture_not_authorized}, state}
+
+  def handle_call(message, _from, %{capture: capture} = state)
+      when not is_nil(capture) and is_tuple(message) and elem(message, 0) in [:snapshot, :event, :artifact, :retained],
+      do: {:reply, {:error, :capture_in_progress}, state}
+
   def handle_call({:snapshot, snapshot, event_id, event}, _from, state) do
     id = snapshot["id"]
     event = Map.merge(event, %{"run_id" => id, "stage_id" => snapshot["stage_id"], "attempt_id" => snapshot["current_attempt_id"], "snapshot" => snapshot})
@@ -534,6 +585,19 @@ defmodule SymphonyElixir.Evidence do
   def terminate(_reason, state), do: Sqlite3.close(state.db)
 
   @impl true
+  def handle_cast({:capture_settle, token}, %{capture: %{token: token, owner: owner}} = state) do
+    send(owner, {:backup_capture_settled, token, :evidence, self()})
+    {:noreply, state}
+  end
+
+  def handle_cast(_message, state), do: {:noreply, state}
+
+  @impl true
+  def handle_info({:DOWN, ref, :process, owner, _reason}, %{capture: %{ref: ref, owner: owner}} = state),
+    do: {:noreply, release_capture(state)}
+
+  def handle_info(:flush, %{capture: capture} = state) when not is_nil(capture), do: {:noreply, state}
+
   def handle_info(:flush, state) do
     case query(state.db, "SELECT run_id FROM evidence_runs", []) do
       {:ok, rows} ->
@@ -545,8 +609,43 @@ defmodule SymphonyElixir.Evidence do
         Logger.error("Private evidence index flush failed")
     end
 
-    Process.send_after(self(), :flush, 10_000)
-    {:noreply, state}
+    timer = Process.send_after(self(), :flush, 10_000)
+    {:noreply, %{state | flush_timer: timer}}
+  end
+
+  def handle_info(_message, state), do: {:noreply, state}
+
+  defp release_capture(state) do
+    timer = Process.send_after(self(), :flush, 10_000)
+    %{state | capture: nil, flush_timer: timer}
+  end
+
+  defp capture_snapshots_match?(state, runs) when length(runs) <= 128 do
+    with {:ok, rows} <- query(state.db, "SELECT run_id,snapshot FROM evidence_runs ORDER BY run_id", []) do
+      expected = Enum.map(runs, fn run -> {run.id, report(run)} end) |> Enum.sort()
+      actual = Enum.map(rows, fn [id, snapshot] -> {id, Jason.decode!(snapshot)} end)
+      expected == actual
+    else
+      _ -> false
+    end
+  rescue
+    _ -> false
+  end
+
+  defp capture_snapshots_match?(_state, _runs), do: false
+
+  defp capture_bundles(state, rows) do
+    if length(rows) > 128, do: {:error, :capture_inventory_limit}, else: export_capture_bundles(state, rows)
+  end
+
+  defp export_capture_bundles(state, rows) do
+    Enum.reduce_while(rows, {:ok, []}, fn [id], {:ok, entries} ->
+      with {:ok, data} <- bundle(state, id), {:ok, revision} <- export(state, data) do
+        {:cont, {:ok, entries ++ [%{run_id: id, revision: revision}]}}
+      else
+        _ -> {:halt, {:error, :capture_evidence_export_failed}}
+      end
+    end)
   end
 
   defp view(state, id) do

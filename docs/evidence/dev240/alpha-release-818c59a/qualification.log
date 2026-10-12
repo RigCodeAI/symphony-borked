@@ -1,0 +1,15 @@
+Compiling 61 files (.ex)
+Compiling 5 files (.ex)
+Generated symphony_elixir app
+specs.check: all public functions have @spec or exemption
+Compiling 61 files (.ex)
+warning: mtime (modified time) for "/workspace/elixir/lib/symphony_elixir/validation.ex" was set to the future, resetting to now
+Compiling 5 files (.ex)
+Generated symphony_elixir app
+Running ExUnit with seed: 240, max_cases: 4
+Excluding tags: [:validation_docker]
+
+............................................................................................................................................................................
+Finished in 64.1 seconds (2.5s async, 61.6s sync)
+172 tests, 0 failures
+Combined alpha release pins verified: {"policy":{"version":1,"child_sha256":"a598793bd67ae523b441445143c548b0ed28e9572c471196f3f7291e20b465d5","executor_sha256":"87d9bc93c5db6b5c1afd01529a7dff35982798727a2b484ff71b527446f5643e","gate_policy":"exit-status-v1","lifecycle_sha256":"96b3f754fae20657a74993320094ab5213735a84157f6022915099babc671545","validation_sha256":"47a77cb57082970ce8f6ca5515b327fc49c31a68a19482fff07893d93efc9cbf"},"service_revision":"818c59a1a9f93479cff2048ec343c3c6745e33cb","review_preparation_command_sha256":"e9484451418b48094ace5c5694ff396733c5e2929c0f5e65b35620ed2ec06a25","candidate_producer_command_sha256":"a7bf9930b1e99665d598a30c94db43896d9056a3aaeaf28347d5a1a12a1a1ed9","workstream_file_sha256":"0e551ceee5a7ab33fd47f62b2932e4522ecbc92151a33f7bf8983aff99df9786","default_cloud_file_sha256":"78c12b3df8f0631f8c20a4b8dc1679093cd19804e8b376ae2589d5dbe18aef9c","default_review_file_sha256":"2f8ce08aba7db44e17731452a33fd0f87c72423c000f59d984350f4e9e3b7652"}

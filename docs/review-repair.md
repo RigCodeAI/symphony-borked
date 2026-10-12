@@ -113,11 +113,16 @@ workflow while Symphony handles their submitted review findings. Keep the existi
 feedback owner for other branches. The Rig workflow change and ownership cutover
 must be reviewed and released together; this source increment does not modify it.
 
-The live pilot must demonstrate a real valid inline review, a validated repair on
-the same PR, a new-head review, stale/malformed rejection, duplicate/restart recovery
-and the three-round/disagreement human boundary. Source tests are contract evidence
-only. Review checkouts currently remain retained; extending merged cleanup to their
-roots and typed review outputs requires the cleanup owner's qualified contract.
+Automated review and repair are required for the first alpha. Its minimum accepted
+flow is **delegate a Linear ticket → Cloud Agent implementation → validated PR →
+separate review agent → automatic fix on the same PR → fresh validation and review
+→ ready for human merge**. PR creation alone does not complete the demo.
+
+Keep one existing worker and retain all workspaces. Recovery exercises, scaling,
+Coverage Factory scoring and automatic cleanup are deferred. Existing stale-result,
+identity, validation and three-round/disagreement guards remain enforced; source
+tests do not establish a live review/fix demo. DEV-240 remains In Progress until
+the live minimum is accepted; deferred work must not replace that minimum.
 
 ## Initial source qualification
 
@@ -224,44 +229,123 @@ retained. The reviewer model subsequently receives only the completed checkout.
 This is a source capability. Unit-property derivation tests do not prove that a
 systemd unit actually enforces these permissions on the deployed worker.
 
-### Activation order and exact human actions
+### First-alpha setup and exact human actions
 
-1. The organization owner creates a private **Rig Factory Review** GitHub App,
-   installs it only on `RigCodeAI/rig`, and grants Contents read and Pull requests
-   write (Metadata read is automatic). Record its App/installation IDs and verified
-   bot login, distinct from publisher and validation identities. Generate its RSA
-   key through the approved coordinator secret route. Place the regular key file
-   with mode `0600` outside worker, reviewer and validator roots. Do not copy key
-   bytes to chat, Git or Terraform state. In the protected workflow, set `review`
-   fields `app_id`, `installation_id`, and `private_key_path` to that actual file.
-2. The release owner approves a maintenance window for one exact coordinator,
-   broker, producer and protected configuration revision. Before replacement,
-   reconcile every active or unknown worker identity; fence scheduling and prove
-   exact termination where required. Retain old pinned runs and directories. Set
-   the root-owned preparation command hash from that packaged release, with the
-   existing producer hash, release identity and containment receipt preserved.
-3. On the intended worker, qualify real systemd preparation: inspect its actual
-   command, environment and mount grants; prove source/siblings/home/cache/key
-   writes fail; prove final/staging writes succeed; exercise interruption, duplicate
-   preparation, cross-task/symlink tampering, restart and cancellation. Save redacted
-   unit identity, journal and cgroup termination receipts. Qualify the configured
-   DefaultReview model, effort, subscription account and observed effective runtime.
-4. Before enabling any factory fix dispatch, including the repair pilot, the Rig
-   feedback owner adds this condition
-   to the existing `dispatch` job in `.github/workflows/codex-pr-feedback.yml`:
-   `!startsWith(github.event.pull_request.head.ref, 'cycle/factory-') &&`.
-   Review and release that exclusion with Symphony activation so only one owner
-   can push factory fixes; other branches keep their existing owner. The workflow
-   was read on 2026-10-12; this source PR does not change Rig. Verify the trusted
-   `factory/validation` check is required and passed for the exact pilot head
-   before review or repair dispatch. Revalidate each new head before its next review;
-   preserve the required check before human merge.
+These are requirements for an approved rollout, not authorization to change cloud
+resources, access, budgets, secrets or Rig workflows. Reuse the merged review code
+and one existing worker. DEV-238 owns publication; DEV-239 owns trusted validation
+and its GitHub check/protection setup. The coordinator selects one reviewed release
+containing their integration and the review service-completion support. Automatic
+cleanup stays disabled (`merged_cleanup` is omitted or false).
 
-5. The cleanup owner completes sealed typed review output archival and private-leaf
-   ownership/termination checks. The Coverage Factory owner supplies an approved
-   disposable PR and frozen review-quality oracle. Run a real inline review,
-   same-PR repair, new-head validation/review, stale/malformed rejection,
-   duplicate/restart retry, and three-round/disagreement escalation. A human merges.
+1. **Organization owner: create and install the separate reviewer App.** Open
+   [RigCodeAI new GitHub App](https://github.com/organizations/RigCodeAI/settings/apps/new).
+   Use name **Rig Factory Review**, homepage `https://github.com/RigCodeAI/symphony`,
+   no user OAuth request/device flow, webhook **Active** unchecked, and **Only on
+   this account**. Repository permissions: **Contents: Read-only**, **Pull requests:
+   Read & write**, automatic **Metadata: Read-only**; other permissions stay **No
+   access**. Choose **Install App → RigCodeAI → Only select repositories → rig**.
+   Record App ID, installation ID from its installation page, App slug and verified
+   bot login; these must differ from publisher and validation identities. Follow
+   [GitHub registration](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app)
+   and [installation](https://docs.github.com/en/apps/using-github-apps/installing-your-own-github-app).
+   In App settings, use **Credentials → Key pairs → New key** and transfer its PEM
+   through the approved coordinator secret route; see
+   [key instructions](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/managing-private-keys-for-github-apps).
+   The operator installs a regular coordinator-only file with mode `0600`, outside
+   coding, reviewer and validator roots. Share IDs and the protected key reference,
+   never PEM bytes. Configure the protected workflow (replace example values):
+
+   ```yaml
+   review:
+     app_id: 'REVIEW_APP_ID'
+     installation_id: 'REVIEW_INSTALLATION_ID'
+     private_key_path: /srv/factory/homes/factory-coordinator/.secrets/github-review.pem
+   ```
+
+2. **Release owner: approve deployment to the existing coordinator and worker.**
+   Name the exact reviewed commit/archive, maintenance window and one demo's
+   allowed model/compute scope. Confirm no active or unknown branch writer before
+   replacing services; unknown termination blocks replacement. Deploy the matched
+   coordinator, broker, wrapper, producer and protected configuration together.
+   Preserve existing state, publisher/validation references and all workspaces.
+   Set the root-owned broker's `review_preparation_command_sha256` from
+   `ReviewWorkspace.command_sha256()` in that packaged release; keep the producer
+   pin, machine identity and release checksum correct. No new VM or access grant is
+   part of this checklist. Keep dispatch held until the next two steps pass.
+
+3. **Deployment operator: verify the one-worker review path.** On the approved
+   release, require a current containment receipt and `review_preparation_v1=true`.
+   Check the actual preparation unit grants only its private leaf, hides the worker
+   home and excludes GitHub/Linear credentials; source and sibling writes must fail.
+   Check that preparation returns the exact clean recorded head. Candidate validation
+   invokes Docker in the coordinator's trusted validator process after candidate
+   transfer, not in the worker's model process. DEV-239 verifies that process can
+   use the pinned validation image and execute the actual approved Rig check with
+   network disabled, no host/credential mounts and the declared limits. The worker
+   must not gain Docker group/socket access. A job is capped at one CPU, 512 MiB
+   RAM, 128 PIDs and a 512 MiB writable `/tmp`; host capacity must additionally
+   cover the coordinator/daemon. Measure space for the pinned image, sealed source
+   layer, source/export and after-copy scratch, evidence and daemon metadata before
+   the demo. No fixed unmeasured disk-size claim qualifies the host. The shipped
+   [rig-local policy](../factory/policies/rig-local.yaml) pins
+   `python@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea`
+   and one architecture test; DEV-239 must approve its fit to the selected ticket
+   or supply the intended pinned policy/image. Images and dependencies must already
+   exist because the runner never pulls and execution has no network. Verify subscription
+   readiness and observed effective settings for **DefaultCloud: gpt-6-luna,
+   medium**, and **DefaultReview: gpt-6.1-sol, high**; both have Daybreak disabled,
+   `approval_policy: never` and `sandbox: workspace-write`. Definitions in the
+   selected release remain authoritative. Do not substitute a model/account or API
+   billing when readiness fails. The internal reviewer receives its own checkout
+   and conversation, with no Linear delegation identity.
+
+4. **Rig feedback/protection owners: enable one fix owner before the pilot.** Review
+   and release this condition in the existing
+   [Rig feedback workflow](https://github.com/RigCodeAI/rig/blob/main/.github/workflows/codex-pr-feedback.yml)
+   `dispatch` job: `!startsWith(github.event.pull_request.head.ref, 'cycle/factory-') &&`.
+   Other branches keep their current feedback owner. At
+   [Rig branch settings](https://github.com/RigCodeAI/rig/settings/branches) or the
+   existing [ruleset](https://github.com/RigCodeAI/rig/settings/rules), DEV-239's owner
+   requires `factory/validation` from the distinct trusted validation App on `main`;
+   no bot bypass or automatic merge authority. The exact pilot head must have fresh
+   passed validation before review; every repaired head is revalidated before
+   publication/review. GitHub supports an
+   [expected App source for required checks](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches).
+
+5. **Human demo owner: approve one small Rig ticket and observe the whole loop.**
+   Choose its scope and a genuine small actionable defect to demonstrate. Open the
+   ticket in [Rig Linear](https://linear.app/rigai), retain the human assignee, add
+   `factory:rig`, use Backlog/Todo/In Progress, and delegate to **Default Cloud Agent**.
+   The operator maps that ticket's exact UUID to matching dedicated Rig clones under
+   `/srv/factory/contained-workspaces` and selects the packaged `software-change`
+   definition through `linear_delegation.workstream_path`; see
+   [existing delegation configuration](linear-delegation.md#configuration).
+   After all setup gates pass, release that one ticket. Observe a real submitted
+   review with a valid inline finding, a separate reviewer thread/checkout, an
+   automatic fix by the same pinned Cloud Agent definition on the same PR/branch,
+   fresh validation for the new head and a new independent review. Save the Linear
+   ticket/conversation link, PR number/URL, before/after SHAs, review IDs/URLs,
+   distinct identities and passed check links. End at **ready for human merge**;
+   the human decides whether to merge. Retain the workspaces and evidence.
+
+The proposed DEV-239 demo fixes Rust double-quote character-literal masking in
+`tools/architecture.py`, with tests in `tools/test_architecture.py` covering
+escaped/byte characters and a lifetime control. DEV-239 owns the frozen Python
+validation policy and its fit to those two files. The shipped workstream expects
+`architecture-tests` with `test_count == 1`; a policy reporting four tests requires
+matching reviewed assertions (or a genuine single unittest with subTests). Pin
+the actual protected workstream/policy/image/base before dispatch and preserve
+real reported counts. The package's shipped-definition hash is not a claim that
+a different protected demo definition was qualified.
+
+A first PR with no actionable review finding proves review execution but does not
+prove the required fix loop. Report that review pass truthfully. Qualify repair
+separately only with an explicitly identified and approved seeded test if needed;
+do not manufacture findings or weaken a correct implementation to claim repair. Missing or malformed review evidence, stale heads,
+unsupported completion or readiness failure must remain visible as a blocker;
+they cannot be reported as first-alpha completion. The broader recovery, Coverage,
+scaling and cleanup plans remain later work rather than prerequisites to this demo.
 
 Rollback fences new dispatch first, reconciles exact contained identities and
 retains all unknown, staged, completed and archived data. Restore the reviewed
@@ -269,3 +353,40 @@ coordinator/broker/configuration package together, without adopting new-release
 runs into an old execution pin. Missing preparation capability must block review.
 Do not restore the old feedback owner for factory branches while any Symphony fix
 writer may remain live. Resume only after ownership and qualification are proven.
+
+### Combined alpha source package candidate
+
+The locally qualified source candidate is merged commit
+`818c59a1a9f93479cff2048ec343c3c6745e33cb`, including review service-completion
+support. It is packaged with the existing `cloud_io.py pack` helper:
+
+| Pin | Value |
+| --- | --- |
+| Archive SHA-256 | `2e6fcaef7ae03bd97d268e089b7f1e2420b9f8f76e7c567f4a3a16bb90bc11fb` |
+| Release object | `releases/818c59a1a9f93479cff2048ec343c3c6745e33cb.tar.gz` |
+| Candidate producer command | `a7bf9930b1e99665d598a30c94db43896d9056a3aaeaf28347d5a1a12a1a1ed9` |
+| Review preparation command | `e9484451418b48094ace5c5694ff396733c5e2929c0f5e65b35620ed2ec06a25` |
+| Executor policy | `87d9bc93c5db6b5c1afd01529a7dff35982798727a2b484ff71b527446f5643e` |
+
+[Package metadata](evidence/dev240/alpha-release-818c59a/package.json) and
+[all definition/policy pins](evidence/dev240/alpha-release-818c59a/pins.json)
+identify the exact candidate. The local source archive remains at
+`/private/tmp/dev240-alpha-release-818c59a/release.tar.gz`; it has not been uploaded
+or deployed. App IDs, key references, approved Rig policy/base/image and live
+machine/boot qualification references are protected rollout inputs supplied by
+their existing owners; the source archive contains no credentials.
+
+[Source qualification](evidence/dev240/alpha-release-818c59a/qualification.log)
+passed formatting, warnings-as-errors compilation, public specs and 172 focused
+core-flow tests. [Broker/transport tests](evidence/dev240/alpha-release-818c59a/broker-tests.log)
+passed 55 tests. The local toolchain is Linux ARM64; its compiled dependencies and
+Exqlite artifacts must not be copied as x86_64 VM binaries. Build the exact source
+with the target's qualified native toolchain before service activation.
+
+Release approval must name this exact source/archive and its matched broker,
+wrapper, producer, workflow and private configuration, with the existing native
+startup/activation path reviewed by the deployment owner. The current protected
+settings and prior release must be recorded before replacement. A successful local
+compile does not prove Docker validation, effective reviewer model execution or a
+live review/fix loop. Those remain step 3 and step 5 checks above. No cloud, budget,
+access or runtime setting was changed by preparing this package.

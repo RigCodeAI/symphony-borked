@@ -137,11 +137,11 @@ again before the coordinator accepts stage completion.
 ## Worker-control rollout plan (not executed)
 
 The original producer was qualified in DEV-237 PR 16 at
-`7a8a87ae295188ae830527d2d26205a51b9bb744`. This bundle-access source changes its
+`7a8a87ae295188ae830527d2d26205a51b9bb744`. This parent-traversal source changes its
 script and command pin. The new script SHA-256 is
-`f4ba77de9f63131ee75ddff0c6f034ca0a606a194f199a37c3a0f74c4b0877d2`;
+`3cfde2cf353b66bdfea2a2e3193eede1c21472b3a4b162a308f20ecbb2bb7204`;
 the UTF-8 compact command argv SHA-256 is
-`b7749f37ccbdf7446c562835c7ed10e5343f10bf52b2913fd581582a9dc33fc8`.
+`97c7e721d4583bfd2f0f97b2dd55c6d606db30b18fa4f125b179869f6961c3d9`.
 These are source identities, pending combined integration testing and worker
 qualification. They do not authorize rollout. Preserve old run pins and qualify
 this exact final producer/broker/coordinator package before activation.

@@ -295,9 +295,9 @@ defmodule SymphonyElixir.WorkerOperationTest do
 
   test "the shipped pinned candidate producer reaches remote prepare and launch" do
     command = shipped_candidate_command()
-    assert byte_size(List.last(command)) == 7_495
+    assert byte_size(List.last(command)) == 7_559
     pin = command_sha256(command)
-    assert pin == "b7749f37ccbdf7446c562835c7ed10e5343f10bf52b2913fd581582a9dc33fc8"
+    assert pin == "97c7e721d4583bfd2f0f97b2dd55c6d606db30b18fa4f125b179869f6961c3d9"
     identity = identity()
     inputs = %{"candidate" => %{"thread_id" => "implementation-thread"}}
 

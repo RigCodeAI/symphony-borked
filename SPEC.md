@@ -24,8 +24,11 @@ Its output records the actual candidate SHA, bundle prerequisite SHA, branch and
 checksum/size of an incremental Git bundle under protected Git metadata. This is
 candidate preparation, not trusted validation or authorization to publish/merge.
 The producer grants its existing worker group read access only to the transport
-directory (`0750`) and bundle (`0640`). The broker verifies that group and retains
-its empty capability set; no workspace or private operation-record permissions change.
+directory (`0750`) and bundle (`0640`), plus search-only access to the task root and
+Git directory (`0710`). The broker traverses those parents with no-follow search handles,
+verifies their worker group and retains its empty capability set. Group members can
+reach known readable descendants; private `0600` files and operation records stay private.
+No recursive permission change is made.
 Existing runs retain their original stage definitions and commit ownership. See
 [local candidate commits](docs/local-candidate-commits.md).
 

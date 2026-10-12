@@ -222,6 +222,67 @@ defmodule SymphonyElixir.WorkerOperation do
     _, _ -> {:uncertain, :external_termination_unknown}
   end
 
+  @doc "Reads a bounded candidate bundle from an exact successful service-check operation; no caller path is sent."
+  @spec candidate_bundle(map(), map(), map(), keyword()) :: {:ok, binary()} | {:error, term()}
+  def candidate_bundle(control, identity, expected, opts \\ []) do
+    with :ok <- validate_config(control),
+         true <- is_map(expected) and valid_sha256?(expected["candidate_input_sha256"]) and valid_sha256?(expected["bundle_sha256"]),
+         bytes = expected["bundle_bytes"],
+         true <- is_integer(bytes) and bytes > 0 and bytes <= 64 * 1024 * 1024,
+         {:ok, identity} <- validate_identity_shape(identity, identity_operation_id(identity), control),
+         {:ok, payload} <- status(control, identity, opts),
+         true <- payload["status"] == "terminated" and payload["exit_code"] == "exited" and payload["exit_status"] == 0,
+         true <- terminal_proof?(payload, identity),
+         deadline = monotonic_ms() + 60_000,
+         {:ok, bundle} <- candidate_chunks(control, identity, expected, 0, [], deadline, opts),
+         true <- byte_size(bundle) == bytes and sha256(bundle) == expected["bundle_sha256"] do
+      {:ok, bundle}
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :candidate_bundle_unavailable}
+    end
+  rescue
+    _ -> {:error, :candidate_bundle_unavailable}
+  catch
+    _, _ -> {:error, :candidate_bundle_unavailable}
+  end
+
+  defp candidate_chunks(control, identity, expected, offset, chunks, deadline, opts) do
+    envelope = %{
+      "action" => "candidate_bundle",
+      "identity" => identity,
+      "expected_release" => expected_release(control),
+      "input_sha256" => expected["candidate_input_sha256"],
+      "expected_sha256" => expected["bundle_sha256"],
+      "expected_bytes" => expected["bundle_bytes"],
+      "offset" => offset
+    }
+
+    remaining = deadline - monotonic_ms()
+
+    with true <- remaining > 0,
+         {:ok, reply} <- rpc(control, envelope, Keyword.put(opts, :rpc_timeout_ms, min(remaining, @rpc_timeout_ms))),
+         true <- reply["operation_id"] == identity["operation_id"] and reply["candidate_input_sha256"] == expected["candidate_input_sha256"],
+         true <- reply["bundle_sha256"] == expected["bundle_sha256"] and reply["bundle_bytes"] == expected["bundle_bytes"] and reply["offset"] == offset,
+         encoded when is_binary(encoded) <- reply["data_base64"],
+         true <- byte_size(encoded) <= 87_384,
+         {:ok, data} <- Base.decode64(encoded),
+         size = byte_size(data),
+         true <- size > 0 and size <= 65_536 and offset + size <= expected["bundle_bytes"],
+         true <- reply["eof"] == (offset + size == expected["bundle_bytes"]) do
+      if reply["eof"] do
+        {:ok, IO.iodata_to_binary(Enum.reverse([data | chunks]))}
+      else
+        candidate_chunks(control, identity, expected, offset + size, [data | chunks], deadline, opts)
+      end
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :candidate_bundle_response_mismatch}
+    end
+  end
+
+  defp sha256(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
+
   defp launch(workspace, operation_id, control, argv, on_process_start, opts) do
     with :ok <- validate_launch_argv(argv),
          {:ok, identity} <- prepare(control, workspace, operation_id, argv, opts) do

@@ -302,6 +302,17 @@ defmodule SymphonyElixir.Evidence do
   @spec read_artifact(String.t(), String.t(), String.t(), GenServer.server()) :: {:ok, binary()} | {:error, atom()}
   def read_artifact(key, revision, name, server \\ __MODULE__), do: call(server, {:read_artifact, key, revision, name})
 
+  @doc "Finds an immutable, verified upload containing an exact retained validation attempt. It does not grant validation eligibility."
+  @spec publication(map(), String.t(), map(), GenServer.server()) :: {:ok, map()} | {:error, atom()}
+  def publication(run, attempt_id, validation_receipt, server \\ __MODULE__) do
+    call(server, {:publication, report(run), attempt_id, validation_receipt})
+  end
+
+  @spec publication_revision(map(), String.t(), map(), String.t(), GenServer.server()) :: {:ok, map()} | {:error, atom()}
+  def publication_revision(run, attempt_id, validation_receipt, revision, server \\ __MODULE__) do
+    call(server, {:publication_revision, report(run), attempt_id, validation_receipt, revision})
+  end
+
   @spec cleanup_ready?(String.t(), GenServer.server()) :: boolean()
   def cleanup_ready?(run_id, server \\ __MODULE__) do
     case call(server, {:run, run_id}) do
@@ -411,6 +422,24 @@ defmodule SymphonyElixir.Evidence do
 
     {:reply, result, state}
   end
+
+  def handle_call({:publication, snapshot, attempt_id, validation_receipt}, _from, state) do
+    result = publication_bundle(state, snapshot, attempt_id, validation_receipt)
+    {:reply, result, state}
+  end
+
+  def handle_call({:publication_revision, snapshot, attempt_id, %{"id" => id, "manifest_sha256" => sha}, revision}, _from, state)
+      when is_binary(revision) and is_binary(attempt_id) do
+    result =
+      if Regex.match?(~r/^[a-f0-9]{64}$/, revision),
+        do: verified_publication_bundle(state, revision, snapshot, attempt_id, id, sha),
+        else: {:error, :validation_not_permanently_archived}
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:publication_revision, _snapshot, _attempt_id, _receipt, _revision}, _from, state),
+    do: {:reply, {:error, :validation_not_permanently_archived}, state}
 
   def handle_call({:has_event, id, event_id}, _from, state) do
     result =
@@ -580,6 +609,89 @@ defmodule SymphonyElixir.Evidence do
     else
       _ -> %{"status" => "pending"}
     end
+  end
+
+  defp publication_bundle(state, snapshot, attempt_id, %{"id" => validation_id, "manifest_sha256" => manifest_sha256}) do
+    with true <- is_binary(attempt_id) and is_binary(validation_id) and is_binary(manifest_sha256),
+         {:ok, revisions} <- File.ls(Path.join(state.root, "bundles")) do
+      revisions
+      |> Enum.filter(&Regex.match?(~r/^[a-f0-9]{64}$/, &1))
+      |> Enum.sort()
+      |> Enum.find_value({:error, :validation_not_permanently_archived}, fn revision ->
+        case verified_publication_bundle(state, revision, snapshot, attempt_id, validation_id, manifest_sha256) do
+          {:ok, _} = found -> found
+          _ -> nil
+        end
+      end)
+    else
+      _ -> {:error, :validation_not_permanently_archived}
+    end
+  rescue
+    _ -> {:error, :validation_not_permanently_archived}
+  end
+
+  defp publication_bundle(_state, _snapshot, _attempt_id, _receipt), do: {:error, :validation_not_permanently_archived}
+
+  defp verified_publication_bundle(state, revision, expected, attempt_id, validation_id, manifest_sha256) do
+    directory = Path.join([state.root, "bundles", revision])
+
+    with {:ok, ^directory} <- PathSafety.canonicalize(directory),
+         {:ok, bytes} <- publication_read(Path.join(directory, "manifest.json")),
+         true <- digest(bytes) == revision,
+         {:ok, manifest} <- Jason.decode(bytes),
+         true <- manifest["run_id"] == expected["id"] and manifest["task_id"] == expected["task_id"],
+         %{"status" => "verified"} = upload <- receipt(state, revision, manifest),
+         artifacts when is_list(artifacts) <- manifest["artifacts"],
+         {:ok, files} <- publication_files(directory, artifacts),
+         true <- Enum.all?(["snapshot.json", "events.jsonl", "transcript.txt"], &Map.has_key?(files, &1)),
+         {:ok, snapshot} <- Jason.decode(files["snapshot.json"] || ""),
+         true <- Map.take(snapshot, @identity_keys) == Map.take(expected, @identity_keys),
+         attempt when is_map(attempt) <- Enum.find(snapshot["attempts"] || [], &(&1["id"] == attempt_id)),
+         true <- attempt["gate"] == "passed",
+         true <- get_in(attempt, ["result", "evidence", "receipt"]) == %{"id" => validation_id, "manifest_sha256" => manifest_sha256},
+         {:ok, events} <- publication_events(files["events.jsonl"] || ""),
+         true <- Enum.any?(events, &(&1["kind"] == "validation_imported" and &1["attempt_id"] == attempt_id and &1["manifest_sha256"] == manifest_sha256)),
+         imported when is_map(imported) <- Enum.find(events, &(&1["kind"] == "artifact" and &1["attempt_id"] == attempt_id and &1["label"] == "validation/" <> attempt_id <> "/manifest.json")),
+         true <- imported["source_sha256"] == manifest_sha256 and is_binary(files[imported["name"]]) do
+      {:ok, %{revision: revision, archive: upload, validation_attempt_id: attempt_id, manifest_sha256: manifest_sha256, validation_manifest: imported["name"]}}
+    else
+      _ -> {:error, :validation_not_permanently_archived}
+    end
+  rescue
+    _ -> {:error, :validation_not_permanently_archived}
+  end
+
+  defp publication_files(directory, artifacts) do
+    Enum.reduce_while(artifacts, {:ok, %{}}, fn artifact, {:ok, files} ->
+      name = artifact["name"]
+
+      with true <- is_binary(name) and (name in ["snapshot.json", "events.jsonl", "transcript.txt"] or Regex.match?(~r/^artifact-[a-f0-9]{64}\.txt$/, name)),
+           false <- Map.has_key?(files, name),
+           {:ok, bytes} <- publication_read(Path.join(directory, name)),
+           true <- byte_size(bytes) == artifact["bytes"] and digest(bytes) == artifact["sha256"] do
+        {:cont, {:ok, Map.put(files, name, bytes)}}
+      else
+        _ -> {:halt, {:error, :invalid_archived_artifact}}
+      end
+    end)
+  end
+
+  defp publication_read(path) do
+    with {:ok, ^path} <- PathSafety.canonicalize(path),
+         {:ok, %{type: :regular, links: 1, size: size, mode: mode}} <- File.lstat(path),
+         true <- size <= @limit and Bitwise.band(mode, 0o022) == 0,
+         {:ok, bytes} <- bounded_read(path),
+         do: {:ok, bytes},
+         else: (_ -> {:error, :unsafe_archived_artifact})
+  end
+
+  defp publication_events(bytes) do
+    Enum.reduce_while(String.split(bytes, "\n", trim: true), {:ok, []}, fn line, {:ok, events} ->
+      case Jason.decode(line) do
+        {:ok, event} when is_map(event) -> {:cont, {:ok, [event | events]}}
+        _ -> {:halt, {:error, :invalid_archived_events}}
+      end
+    end)
   end
 
   defp write_files(directory, files) do

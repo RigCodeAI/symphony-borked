@@ -391,6 +391,7 @@ defmodule SymphonyElixir.FactorySecretNameMigrationTest do
 
     env = [
       {"DEV235_HELPER_PATH", helper_path()},
+      {"MIX_ENV", "test"},
       {"DEV235_CLI_ARGS_JSON", Jason.encode!(args)},
       {"FACTORY_LINEAR_SECRET_NAMES_JSON", Jason.encode!(@configured_names)},
       {"PATH", System.get_env("PATH", "")}

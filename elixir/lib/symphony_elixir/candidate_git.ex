@@ -2,6 +2,11 @@ defmodule SymphonyElixir.CandidateGit do
   @moduledoc false
 
   @read_only_commands ~w(archive cat-file diff ls-tree merge-base rev-parse show show-ref status symbolic-ref)
+  @max_metadata_bytes 512 * 1024 * 1024
+  @max_metadata_entries 100_000
+  @max_metadata_depth 64
+  @max_shallow_bytes 65_536
+  @copy_chunk_bytes 65_536
 
   @spec run(Path.t(), [String.t()]) :: {:ok, binary()} | {:error, term()}
   def run(workspace, args) when is_binary(workspace) and is_list(args) do
@@ -24,6 +29,28 @@ defmodule SymphonyElixir.CandidateGit do
   end
 
   def run(_workspace, _args), do: {:error, :invalid_candidate_git_arguments}
+
+  @doc "Runs trusted service code with a private metadata copy that excludes candidate config and hooks."
+  @spec with_snapshot(Path.t(), (Path.t() -> term())) :: term()
+  def with_snapshot(workspace, callback) when is_binary(workspace) and is_function(callback, 1) do
+    with {:ok, workspace} <- SymphonyElixir.PathSafety.canonicalize(workspace),
+         :ok <- validate_workspace(workspace),
+         {:ok, source_git_dir} <- candidate_git_dir(workspace),
+         :ok <- reject_metadata_links(source_git_dir),
+         {:ok, snapshot} <- create_private_directory() do
+      try do
+        with :ok <- copy_metadata(source_git_dir, snapshot),
+             {:ok, object_format} <- object_format(snapshot),
+             :ok <- write_safe_config(snapshot, workspace, object_format) do
+          callback.(snapshot)
+        end
+      after
+        File.rm_rf(snapshot)
+      end
+    end
+  end
+
+  def with_snapshot(_workspace, _callback), do: {:error, :invalid_candidate_git_arguments}
 
   defp validate_args([command | args]) when command in @read_only_commands do
     if Enum.all?(args, &is_binary/1), do: {:ok, command}, else: {:error, :invalid_candidate_git_arguments}
@@ -49,21 +76,32 @@ defmodule SymphonyElixir.CandidateGit do
   end
 
   defp reject_metadata_links(path) do
+    case scan_metadata(path, 0, %{bytes: 0, entries: 0}) do
+      {:ok, _usage} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp scan_metadata(path, depth, usage) do
     case File.lstat(path) do
       {:ok, %File.Stat{type: :symlink}} ->
         {:error, :candidate_git_metadata_symlink}
 
-      {:ok, %File.Stat{type: :regular}} ->
-        :ok
-
-      {:ok, %File.Stat{type: :directory}} ->
-        with {:ok, entries} <- File.ls(path) do
-          Enum.reduce_while(entries, :ok, fn entry, :ok ->
-            case reject_metadata_links(Path.join(path, entry)) do
-              :ok -> {:cont, :ok}
-              {:error, _} = error -> {:halt, error}
+      {:ok, stat} when stat.type in [:regular, :directory] ->
+        with {:ok, usage} <- account_metadata_entry(usage, stat, depth) do
+          if stat.type == :directory do
+            with {:ok, entries} <- File.ls(path),
+                 :ok <- ensure_child_count(usage, length(entries)) do
+              Enum.reduce_while(entries, {:ok, usage}, fn entry, {:ok, acc} ->
+                case scan_metadata(Path.join(path, entry), depth + 1, acc) do
+                  {:ok, next} -> {:cont, {:ok, next}}
+                  {:error, _} = error -> {:halt, error}
+                end
+              end)
             end
-          end)
+          else
+            {:ok, usage}
+          end
         end
 
       {:ok, _stat} ->
@@ -71,6 +109,25 @@ defmodule SymphonyElixir.CandidateGit do
 
       {:error, reason} ->
         {:error, {:candidate_git_metadata_read_failed, reason}}
+    end
+  end
+
+  defp account_metadata_entry(usage, stat, depth) do
+    bytes = if stat.type == :regular, do: stat.size, else: 0
+
+    if depth > @max_metadata_depth or usage.entries >= @max_metadata_entries or
+         usage.bytes + bytes > @max_metadata_bytes do
+      {:error, :candidate_git_metadata_limit_exceeded}
+    else
+      {:ok, %{usage | bytes: usage.bytes + bytes, entries: usage.entries + 1}}
+    end
+  end
+
+  defp ensure_child_count(usage, count) do
+    if usage.entries + count > @max_metadata_entries do
+      {:error, :candidate_git_metadata_limit_exceeded}
+    else
+      :ok
     end
   end
 
@@ -89,55 +146,80 @@ defmodule SymphonyElixir.CandidateGit do
   end
 
   defp copy_metadata(source_git_dir, snapshot) do
-    with :ok <- copy_required(Path.join(source_git_dir, "HEAD"), Path.join(snapshot, "HEAD")),
-         :ok <- copy_optional(Path.join(source_git_dir, "refs"), Path.join(snapshot, "refs")),
-         :ok <- copy_optional(Path.join(source_git_dir, "packed-refs"), Path.join(snapshot, "packed-refs")),
-         :ok <- copy_optional(Path.join(source_git_dir, "index"), Path.join(snapshot, "index")),
-         :ok <- copy_objects(Path.join(source_git_dir, "objects"), Path.join(snapshot, "objects")) do
+    usage = %{bytes: 0, entries: 0}
+
+    with {:ok, usage} <- copy_required(Path.join(source_git_dir, "HEAD"), Path.join(snapshot, "HEAD"), usage),
+         {:ok, usage} <- copy_optional(Path.join(source_git_dir, "refs"), Path.join(snapshot, "refs"), usage),
+         {:ok, usage} <- copy_optional(Path.join(source_git_dir, "packed-refs"), Path.join(snapshot, "packed-refs"), usage),
+         {:ok, usage} <- copy_shallow(source_git_dir, snapshot, usage),
+         {:ok, usage} <- copy_optional(Path.join(source_git_dir, "index"), Path.join(snapshot, "index"), usage),
+         {:ok, _usage} <- copy_objects(Path.join(source_git_dir, "objects"), Path.join(snapshot, "objects"), usage) do
       :ok
     end
   end
 
-  defp copy_required(source, destination), do: copy_entry(source, destination, false)
+  defp copy_shallow(source_git_dir, snapshot, usage) do
+    source = Path.join(source_git_dir, "shallow")
+    destination = Path.join(snapshot, "shallow")
 
-  defp copy_optional(source, destination) do
     case File.lstat(source) do
-      {:error, :enoent} -> :ok
-      {:ok, _stat} -> copy_entry(source, destination, false)
+      {:error, :enoent} ->
+        {:ok, usage}
+
+      {:ok, %{type: :regular, size: size}} when size <= @max_shallow_bytes ->
+        with {:ok, usage} <- copy_entry(source, destination, false, usage, 1, @max_shallow_bytes),
+             {:ok, contents} <- File.read(destination),
+             boundaries = String.split(contents, "\n", trim: true),
+             true <- boundaries != [] and Enum.all?(boundaries, &(oid_format(&1) in [:sha1, :sha256])) do
+          {:ok, usage}
+        else
+          _ -> {:error, :invalid_candidate_shallow_boundaries}
+        end
+
+      _ ->
+        {:error, :invalid_candidate_shallow_boundaries}
+    end
+  end
+
+  defp copy_required(source, destination, usage), do: copy_entry(source, destination, false, usage, 1)
+
+  defp copy_optional(source, destination, usage) do
+    case File.lstat(source) do
+      {:error, :enoent} -> {:ok, usage}
+      {:ok, _stat} -> copy_entry(source, destination, false, usage, 1)
       {:error, reason} -> {:error, {:candidate_git_metadata_read_failed, reason}}
     end
   end
 
-  defp copy_objects(source, destination) do
+  defp copy_objects(source, destination, usage) do
     case File.lstat(source) do
-      {:ok, %File.Stat{type: :directory}} -> copy_entry(source, destination, true)
+      {:ok, %File.Stat{type: :directory}} -> copy_entry(source, destination, true, usage, 1)
       {:ok, %File.Stat{type: :symlink}} -> {:error, :candidate_git_metadata_symlink}
       _ -> {:error, :candidate_git_objects_required}
     end
   end
 
-  defp copy_entry(source, destination, skip_object_info?) do
+  defp copy_entry(source, destination, skip_object_info?, usage, depth, max_file_bytes \\ @max_metadata_bytes) do
     case File.lstat(source) do
       {:ok, %File.Stat{type: :symlink}} ->
         {:error, :candidate_git_metadata_symlink}
 
-      {:ok, %File.Stat{type: :regular}} ->
-        case File.cp(source, destination) do
-          :ok -> :ok
-          {:error, reason} -> {:error, {:candidate_git_metadata_copy_failed, reason}}
+      {:ok, %File.Stat{type: :regular} = stat} ->
+        with {:ok, next_usage} <- account_copy_entry(usage, depth),
+             {:ok, next_usage} <- copy_regular_file(source, destination, next_usage, stat.size, max_file_bytes) do
+          {:ok, next_usage}
         end
 
       {:ok, %File.Stat{type: :directory}} ->
-        with :ok <- File.mkdir_p(destination),
-             {:ok, entries} <- File.ls(source) do
-          Enum.reduce_while(entries, :ok, fn entry, :ok ->
-            if skip_object_info? and source == Path.join(Path.dirname(source), "objects") and entry == "info" do
-              {:cont, :ok}
-            else
-              case copy_entry(Path.join(source, entry), Path.join(destination, entry), skip_object_info?) do
-                :ok -> {:cont, :ok}
-                {:error, _} = error -> {:halt, error}
-              end
+        with {:ok, next_usage} <- account_copy_entry(usage, depth),
+             :ok <- File.mkdir_p(destination),
+             {:ok, entries} <- File.ls(source),
+             copied_entries <- if(skip_object_info? and Path.basename(source) == "objects", do: Enum.reject(entries, &(&1 == "info")), else: entries),
+             :ok <- ensure_child_count(next_usage, length(copied_entries)) do
+          Enum.reduce_while(copied_entries, {:ok, next_usage}, fn entry, {:ok, acc} ->
+            case copy_entry(Path.join(source, entry), Path.join(destination, entry), skip_object_info?, acc, depth + 1) do
+              {:ok, next} -> {:cont, {:ok, next}}
+              {:error, _} = error -> {:halt, error}
             end
           end)
         end
@@ -147,6 +229,70 @@ defmodule SymphonyElixir.CandidateGit do
 
       {:error, reason} ->
         {:error, {:candidate_git_metadata_copy_failed, reason}}
+    end
+  end
+
+  defp account_copy_entry(usage, depth) do
+    if depth > @max_metadata_depth or usage.entries >= @max_metadata_entries do
+      {:error, :candidate_git_metadata_limit_exceeded}
+    else
+      {:ok, %{usage | entries: usage.entries + 1}}
+    end
+  end
+
+  defp copy_regular_file(source, destination, usage, expected_size, max_file_bytes) do
+    cond do
+      expected_size > max_file_bytes or usage.bytes + expected_size > @max_metadata_bytes ->
+        {:error, :candidate_git_metadata_limit_exceeded}
+
+      true ->
+        with {:ok, input} <- File.open(source, [:read, :binary]) do
+          try do
+            with {:ok, output} <- File.open(destination, [:write, :binary, :exclusive]) do
+              try do
+                copy_file_chunks(input, output, usage, expected_size, 0)
+              after
+                File.close(output)
+              end
+            else
+              {:error, reason} -> {:error, {:candidate_git_metadata_copy_failed, reason}}
+            end
+          after
+            File.close(input)
+          end
+        else
+          {:error, reason} -> {:error, {:candidate_git_metadata_copy_failed, reason}}
+        end
+    end
+  end
+
+  defp copy_file_chunks(input, output, usage, expected_size, copied_bytes) do
+    case IO.binread(input, @copy_chunk_bytes) do
+      :eof when copied_bytes == expected_size ->
+        {:ok, %{usage | bytes: usage.bytes + copied_bytes}}
+
+      :eof ->
+        {:error, :candidate_git_metadata_changed_during_copy}
+
+      {:error, reason} ->
+        {:error, {:candidate_git_metadata_copy_failed, reason}}
+
+      chunk when is_binary(chunk) ->
+        next_bytes = copied_bytes + byte_size(chunk)
+
+        cond do
+          next_bytes > expected_size ->
+            {:error, :candidate_git_metadata_changed_during_copy}
+
+          usage.bytes + next_bytes > @max_metadata_bytes ->
+            {:error, :candidate_git_metadata_limit_exceeded}
+
+          true ->
+            case IO.binwrite(output, chunk) do
+              :ok -> copy_file_chunks(input, output, usage, expected_size, next_bytes)
+              {:error, reason} -> {:error, {:candidate_git_metadata_copy_failed, reason}}
+            end
+        end
     end
   end
 

@@ -84,11 +84,41 @@ stages:
     gate:
       command: [sh, -c, 'git rev-parse --verify HEAD >/dev/null && test -z "$(git status --porcelain)"']
       timeout_ms: 10000
+      success: validate
+      failure: blocked
+  - id: validate
+    type: check
+    inputs: [candidate, candidate-inspection, candidate-commit]
+    outputs: [validation]
+    gate:
+      evaluator: candidate_validation
+      required:
+        - check: architecture-tests
+          assertion: exit_status
+          equals: 0
+        - check: architecture-tests
+          assertion: test_count
+          equals: 1
+      success: publish
+      failure: blocked
+  - id: publish
+    type: publish
+    inputs: [candidate, validation]
+    outputs: [publication]
+    gate:
+      validation_stage: validate
+      required:
+        - check: architecture-tests
+          assertion: exit_status
+          equals: 0
+        - check: architecture-tests
+          assertion: test_count
+          equals: 1
       success: candidate-ready
       failure: blocked
   - id: candidate-ready
     type: human_wait
-    inputs: [candidate, candidate-commit, candidate-inspection]
+    inputs: [publication]
     outputs: [answer]
-    prompt: The local candidate is ready for inspection. Publication is disabled. Trusted final validation and publication require their configured service gates before any PR is opened.
+    prompt: The exact validated candidate has one linked Rig PR with permanent evidence. Human merge remains in GitHub; this reply completes only the configured workstream and does not authorize merging or cleanup.
     next: complete

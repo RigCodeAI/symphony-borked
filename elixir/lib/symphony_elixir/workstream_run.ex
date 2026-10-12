@@ -6,11 +6,29 @@ defmodule SymphonyElixir.WorkstreamRun do
 
   @policy_digest :crypto.hash(:sha256, File.read!(__ENV__.file)) |> Base.encode16(case: :lower)
 
-  for source <- ~w(workstream_runner.ex worker_operation.ex workstream_cancellation.ex agent_runner.ex ssh.ex codex/app_server.ex linear/agent_mapping.ex linear/coordinator.ex linear/delegation.ex) do
+  @executor_sources ~w(
+                       orchestrator.ex
+                       workstream_runner.ex
+                       worker_operation.ex
+                       workstream_cancellation.ex
+                       agent_runner.ex
+                       ssh.ex
+                       codex/app_server.ex
+                       linear/agent_mapping.ex
+                       linear/coordinator.ex
+                       linear/delegation.ex
+                       publisher.ex
+                       publisher_git.ex
+                       publisher_github.ex
+                       candidate_transfer.ex
+                       evidence.ex
+                     )
+
+  for source <- @executor_sources do
     @external_resource Path.join(__DIR__, source)
   end
 
-  @executor_digest ~w(workstream_runner.ex worker_operation.ex workstream_cancellation.ex agent_runner.ex ssh.ex codex/app_server.ex linear/agent_mapping.ex linear/coordinator.ex linear/delegation.ex)
+  @executor_digest @executor_sources
                    |> Enum.map(&File.read!(Path.join(__DIR__, &1)))
                    |> IO.iodata_to_binary()
                    |> then(&:crypto.hash(:sha256, &1))
@@ -146,7 +164,7 @@ defmodule SymphonyElixir.WorkstreamRun do
       %{
         run
         | status: :executing,
-          phase: if(stage.type == :agent, do: :implementing, else: :validating),
+          phase: stage_phase(stage.type),
           current_attempt_id: id,
           attempts: run.attempts ++ [attempt],
           operations: Map.put(run.operations, id, operation),
@@ -199,6 +217,12 @@ defmodule SymphonyElixir.WorkstreamRun do
             repair_or_block(run, stage)
           end
         end
+
+      {:publish, {:ok, value}} when is_map(value) and gate == :passed ->
+        run |> put_outputs(stage, value) |> advance(stage.gate.success)
+
+      {:publish, _result} ->
+        advance(run, :blocked)
 
       _ ->
         advance(run, :blocked)
@@ -909,6 +933,10 @@ defmodule SymphonyElixir.WorkstreamRun do
     %{run | attempts: Enum.map(run.attempts, fn attempt -> if attempt.id == run.current_attempt_id, do: Map.merge(attempt, changes), else: attempt end)}
   end
 
+  defp stage_phase(:agent), do: :implementing
+  defp stage_phase(:publish), do: :publishing
+  defp stage_phase(_type), do: :validating
+
   defp finish_gate(run, %{type: :check} = stage, result) do
     if candidate_validation?(stage) do
       verify_candidate_result(run, stage, result)
@@ -917,7 +945,49 @@ defmodule SymphonyElixir.WorkstreamRun do
     end
   end
 
+  defp finish_gate(run, %{type: :publish} = stage, result) do
+    # This trusted check re-evaluates both the referenced validation gate and the publish gate.
+    case {SymphonyElixir.Publisher.verify_completion(run, stage, result), result} do
+      {:ok, {:ok, value}} when is_map(value) ->
+        detail = %{
+          "verdict" => "passed",
+          "verified" => true,
+          "rationale" => ["The trusted publisher verified the candidate and remote pull request."]
+        }
+
+        {result, :passed, detail}
+
+      {:ok, _result} ->
+        failed_publication_result(:invalid_publisher_completion)
+
+      {{:error, reason}, _result} ->
+        failed_publication_result(reason)
+
+      {other, _result} ->
+        failed_publication_result({:invalid_publisher_verification_result, other})
+    end
+  rescue
+    error ->
+      failed_publication_result({:publisher_verification_failed, error})
+  catch
+    kind, reason ->
+      failed_publication_result({:publisher_verification_failed, kind, reason})
+  end
+
   defp finish_gate(_run, _stage, result), do: {result, nil, nil}
+
+  defp failed_publication_result(reason) do
+    result = {:error, {:publication_completion_not_verified, reason}}
+
+    detail = %{
+      "verdict" => "failed",
+      "verified" => false,
+      "rationale" => ["Trusted publication completion could not be verified."],
+      "reason" => inspect(reason)
+    }
+
+    {result, :failed, detail}
+  end
 
   defp verify_candidate_result(run, stage, result) do
     context = %{
@@ -928,7 +998,7 @@ defmodule SymphonyElixir.WorkstreamRun do
     }
 
     opts = [
-      workspace: run.workspace,
+      workspace: validation_workspace(run),
       validation_archive: run.execution[:validation_archive],
       validation_scratch: run.execution[:validation_scratch]
     ]
@@ -965,6 +1035,13 @@ defmodule SymphonyElixir.WorkstreamRun do
   end
 
   defp verified_candidate_feedback(_result, _archive), do: {:error, :missing_validation_receipt}
+
+  defp validation_workspace(run) do
+    case SymphonyElixir.CandidateTransfer.workspace(run) do
+      {:ok, path} -> path
+      _ -> nil
+    end
+  end
 
   defp failed_validation_result(result, reason) do
     failure = %{verdict: :failed, rationale: ["Validation evidence could not be verified."], evidence_id: nil}

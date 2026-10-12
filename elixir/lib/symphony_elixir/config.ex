@@ -93,6 +93,13 @@ defmodule SymphonyElixir.Config do
     end
   end
 
+  @spec publisher() :: {:ok, map()} | {:error, term()}
+  def publisher do
+    with {:ok, workflow} <- Workflow.current() do
+      SymphonyElixir.Publisher.validate_config(Map.get(workflow.config, "publisher"))
+    end
+  end
+
   @doc "Resolves signing secrets for the configured cloud apps without exposing values in routing records."
   @spec linear_webhook_secrets(map()) :: {:ok, map()} | {:error, atom()}
   def linear_webhook_secrets(config) do

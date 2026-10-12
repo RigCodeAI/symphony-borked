@@ -6,6 +6,9 @@ defmodule SymphonyElixir.WorkerOperation do
   registered locally. The worker remains held until the stream is ready and release is
   acknowledged. SSH process exit and port closure are transport events; only the worker's
   exact systemd identity and termination proof establish termination.
+
+  Check output additionally requires a successful stream exit. After terminal proof, drain
+  for up to five seconds within the check deadline; incomplete or oversized output stays truncated.
   """
 
   alias SymphonyElixir.SSH
@@ -29,7 +32,7 @@ defmodule SymphonyElixir.WorkerOperation do
   @termination_timeout_ms 5_000
   @termination_poll_ms 100
   @stream_status_poll_ms 250
-  @stream_drain_timeout_ms 500
+  @stream_drain_timeout_ms 5_000
   @max_check_timeout_ms 86_400_000
 
   @doc "Validates the exact SSH worker control configuration used by this client."
@@ -604,16 +607,18 @@ defmodule SymphonyElixir.WorkerOperation do
   defp run_started_check(port, identity, config, deadline, opts) do
     case collect_stream(port, identity, config, deadline, monotonic_ms(), "", false, opts) do
       {:terminated, payload, output, truncated} ->
-        {output, truncated} = drain_stream(port, output, truncated)
+        # Unit termination can precede delivery of the final SSH bytes and exit status.
+        drain_deadline = min(deadline, monotonic_ms() + @stream_drain_timeout_ms)
+        {output, truncated} = drain_stream(port, drain_deadline, output, truncated)
         close_port(port)
         check_result(payload, output, truncated, false)
 
-      {:closed, output, truncated, _ssh_status} ->
+      {:closed, output, truncated, ssh_status} ->
         case status_payload(config, identity, bounded_rpc_opts(opts, deadline)) do
           {:ok, %{"status" => "terminated"} = payload} ->
             if terminal_payload_matches?(payload, identity) do
               close_port(port)
-              check_result(payload, output, truncated, false)
+              check_result(payload, output, truncated or ssh_status != 0, false)
             else
               stop_after_check_stream(config, identity, port, :invalid_terminal_proof, opts)
             end
@@ -719,10 +724,6 @@ defmodule SymphonyElixir.WorkerOperation do
     end
   end
 
-  defp drain_stream(port, output, truncated) do
-    drain_stream(port, monotonic_ms() + @stream_drain_timeout_ms, output, truncated)
-  end
-
   defp drain_stream(port, deadline, output, truncated) do
     if monotonic_ms() >= deadline do
       {output, true}
@@ -733,11 +734,11 @@ defmodule SymphonyElixir.WorkerOperation do
           {output, truncated} = append_bounded(output, chunk <> if(newline?, do: "\n", else: ""), truncated)
           drain_stream(port, deadline, output, truncated)
 
-        {^port, {:exit_status, _status}} ->
-          {output, truncated}
+        {^port, {:exit_status, status}} ->
+          {output, truncated or status != 0}
 
         {^port, :closed} ->
-          {output, truncated}
+          {output, true}
       after
         max(deadline - monotonic_ms(), 0) -> {output, true}
       end

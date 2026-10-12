@@ -948,6 +948,55 @@ class WorkerOperationTransportTests(unittest.TestCase):
                     controller._process.kill()
                     controller._process.wait(timeout=2)
 
+    def test_forced_ssh_process_exits_cleanly_while_stdin_remains_open(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            controller = ReconnectableController(directory / "launches.log")
+            broker = self.make_broker(directory, controller)
+            thread = self.start_broker(broker)
+            release = {"service_revision": REVISION, "release_sha256": RELEASE_SHA256}
+            controller.release(controller.identity)
+            command = transport.encode_ssh_command(
+                "stream", {"identity": controller.identity, "expected_release": release},
+            )
+            script = """
+import os, sys
+from pathlib import Path
+from factory.deploy.worker_operation_transport import ssh_client_main
+sys.exit(ssh_client_main(
+    environment={"SSH_ORIGINAL_COMMAND": sys.argv[2]},
+    socket_path=Path(sys.argv[1]),
+    expected_socket_uid=os.getuid(), expected_socket_gid=os.getgid(),
+    expected_directory_uid=os.getuid(), expected_directory_gid=os.getgid(),
+))
+"""
+            process = subprocess.Popen(
+                [sys.executable, "-c", script, str(broker.socket_path), command],
+                cwd=Path(__file__).resolve().parents[3],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            try:
+                process.stdin.write(b'{"method":"finish","id":6}\n')
+                process.stdin.flush()
+                # communicate() would close stdin and hide the interpreter-shutdown defect.
+                process.wait(timeout=5)
+                self.assertEqual(process.returncode, 0, process.stderr.read().decode())
+                self.assertEqual(
+                    [json.loads(line) for line in process.stdout.read().splitlines()],
+                    [{"ok": "stream_ready"}, {"event": "ready"},
+                     {"id": 6, "result": "accepted"}, {"event": "final"}],
+                )
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=2)
+                for pipe in (process.stdin, process.stdout, process.stderr):
+                    pipe.close()
+                self.stop_broker(broker, thread)
+                if controller._process is not None and controller._process.poll() is None:
+                    controller._process.kill()
+                    controller._process.wait(timeout=2)
+
     def test_terminal_detached_output_can_be_drained_and_session_reaped(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)

@@ -21,6 +21,7 @@ defmodule SymphonyElixir.Orchestrator do
     WorkstreamRunner,
     WorkstreamStore
   }
+
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.Linear.Coordinator, as: LinearCoordinator
 

@@ -246,18 +246,22 @@ systemd unit actually enforces these permissions on the deployed worker.
    preparation, cross-task/symlink tampering, restart and cancellation. Save redacted
    unit identity, journal and cgroup termination receipts. Qualify the configured
    DefaultReview model, effort, subscription account and observed effective runtime.
-4. The cleanup owner completes sealed typed review output archival and private-leaf
-   ownership/termination checks. The Coverage Factory owner supplies an approved
-   disposable PR and frozen review-quality oracle. Run a real inline review,
-   same-PR repair, new-head validation/review, stale/malformed rejection,
-   duplicate/restart retry, and three-round/disagreement escalation. A human merges.
-5. Before enabling factory fix dispatch, the Rig feedback owner adds this condition
+4. Before enabling any factory fix dispatch, including the repair pilot, the Rig
+   feedback owner adds this condition
    to the existing `dispatch` job in `.github/workflows/codex-pr-feedback.yml`:
    `!startsWith(github.event.pull_request.head.ref, 'cycle/factory-') &&`.
    Review and release that exclusion with Symphony activation so only one owner
    can push factory fixes; other branches keep their existing owner. The workflow
    was read on 2026-10-12; this source PR does not change Rig. Verify the trusted
-   `factory/validation` check is required on the current head before human merge.
+   `factory/validation` check is required and passed for the exact pilot head
+   before review or repair dispatch. Revalidate each new head before its next review;
+   preserve the required check before human merge.
+
+5. The cleanup owner completes sealed typed review output archival and private-leaf
+   ownership/termination checks. The Coverage Factory owner supplies an approved
+   disposable PR and frozen review-quality oracle. Run a real inline review,
+   same-PR repair, new-head validation/review, stale/malformed rejection,
+   duplicate/restart retry, and three-round/disagreement escalation. A human merges.
 
 Rollback fences new dispatch first, reconciles exact contained identities and
 retains all unknown, staged, completed and archived data. Restore the reviewed

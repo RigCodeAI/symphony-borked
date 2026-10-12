@@ -5,7 +5,7 @@ defmodule SymphonyElixir.ValidationCheck do
   Remote head/base changes invalidate readiness even if a previous check passed.
   """
 
-  alias SymphonyElixir.{CandidateGit, CandidateTransfer, Config, Evidence, PathSafety, Validation, ValidationGithub, WorkstreamRun}
+  alias SymphonyElixir.{CandidateContext, CandidateGit, CandidateTransfer, Config, Evidence, PathSafety, Validation, ValidationGithub, WorkstreamRun}
 
   @name "factory/validation"
 
@@ -77,7 +77,7 @@ defmodule SymphonyElixir.ValidationCheck do
     with {:ok, config} <- configuration(run),
          {:ok, remote} <- remote(run, config, opts),
          {:ok, proof} <- proof(run, stage, remote, opts),
-         id = contract_id(run, stage, remote),
+         {:ok, id} <- contract_id(run, stage, remote),
          :ok <- read_owner(opts),
          {:ok, checks} <- transport(run, opts).checks(config, remote.head_sha),
          :ok <- read_owner(opts),
@@ -117,7 +117,8 @@ defmodule SymphonyElixir.ValidationCheck do
          true <- observed <= System.system_time(:second) and System.system_time(:second) - observed <= 30,
          {:ok, _} <- configuration(run),
          {:ok, proof} <- proof(run, stage, remote, []),
-         true <- result[:external_id] == contract_id(run, stage, remote),
+         {:ok, id} <- contract_id(run, stage, remote),
+         true <- result[:external_id] == id,
          true <- result[:evidence_revision] == proof.archive.revision,
          {:ok, key} <- attestation_key(run),
          true <- result[:attestation] == attest(Map.delete(result, :attestation), key) do
@@ -136,7 +137,7 @@ defmodule SymphonyElixir.ValidationCheck do
          :ok <- owner(run, opts),
          {:ok, snapshot} <- remote(run, config, opts),
          qualification = proof(run, stage, snapshot, opts),
-         id = contract_id(run, stage, snapshot),
+         {:ok, id} <- contract_id(run, stage, snapshot),
          payload = payload(snapshot, id, qualification),
          {:ok, checks} <- transport(run, opts).checks(config, snapshot.head_sha),
          :ok <- owner(run, opts),
@@ -260,14 +261,18 @@ defmodule SymphonyElixir.ValidationCheck do
          true <- validation.gate[:evaluator] == :candidate_validation,
          attempt when is_map(attempt) <- run.attempts |> Enum.reverse() |> Enum.find(&(&1.stage == validation.id)),
          true <- attempt.status == :completed and attempt.gate == :passed,
+         true <- CandidateContext.same_context?(run, run.current_attempt_id, attempt.id),
+         {:ok, view} <- CandidateContext.view(run, run.current_attempt_id),
+         true <- context_pr_matches?(run, view, remote),
          %{"id" => _, "manifest_sha256" => _} = receipt <- get_in(attempt, [:result, :evidence, "receipt"]),
          {:ok, workspace} <- CandidateTransfer.workspace(run),
-         context = %{task_id: run.task_id, run_id: run.id, attempt_id: attempt.id, base_sha: run.execution[:validation_base]},
-         options = [workspace: workspace, validation_archive: run.execution[:validation_archive], validation_scratch: run.execution[:validation_scratch]],
-         {:ok, %{verdict: :passed}} <- Validation.verify_result({:ok, %{receipt: receipt}}, run.execution[:validation_policy], context, validation.gate.required, options),
-         {:ok, %{verdict: :passed}} <- Validation.verify_result({:ok, %{receipt: receipt}}, run.execution[:validation_policy], context, stage.gate.required, options),
-         {:ok, manifest} <- Validation.read_receipt(receipt, run.execution[:validation_archive]),
-         true <- manifest["candidate_sha"] == remote.head_sha and manifest["base_sha"] == remote.base_sha,
+         {:ok, context} <- CandidateContext.validation_context(run, attempt.id),
+         options = [workspace: workspace, validation_archive: view.execution[:validation_archive], validation_scratch: view.execution[:validation_scratch]],
+         {:ok, %{verdict: :passed}} <- Validation.verify_result({:ok, %{receipt: receipt}}, view.execution[:validation_policy], context, validation.gate.required, options),
+         {:ok, %{verdict: :passed}} <- Validation.verify_result({:ok, %{receipt: receipt}}, view.execution[:validation_policy], context, stage.gate.required, options),
+         {:ok, manifest} <- Validation.read_receipt(receipt, view.execution[:validation_archive]),
+         true <- manifest["candidate_sha"] == remote.head_sha,
+         true <- manifest["base_sha"] == view.execution[:validation_base] and manifest["base_sha"] == remote.base_sha,
          {:ok, _} <- CandidateGit.run(workspace, ["merge-base", "--is-ancestor", remote.base_sha, remote.head_sha]),
          {:ok, archive} <- Evidence.publication(run, attempt.id, receipt, opts[:evidence_server] || run.execution[:evidence_server] || Evidence) do
       url = Evidence.url(run) || run.execution[:evidence_url]
@@ -289,8 +294,25 @@ defmodule SymphonyElixir.ValidationCheck do
     if proof(run, stage, remote, opts) == expected, do: :ok, else: {:error, :validation_evidence_changed}
   end
 
+  defp context_pr_matches?(run, view, remote) do
+    case view.execution[:candidate_context_id] do
+      nil ->
+        true
+
+      id ->
+        pr = run.candidate_contexts[id].pr
+
+        pr["number"] == remote.number and pr["url"] == remote.url and
+          pr["head_branch"] == remote.head_branch and pr["base_branch"] == remote.base_branch
+    end
+  end
+
   defp contract_id(run, stage, remote) do
-    digest(:erlang.term_to_binary({run.id, run.definition.definitions, run.policy, stage.gate, run.execution[:validation_policy], run.execution[:validation_check], remote}))
+    with {:ok, view} <- CandidateContext.view(run, run.current_attempt_id) do
+      legacy = {run.id, run.definition.definitions, run.policy, stage.gate, view.execution[:validation_policy], view.execution[:validation_check], remote}
+      identity = if context_id = view.execution[:candidate_context_id], do: {legacy, context_id}, else: legacy
+      {:ok, digest(:erlang.term_to_binary(identity))}
+    end
   end
 
   defp payload(remote, id, qualification) do

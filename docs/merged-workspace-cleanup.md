@@ -215,6 +215,20 @@ same immutable image documented below. All 30 executor source pins remain presen
 The strict deployment helper executor pin is refreshed from the same complete
 30-source union; its lifecycle, child and validation pins are unchanged. The
 helper still rejects saved runs with incompatible policy and never rewrites them.
+The additional pin refresh passed warnings-as-errors compilation, full format,
+public specs and 9 focused tests (seed `61075`) on source `086db851`:
+
+```sh
+mix test test/symphony_elixir/factory_secret_name_migration_test.exs \
+  test/symphony_elixir/review_output_cleanup_test.exs
+```
+
+This includes the three offline credential-name migration tests, fresh-VM replay,
+policy mismatch rejection, active-operation rejection and review-output identity
+checks. The implementation modules are unchanged from the earlier 130-test
+snapshot. Hosted PR31 CI on `e4c3b937` passed build, formatting, public specs,
+CodeQL and the PR body; broad `make-all` stopped at Credo (285 refactor, 348
+readability and 18 design findings). Coverage and Dialyzer were not reached.
 The new completion seal binds the contained-preparation result fields from PR29;
 no broker deployment, live review-directory enrollment or deletion is qualified.
 Earlier fixture setup failures were fixed before the final passing run. Broad

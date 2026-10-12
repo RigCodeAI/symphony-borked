@@ -133,7 +133,8 @@ defmodule SymphonyElixir.WorkstreamRun do
         status: :waiting,
         result: nil,
         gate: nil,
-        gate_detail: nil
+        gate_detail: nil,
+        candidate_context_id: Map.get(run, :current_candidate_context_id)
       }
 
       operation = %{

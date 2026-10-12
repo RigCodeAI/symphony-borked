@@ -1,0 +1,10 @@
+Warnings-as-errors compilation and public spec checks passed.
+{'lifecycle_sha256': 'f7ca388a6438608672ceda20cf76f690406318321bbd050438acdedf1b1c76aa', 'executor_sha256': 'f6b4c5e453a62505cf710ce0adedb273e86573db9f16cd31be75832fed47b851', 'child_sha256': 'a83895f16f4ff02a33ee340263c24d41a746abab9bf141665f37a622db747f6e', 'validation_sha256': '47a77cb57082970ce8f6ca5515b327fc49c31a68a19482fff07893d93efc9cbf'}
+Running ExUnit with seed: 240, max_cases: 6
+Excluding tags: [:test]
+Including tags: [location: "test/symphony_elixir/review_execution_test.exs", location: "test/symphony_elixir/candidate_context_test.exs", location: "test/symphony_elixir/review_workstream_test.exs", location: "test/symphony_elixir/review_definition_test.exs", location: "test/symphony_elixir/candidate_transfer_test.exs", location: "test/symphony_elixir/local_candidate_commit_test.exs", location: "test/symphony_elixir/publisher_test.exs", location: "test/symphony_elixir/validation_check_test.exs", location: "test/symphony_elixir/software_change_test.exs", location: "test/symphony_elixir/factory_secret_name_migration_test.exs", location: "test/symphony_elixir/workstream_child_definition_test.exs", location: "test/symphony_elixir/workstream_child_run_test.exs", location: "test/symphony_elixir/durable_child_handoff_test.exs", location: {"test/symphony_elixir/backup_capture_owner_test.exs", 521}, location: {"test/symphony_elixir/backup_capture_owner_test.exs", 632}, location: {"test/symphony_elixir/backup_capture_owner_test.exs", 670}]
+
+...............................................................................................................................
+Finished in 62.3 seconds (2.7s async, 59.6s sync)
+127 tests, 0 failures (4 excluded)
+PR body format OK

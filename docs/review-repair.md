@@ -6,16 +6,18 @@ durable worker ledger. This document describes source behavior; App provisioning
 deployed worker qualification, live review quality and the real same-PR pilot remain
 separate acceptance gates.
 
-This first qualified commit supplies the shared context/attempt APIs and review
-stages. The transfer/producer/publisher consumer and GitHub validation consumer
-follow-ups must be integrated and jointly verified before claiming a complete
-source repair path. Current consumers cannot qualify a new-context repair receipt;
-they retain or block it. This is not a live release.
+The combined source includes the shared context/attempt APIs, review stages and
+their transfer, producer, publisher and GitHub validation consumers. The runner
+passes only authenticated context claims to the protected commit command; a model
+cannot supply those claims. Source checks and the live release remain separate.
 
 ## Review stages
 
-`prepare-review` verifies the current trusted check and records the PR, main base,
-head, rubric digest and original Cloud Agent thread. One contained check prepares
+`prepare-review` verifies the current trusted check and matches its PR to the latest
+passed publication in the same candidate context. PR number, URL, head and branch
+identity must agree before preparation, model launch and submission, including the
+first review. It records the PR, main base, head, rubric digest and original Cloud
+Agent thread. One contained check prepares
 a standalone reviewer clone under the workspace root's `.factory-reviews` directory.
 Its own Git metadata and service marker bind it to the recorded operation. Replay
 reuses that exact checkout; a changed identity or unsafe metadata blocks it.
@@ -125,4 +127,29 @@ supplied credentials. It was stopped and removed after scoped formatting was cop
 back. [Command](evidence/dev240/source-contract-command.txt),
 [test output](evidence/dev240/source-contract-tests.log) and
 [source digests](evidence/dev240/source-contract-snapshot.json) record the boundary.
-Broad hosted CI and the consumer integration remain separate checks.
+That checkpoint preceded the consumer integration and broad hosted CI.
+
+## Combined source qualification
+
+The final combined source includes tested publication consumer `24d0996` and
+validation consumer `c9150a6`, with main at `dc636ee` (child handoff and held recovery
+inspection). In the same isolated image and resource limits, warnings-as-errors
+compilation, public specs and **127 focused tests passed**, seed `240`; four other
+capture cases were excluded by explicit test selection. The first run had one
+owned fixture assertion mismatch (`"complete"` versus `:complete`). After correcting
+only that assertion, the complete focused gate passed.
+
+The tests exercise real protected-command input delivery, authenticated context
+claims overriding forged model inputs, legacy input preservation, actual review
+preparation and fake-App submission, verdicts, every inline comment, replay,
+wrong-PR rejection, transfer/producer/publisher/check consumers, the shipped flow,
+final offline migration pins, child handoff/cancellation and held inspection.
+The migration helper includes the final child source hash; no migration was run.
+The exact PR body validator also passed. Both check containers were removed.
+
+[Command](evidence/dev240/integration-command.txt),
+[passing output](evidence/dev240/integration-tests.log),
+[first-run output](evidence/dev240/integration-first-check.log) and
+[final runtime digests](evidence/dev240/integration-snapshot.json) record this source
+boundary. Broad hosted CI remains a separate alpha check. Real reviewer quality,
+App provisioning, feedback-owner cutover and the live same-PR pilot remain gated.

@@ -34,6 +34,7 @@ defmodule SymphonyElixir.Review do
          :ok <- owner(opts),
          validation when is_map(validation) <- view.definition.stages[stage.gate.validation_stage],
          {:ok, remote} <- ValidationCheck.verify_ready(view, validation, validation_opts(opts)),
+         :ok <- published_pr(view, remote),
          {:ok, config} <- configuration(view),
          {:ok, pr} <- transport(view, opts).get_pr(config, remote.number),
          :ok <- same_pr(pr, remote),
@@ -47,6 +48,7 @@ defmodule SymphonyElixir.Review do
          {:ok, checkout} <- ReviewWorkspace.prepare(view, identity, opts),
          :ok <- owner(opts),
          {:ok, fresh} <- ValidationCheck.verify_ready(view, validation, validation_opts(opts)),
+         :ok <- published_pr(view, fresh),
          true <- Map.take(fresh, [:number, :base_sha, :head_sha, :url]) == Map.take(remote, [:number, :base_sha, :head_sha, :url]) do
       seal_result(view, stage, checkout)
     else
@@ -84,7 +86,8 @@ defmodule SymphonyElixir.Review do
          validation = run.definition.stages[checkout_stage.gate.validation_stage],
          :ok <- owner(opts),
          {:ok, current} <- ValidationCheck.verify_ready(run, validation, validation_opts(opts)),
-         true <- current.base_sha == checkout["base_sha"] and current.head_sha == checkout["head_sha"] and current.number == checkout["number"] and current.url == checkout["url"] do
+         :ok <- published_pr(run, current),
+         true <- checkout_matches?(checkout, current) do
       {:ok, checkout}
     else
       {:error, _} = error -> error
@@ -107,7 +110,8 @@ defmodule SymphonyElixir.Review do
          :ok <- owner(opts),
          {:ok, reviewer, checkout} <- reviewer_result(view, stage),
          {:ok, remote} <- ValidationCheck.verify_ready(view, view.definition.stages[stage.gate.validation_stage], validation_opts(opts)),
-         true <- remote.base_sha == checkout["base_sha"] and remote.head_sha == checkout["head_sha"],
+         :ok <- published_pr(view, remote),
+         true <- checkout_matches?(checkout, remote),
          {:ok, workspace} <- CandidateTransfer.workspace(view),
          recorded = %{base_sha: checkout["base_sha"], head_sha: checkout["head_sha"], rubric_sha256: checkout["rubric_sha256"]},
          {:ok, validated} <- ReviewResult.validate(reviewer["review_json"], recorded, remote, workspace, checkout["workspace"]),
@@ -120,6 +124,7 @@ defmodule SymphonyElixir.Review do
          :ok <- matches_submission(submitted, payload, pr),
          :ok <- owner(opts),
          {:ok, fresh} <- ValidationCheck.verify_ready(view, view.definition.stages[stage.gate.validation_stage], validation_opts(opts)),
+         :ok <- published_pr(view, fresh),
          true <- fresh.base_sha == remote.base_sha and fresh.head_sha == remote.head_sha,
          {:ok, confirmed} <- transport(view, opts).reviews(config, remote.number),
          [actual] <- Enum.filter(confirmed, &(&1.id == submitted.id)),
@@ -128,6 +133,7 @@ defmodule SymphonyElixir.Review do
          :ok <- matches_comments(comments, payload),
          :ok <- owner(opts),
          {:ok, final} <- ValidationCheck.verify_ready(view, view.definition.stages[stage.gate.validation_stage], validation_opts(opts)),
+         :ok <- published_pr(view, final),
          true <- final.base_sha == remote.base_sha and final.head_sha == remote.head_sha do
       result = %{
         base_sha: remote.base_sha,
@@ -293,6 +299,30 @@ defmodule SymphonyElixir.Review do
          pr.state == "open" and not pr.draft,
        do: :ok,
        else: {:error, :review_pr_changed}
+  end
+
+  defp published_pr(run, remote) do
+    publication =
+      run.attempts
+      |> Enum.reverse()
+      |> Enum.find(&(&1.type == :publish and &1.status == :completed and &1.gate == :passed))
+
+    with %{result: %{status: :ok, evidence: evidence}} <- publication,
+         true <- CandidateContext.same_context?(run, run.current_attempt_id, publication.id),
+         evidence = json(evidence),
+         true <- evidence["candidate_sha"] == remote.head_sha,
+         pr when is_map(pr) <- evidence["pr"],
+         true <- Enum.all?([:number, :url, :head_sha, :head_branch, :base_branch], &(pr[Atom.to_string(&1)] == Map.get(remote, &1))) do
+      :ok
+    else
+      _ -> {:error, :review_publication_identity_mismatch}
+    end
+  rescue
+    _ -> {:error, :review_publication_identity_mismatch}
+  end
+
+  defp checkout_matches?(checkout, remote) do
+    Enum.all?([:number, :url, :base_sha, :head_sha, :head_branch, :base_branch], &(checkout[Atom.to_string(&1)] == Map.get(remote, &1)))
   end
 
   defp seal_result(run, stage, result) do

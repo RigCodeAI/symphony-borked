@@ -3,7 +3,7 @@ defmodule SymphonyElixir.SoftwareChangeTest do
 
   alias SymphonyElixir.{Workstream, WorkstreamRun, WorkstreamRunner}
 
-  test "the shipped entry requires trusted validation and publication before a human wait" do
+  test "the shipped entry requires trusted validation, publication and review before a human wait" do
     root = Path.join(System.tmp_dir!(), "software-change-#{System.unique_integer([:positive])}")
     File.mkdir_p!(Path.join(root, "workstreams"))
     source = Path.expand("../../../factory/workstreams/software-change.yaml", __DIR__)
@@ -31,7 +31,8 @@ defmodule SymphonyElixir.SoftwareChangeTest do
     assert Base.encode16(:crypto.hash(:sha256, Jason.encode!(commit_command)), case: :lower) ==
              "a7bf9930b1e99665d598a30c94db43896d9056a3aaeaf28347d5a1a12a1a1ed9"
 
-    workspace = Path.join(root, "clone")
+    workspace_root = Path.join(root, "workspaces")
+    workspace = Path.join(workspace_root, "clone")
     File.mkdir_p!(workspace)
     {_, 0} = System.cmd("git", ["init", "--quiet", workspace])
     File.write!(Path.join(workspace, "candidate"), "local candidate")
@@ -48,13 +49,14 @@ defmodule SymphonyElixir.SoftwareChangeTest do
 
     opts = [
       workspace: workspace,
-      workspace_root: root,
+      workspace_root: workspace_root,
       validation_policy: Path.join(root, "policies/rig-local.yaml"),
       validation_archive: Path.join(root, "validation-archive"),
       validation_scratch: Path.join(root, "validation-scratch"),
       validation_base: String.trim(base),
       publisher: %{app_id: "1", installation_id: "2", private_key_path: Path.join(root, "publisher.pem")},
-      validation_check: %{app_id: "3", installation_id: "4", private_key_path: Path.join(root, "validation.pem")}
+      validation_check: %{app_id: "3", installation_id: "4", private_key_path: Path.join(root, "validation.pem")},
+      review: %{app_id: "5", installation_id: "6", private_key_path: Path.join(root, "review.pem")}
     ]
 
     assert {:error, {:missing_validation_option, :validation_policy}} =
@@ -62,7 +64,7 @@ defmodule SymphonyElixir.SoftwareChangeTest do
                path,
                %{"task" => "missing trusted setup"},
                workspace: workspace,
-               workspace_root: root
+               workspace_root: workspace_root
              )
 
     assert {:ok, high, ^workspace} =
@@ -87,11 +89,11 @@ defmodule SymphonyElixir.SoftwareChangeTest do
                path,
                %{"task" => "reviewer forbidden"},
                workspace: workspace,
-               workspace_root: root,
+               workspace_root: workspace_root,
                cloud_agent_id: "default-review"
              )
 
-    run = WorkstreamRun.new("linear/pilot", definition, workspace, workspace_root: root)
+    run = WorkstreamRun.new("linear/pilot", definition, workspace, workspace_root: workspace_root)
     File.write!(path, "changed after enqueue")
     candidate = %{thread_id: "controlled-contract-conversation"}
     run = run |> WorkstreamRun.start_stage() |> WorkstreamRun.finish_stage({:ok, candidate}) |> WorkstreamRun.start_stage()
@@ -101,7 +103,7 @@ defmodule SymphonyElixir.SoftwareChangeTest do
     File.write!(Path.join(workspace, "candidate"), "uncommitted local candidate")
 
     assert {:ok, %{exit_status: 0, output: commit_output} = committed} =
-             WorkstreamRunner.execute_stage(run.stage_id, definition, run, workspace_root: root)
+             WorkstreamRunner.execute_stage(run.stage_id, definition, run, workspace_root: workspace_root)
 
     metadata = commit_output |> String.trim() |> Jason.decode!()
     bundle = Path.join(workspace, metadata["candidate_bundle"])
@@ -127,12 +129,12 @@ defmodule SymphonyElixir.SoftwareChangeTest do
     assert run.artifacts["candidate-commit"].attempt_id == "#{run.id}/local-commit/2"
 
     assert {:ok, %{exit_status: 0} = checked} =
-             WorkstreamRunner.execute_stage(run.stage_id, definition, run, workspace_root: root)
+             WorkstreamRunner.execute_stage(run.stage_id, definition, run, workspace_root: workspace_root)
 
     File.write!(Path.join(workspace, "untracked"), "dirty candidate")
 
     assert {:ok, %{exit_status: status}} =
-             WorkstreamRunner.execute_stage(run.stage_id, definition, run, workspace_root: root)
+             WorkstreamRunner.execute_stage(run.stage_id, definition, run, workspace_root: workspace_root)
 
     assert status != 0
     run = run |> WorkstreamRun.finish_stage({:ok, checked}) |> WorkstreamRun.start_stage()
@@ -142,7 +144,7 @@ defmodule SymphonyElixir.SoftwareChangeTest do
     assert definition.stages["publish"].type == :publish
     assert definition.stages["publish"].gate.validation_stage == "validate"
     assert definition.stages["publish"].gate.required == definition.stages["validate"].gate.required
-    assert definition.stages["candidate-ready"].inputs == ["publication", "github-validation"]
+    assert definition.stages["candidate-ready"].inputs == ["publication", "github-validation", "review-publication"]
     assert definition.stages["candidate-ready"].prompt =~ "Human merge remains in GitHub"
     # A caller's prose or verdict cannot stand in for authenticated final validation.
     blocked = WorkstreamRun.finish_stage(run, {:ok, %{gate: %{verdict: :passed}, exit_status: 0}})

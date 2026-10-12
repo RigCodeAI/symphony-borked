@@ -66,7 +66,8 @@ defmodule SymphonyElixir.ReviewExecutionTest do
      base_sha: base_sha,
      head_sha: head_sha,
      publisher_config: config_file!(root, "publisher.pem", 101, 201),
-     validation_config: config_file!(root, "validation.pem", 102, 202)}
+     validation_config: config_file!(root, "validation.pem", 102, 202),
+     review_config: config_file!(root, "review.pem", 103, 203)}
   end
 
   test "prepares a separate clean Git clone, replays it, and rejects a moved source head", c do
@@ -237,6 +238,420 @@ defmodule SymphonyElixir.ReviewExecutionTest do
     assert repair.thread_id == "cloud-repair-thread"
   end
 
+  test "submits a correct finding as COMMENT with every inline comment and advances into repair", c do
+    c = validated_fixture(c)
+    {review_remote, _pr} = start_review_remote(c)
+
+    {c, _reviewer_finished, submission_run, captured} =
+      prepare_submission_run(c, "patch is correct", [
+        %{priority: 1, title: "Validate the boundary", body: "Reject this value before dispatch."},
+        %{priority: 2, title: "Keep the state consistent", body: "Update the related state with this change."}
+      ])
+
+    assert captured.review_json =~ "Validate the boundary"
+    assert {:ok, submitted} = execute_submission(c, submission_run)
+    assert submitted["event"] == "COMMENT"
+    assert submitted["actionable"]
+    assert submitted["result"]["overall_correctness"] == "patch is correct"
+
+    assert submitted["locations"] == [
+             %{"path" => "README.md", "start_line" => 1, "end_line" => 1, "side" => "right"},
+             %{"path" => "README.md", "start_line" => 1, "end_line" => 1, "side" => "right"}
+           ]
+
+    state = Agent.get(review_remote, & &1)
+    assert state.creates == 1
+    assert Enum.count(state.calls, &(&1 == :review_comments)) == 1
+    assert Enum.take(state.calls, 3) == [:get_pr, :reviews, :create_review]
+    assert [first_comment, second_comment] = state.last_payload["comments"]
+    assert first_comment["path"] == "README.md"
+    assert first_comment["line"] == 1
+    assert first_comment["side"] == "RIGHT"
+    assert first_comment["body"] =~ "Validate the boundary"
+    assert second_comment["body"] =~ "Keep the state consistent"
+
+    completed = WorkstreamRun.finish_stage(submission_run, {:ok, submitted})
+    assert completed.status == :ready
+    assert completed.stage_id == "implement"
+    assert is_binary(completed.current_candidate_context_id)
+    stop_review_remote(review_remote)
+  end
+
+  test "submits a clean correct verdict as APPROVE and reuses it on replay", c do
+    c = validated_fixture(c)
+    {review_remote, _pr} = start_review_remote(c)
+    {c, _reviewer_finished, submission_run, _captured} = prepare_submission_run(c, "patch is correct", [])
+
+    assert {:ok, submitted} = execute_submission(c, submission_run)
+    assert submitted["event"] == "APPROVE"
+    assert submitted["actionable"] == false
+    assert submitted["result"]["findings"] == []
+    assert Agent.get(review_remote, & &1.last_payload["comments"]) == []
+
+    assert {:ok, replayed} = execute_submission(c, submission_run)
+    assert replayed["review_id"] == submitted["review_id"]
+    assert replayed["event"] == "APPROVE"
+
+    state = Agent.get(review_remote, & &1)
+    assert state.creates == 1
+    assert Enum.count(state.calls, &(&1 == :reviews)) == 4
+    assert Enum.count(state.calls, &(&1 == :review_comments)) == 2
+    assert Enum.find_index(state.calls, &(&1 == :create_review)) > Enum.find_index(state.calls, &(&1 == :reviews))
+
+    completed = WorkstreamRun.finish_stage(submission_run, {:ok, submitted})
+    assert completed.status == :complete
+    assert completed.stage_id == :complete
+    stop_review_remote(review_remote)
+  end
+
+  test "preserves an incorrect clean verdict as REQUEST_CHANGES and blocks for a human", c do
+    c = validated_fixture(c)
+    {review_remote, _pr} = start_review_remote(c)
+    {c, _reviewer_finished, submission_run, _captured} = prepare_submission_run(c, "patch is incorrect", [])
+
+    assert {:ok, submitted} = execute_submission(c, submission_run)
+    assert submitted["event"] == "REQUEST_CHANGES"
+    assert submitted["actionable"] == false
+    assert submitted["result"]["overall_correctness"] == "patch is incorrect"
+    assert submitted["result"]["findings"] == []
+
+    blocked = WorkstreamRun.finish_stage(submission_run, {:ok, submitted})
+    assert blocked.status == :blocked
+    assert blocked.review_escalation == :review_requires_human
+    assert Agent.get(review_remote, & &1.creates) == 1
+    stop_review_remote(review_remote)
+  end
+
+  test "refuses a missing inline comment response", c do
+    c = validated_fixture(c)
+    {review_remote, _pr} = start_review_remote(c, comment_mode: :missing)
+
+    {c, _reviewer_finished, submission_run, _captured} =
+      prepare_submission_run(c, "patch is correct", [%{priority: 1, title: "Validate the boundary", body: "Reject this value before dispatch."}])
+
+    assert {:error, :review_inline_comments_not_verified} = execute_submission(c, submission_run)
+    assert Agent.get(review_remote, & &1.creates) == 1
+    stop_review_remote(review_remote)
+  end
+
+  test "refuses an inline comment response with a changed body", c do
+    c = validated_fixture(c)
+    {review_remote, _pr} = start_review_remote(c, comment_mode: :wrong)
+
+    {c, _reviewer_finished, submission_run, _captured} =
+      prepare_submission_run(c, "patch is correct", [%{priority: 1, title: "Validate the boundary", body: "Reject this value before dispatch."}])
+
+    assert {:error, :review_inline_comments_not_verified} = execute_submission(c, submission_run)
+    assert Agent.get(review_remote, & &1.creates) == 1
+    stop_review_remote(review_remote)
+  end
+
+  test "does not seal a review after the candidate head moves during submission", c do
+    c = validated_fixture(c)
+    {validation_remote, _pr} = c.validation_remote
+    moved_head = String.duplicate("b", 40)
+    on_create = fn -> Agent.update(validation_remote, &put_in(&1.pr.head_sha, moved_head)) end
+    {review_remote, _pr} = start_review_remote(c, on_create: on_create)
+    {c, _reviewer_finished, submission_run, _captured} = prepare_submission_run(c, "patch is correct", [])
+
+    assert {:error, _reason} = execute_submission(c, submission_run)
+    assert Agent.get(review_remote, & &1.creates) == 1
+    stop_review_remote(review_remote)
+  end
+
+  test "rejects malformed captured JSON before creating a GitHub review", c do
+    c = validated_fixture(c)
+    {review_remote, _pr} = start_review_remote(c)
+    {c, _reviewer_finished, submission_run, captured} = prepare_submission_run(c, "patch is correct", [], review_json: "not JSON")
+
+    assert captured.review_json == "not JSON"
+    assert {:error, _reason} = execute_submission(c, submission_run)
+    state = Agent.get(review_remote, & &1)
+    assert state.creates == 0
+    refute :create_review in state.calls
+    stop_review_remote(review_remote)
+  end
+
+  test "rejects a publication for a different PR even when its base and head match", c do
+    c = validated_fixture(c)
+    {validation_remote, _pr} = c.validation_remote
+    run = review_ready_run(c)
+    assert {:ok, %{qualified: true}} = ValidationCheck.reconcile(run, c.definition.stages["github-validation"], validation_options(c))
+    run = include_publication(run, c)
+    review_run = prepared_review_run(c, run, workspace_root: c.workspace_root)
+    review_run = change_publication_pr(review_run, %{"number" => 242, "url" => "https://github.com/RigCodeAI/rig/pull/242"})
+    review_started = review_run
+    parent = self()
+
+    executor = fn _workspace, _prompt, _issue, _opts ->
+      send(parent, :reviewer_launched_for_wrong_pr)
+      {:ok, %{thread_id: "unexpected-thread"}}
+    end
+
+    assert {:error, _reason} = execute_reviewer(c, review_started, executor)
+    refute_received :reviewer_launched_for_wrong_pr
+    assert Agent.get(validation_remote, & &1.pr.head_sha) == c.head_sha
+  end
+
+  test "prepares a published checkout through the review service", c do
+    c = validated_fixture(c)
+    {review_remote, _pr} = start_review_remote(c)
+    run = review_ready_run(c)
+    assert {:ok, %{qualified: true}} = ValidationCheck.reconcile(run, c.definition.stages["github-validation"], validation_options(c))
+    run = include_publication(run, c)
+    checkout_run = %{run | status: :ready, phase: :queued, stage_id: "checkout", current_attempt_id: nil}
+    checkout_started = WorkstreamRun.start_stage(checkout_run)
+
+    assert {:ok, checkout} =
+             WorkstreamRunner.execute_stage(
+               "checkout",
+               c.definition,
+               checkout_started,
+               Keyword.merge(validation_options(c),
+                 workspace: c.workspace,
+                 workspace_root: c.workspace_root,
+                 review_transport: SymphonyElixir.ReviewExecutionTest.ReviewTransport
+               )
+             )
+
+    assert checkout["head_sha"] == c.head_sha
+    assert checkout["base_sha"] == c.base_sha
+    assert checkout["workspace"] != c.workspace
+    assert Path.expand(checkout["workspace"]) == checkout["workspace"]
+    completed = WorkstreamRun.finish_stage(checkout_started, {:ok, checkout})
+    assert completed.status == :ready
+    assert completed.stage_id == "review"
+    assert completed.outputs["review-checkout"]["workspace"] == checkout["workspace"]
+    stop_review_remote(review_remote)
+  end
+
+  test "rejects a different publication PR before posting a review with the same head", c do
+    c = validated_fixture(c)
+    {review_remote, _pr} = start_review_remote(c)
+    {c, _reviewer_finished, submission_run, _captured} = prepare_submission_run(c, "patch is correct", [])
+    submission_run = change_publication_pr(submission_run, %{"number" => 242, "url" => "https://github.com/RigCodeAI/rig/pull/242"})
+
+    assert {:error, :review_publication_identity_mismatch} = execute_submission(c, submission_run)
+    assert Agent.get(review_remote, & &1.creates) == 0
+    refute :create_review in Agent.get(review_remote, & &1.calls)
+    stop_review_remote(review_remote)
+  end
+
+  test "the protected producer receives only the authenticated repair context", c do
+    c = %{c | definition: producer_probe_definition(c.definition)}
+    repair = repair_run(c)
+    forged = %{"id" => String.duplicate("f", 64), "repair_parent_sha" => String.duplicate("d", 40), "validation_base" => String.duplicate("e", 40)}
+    inputs = %{"candidate" => %{"thread_id" => "repair-thread"}, "candidate_context" => forged}
+    run = %{repair | status: :ready, stage_id: "local-commit", current_attempt_id: nil, outputs: inputs} |> WorkstreamRun.start_stage()
+
+    assert {:ok, %{exit_status: 0, output: output}} =
+             WorkstreamRunner.execute_stage("local-commit", c.definition, run, workspace: c.workspace, workspace_root: c.workspace_root)
+
+    actual = Jason.decode!(output)
+    assert actual["candidate"] == inputs["candidate"]
+    assert actual["candidate_context"] == %{"id" => repair.current_candidate_context_id, "repair_parent_sha" => c.head_sha, "validation_base" => c.base_sha}
+    assert run.execution[:candidate_context_id] == nil
+
+    attempts = Enum.map(run.attempts, fn attempt -> if attempt.id == run.current_attempt_id, do: Map.put(attempt, :candidate_context_id, forged["id"]), else: attempt end)
+
+    assert {:error, :candidate_context_not_authorized} =
+             WorkstreamRunner.execute_stage("local-commit", c.definition, %{run | attempts: attempts}, workspace: c.workspace, workspace_root: c.workspace_root)
+  end
+
+  test "the legacy protected producer discards a model-supplied repair context", c do
+    definition = producer_probe_definition(c.definition)
+    inputs = %{"candidate" => %{"thread_id" => "cloud-thread"}, "candidate_context" => %{"id" => "untrusted-model-claim"}}
+    run = %{base_run(%{c | definition: definition}) | stage_id: "local-commit", outputs: inputs} |> WorkstreamRun.start_stage()
+
+    assert {:ok, %{exit_status: 0, output: output}} =
+             WorkstreamRunner.execute_stage("local-commit", definition, run, workspace: c.workspace, workspace_root: c.workspace_root)
+
+    assert Jason.decode!(output) == Map.take(inputs, ["candidate"])
+  end
+
+  defp producer_probe_definition(definition) do
+    probe = %{
+      id: "local-commit",
+      type: :check,
+      inputs: ["candidate", "candidate_context"],
+      outputs: ["candidate-commit"],
+      gate: %{command: ["/usr/bin/python3", "-I", "-c", "import os; print(os.environ['WORKSTREAM_INPUTS_JSON'])"], timeout_ms: 10_000}
+    }
+
+    %{definition | stages: Map.put(definition.stages, probe.id, probe)}
+  end
+
+  defp prepare_submission_run(c, correctness, findings, opts \\ []) do
+    run = review_ready_run(c)
+    validation_stage = c.definition.stages["github-validation"]
+    assert {:ok, %{qualified: true}} = ValidationCheck.reconcile(run, validation_stage, validation_options(c))
+    run = include_publication(run, c)
+    review_run = prepared_review_run(c, run, workspace_root: c.workspace_root)
+    reviewer_started = review_run
+    parent = self()
+
+    executor = fn workspace, prompt, _issue, app_opts ->
+      assert prompt =~ ReviewResult.rubric().text
+      review_json = opts[:review_json] || submission_review_json(workspace, correctness, findings)
+      send(parent, {:captured_review_output, review_json})
+      assert :ok = app_opts[:on_message].(completed_message(review_json))
+      {:ok, %{thread_id: "independent-review-thread", session_id: "review-session", turn_id: "review-turn"}}
+    end
+
+    assert {:ok, captured} =
+             WorkstreamRunner.execute_stage(
+               "review",
+               c.definition,
+               reviewer_started,
+               Keyword.merge(validation_options(c),
+                 workspace: c.workspace,
+                 workspace_root: c.workspace_root,
+                 agent_executor: executor
+               )
+             )
+
+    expected_json = captured.review_json
+    assert_receive {:captured_review_output, ^expected_json}
+    reviewer_finished = WorkstreamRun.finish_stage(reviewer_started, {:ok, captured})
+    assert reviewer_finished.status == :ready
+    assert reviewer_finished.stage_id == "review-result"
+    submission_run = WorkstreamRun.start_stage(reviewer_finished)
+    {c, reviewer_finished, submission_run, captured}
+  end
+
+  defp execute_submission(c, run) do
+    WorkstreamRunner.execute_stage(
+      "review-result",
+      c.definition,
+      run,
+      Keyword.merge(validation_options(c),
+        workspace: c.workspace,
+        workspace_root: c.workspace_root,
+        review_transport: SymphonyElixir.ReviewExecutionTest.ReviewTransport
+      )
+    )
+  end
+
+  defp submission_review_json(workspace, correctness, findings) do
+    findings =
+      Enum.map(findings, fn finding ->
+        priority = finding.priority
+
+        %{
+          "title" => "[P#{priority}] " <> finding.title,
+          "body" => finding.body,
+          "confidence_score" => 0.94,
+          "priority" => priority,
+          "code_location" => %{
+            "absolute_file_path" => Path.join(workspace, "README.md"),
+            "line_range" => %{"start" => 1, "end" => 1}
+          }
+        }
+      end)
+
+    Jason.encode!(%{
+      "overall_correctness" => correctness,
+      "overall_explanation" => "The committed candidate diff was reviewed.",
+      "overall_confidence_score" => 0.97,
+      "findings" => findings
+    })
+  end
+
+  defp include_publication(run, c, pr \\ nil) do
+    if Enum.any?(run.attempts, &(&1.type == :publish and &1.status == :completed and &1.gate == :passed)) do
+      run
+    else
+      pr =
+        pr ||
+          %{
+            number: 241,
+            url: "https://github.com/RigCodeAI/rig/pull/241",
+            head_sha: c.head_sha,
+            base_sha: c.base_sha,
+            head_branch: "feature/review",
+            base_branch: "main"
+          }
+
+      publication_id = run.id <> "/publish/1"
+
+      publication = %{
+        id: publication_id,
+        stage: "publish",
+        type: :publish,
+        ordinal: 1,
+        status: :completed,
+        gate: :passed,
+        candidate_context_id: nil,
+        result: %{status: :ok, evidence: %{"candidate_sha" => c.head_sha, "pr" => Map.new(pr, fn {key, value} -> {to_string(key), value} end)}}
+      }
+
+      %{run | attempts: run.attempts ++ [publication]}
+    end
+  end
+
+  defp change_publication_pr(run, changes) do
+    attempts =
+      Enum.map(run.attempts, fn attempt ->
+        if attempt.type == :publish do
+          evidence = attempt.result.evidence
+          pr = Map.merge(evidence["pr"], changes)
+          %{attempt | result: %{attempt.result | evidence: Map.put(evidence, "pr", pr)}}
+        else
+          attempt
+        end
+      end)
+
+    %{run | attempts: attempts}
+  end
+
+  defp start_review_remote(c, opts \\ []) do
+    pr = %{
+      number: 241,
+      url: "https://github.com/RigCodeAI/rig/pull/241",
+      state: "open",
+      draft: false,
+      head_sha: c.head_sha,
+      base_sha: c.base_sha,
+      head_branch: "feature/review",
+      base_branch: "main",
+      head_repository_full_name: "RigCodeAI/rig",
+      base_repository_full_name: "RigCodeAI/rig",
+      author_login: "human-author"
+    }
+
+    state = %{
+      pr: pr,
+      reviews: [],
+      comments: %{},
+      creates: 0,
+      calls: [],
+      comment_mode: Keyword.get(opts, :comment_mode, :normal),
+      on_create: Keyword.get(opts, :on_create),
+      last_payload: nil
+    }
+
+    {:ok, remote} = Agent.start_link(fn -> state end)
+    :persistent_term.put({__MODULE__, :review_remote}, remote)
+
+    on_exit(fn ->
+      if :persistent_term.get({__MODULE__, :review_remote}, nil) == remote do
+        :persistent_term.erase({__MODULE__, :review_remote})
+      end
+
+      if Process.alive?(remote), do: Agent.stop(remote)
+    end)
+
+    {remote, pr}
+  end
+
+  defp stop_review_remote(remote) do
+    if :persistent_term.get({__MODULE__, :review_remote}, nil) == remote do
+      :persistent_term.erase({__MODULE__, :review_remote})
+    end
+
+    if Process.alive?(remote), do: Agent.stop(remote)
+  end
+
   defp repair_run(c) do
     write_key!(c.validation_archive)
     run = base_run(c)
@@ -333,7 +748,7 @@ defmodule SymphonyElixir.ReviewExecutionTest do
     {:ok, evidence_server} =
       start_supervised({Evidence, [config: {:ok, evidence_config}, name: nil, receipt_uid: File.stat!(c.root).uid]})
 
-    run = base_run(c, %{evidence_server: evidence_server, evidence_url: "https://evidence.example.test/tasks/review-fixture"})
+    run = base_run(c, %{evidence_url: "https://evidence.example.test/tasks/review-fixture"})
     validation_id = run.id <> "/validate/1"
     context = %{task_id: run.task_id, run_id: run.id, attempt_id: validation_id, base_sha: c.base_sha}
     required = [%{check: "contract", assertion: "exit_status", equals: 0}]
@@ -393,6 +808,7 @@ defmodule SymphonyElixir.ReviewExecutionTest do
           validation_check_transport: SymphonyElixir.ReviewExecutionTest.ValidationTransport,
           validation_pr: 241,
           publisher: c.publisher_config,
+          review: c.review_config,
           review_rubric_sha256: ReviewResult.rubric().sha256
         },
         execution_overrides
@@ -401,12 +817,13 @@ defmodule SymphonyElixir.ReviewExecutionTest do
     WorkstreamRun.new("DEV-240", c.definition, c.workspace, [], execution)
   end
 
-  defp prepared_review_run(c, run) do
+  defp prepared_review_run(c, run, opts \\ []) do
+    run = include_publication(run, c)
     checkout_id = run.id <> "/checkout/2"
     checkout_operation = %{checkout_id => operation("review-checkout-effect")}
     preparing = %{run | stage_id: "checkout", current_attempt_id: checkout_id, operations: Map.merge(run.operations, checkout_operation)}
     identity = workspace_identity(c, run.thread_id || "cloud-thread", Map.get(run, :current_candidate_context_id))
-    assert {:ok, checkout} = ReviewWorkspace.prepare(preparing, identity, workspace_root: c.review_root)
+    assert {:ok, checkout} = ReviewWorkspace.prepare(preparing, identity, workspace_root: Keyword.get(opts, :workspace_root, c.review_root))
     evidence = seal_checkout_fixture(preparing, "checkout", checkout_id, checkout)
 
     checkout_attempt = %{
@@ -441,13 +858,12 @@ defmodule SymphonyElixir.ReviewExecutionTest do
       c.definition,
       run,
       Keyword.merge(
-        [
+        Keyword.merge(validation_options(c),
           workspace: c.workspace,
           workspace_root: c.workspace_root,
           agent_executor: executor,
-          validation_check_transport: SymphonyElixir.ReviewExecutionTest.ValidationTransport,
-          on_publication_check: fn -> :ok end
-        ],
+          review_transport: SymphonyElixir.ReviewExecutionTest.ReviewTransport
+        ),
         extra_opts
       )
     )
@@ -535,7 +951,8 @@ defmodule SymphonyElixir.ReviewExecutionTest do
       validation_check_transport: SymphonyElixir.ReviewExecutionTest.ValidationTransport,
       workspace: c.workspace,
       validation_archive: c.validation_archive,
-      validation_scratch: c.validation_scratch
+      validation_scratch: c.validation_scratch,
+      evidence_server: c[:evidence_server]
     ]
   end
 
@@ -820,4 +1237,85 @@ defmodule SymphonyElixir.ReviewExecutionTest.ValidationTransport do
   end
 
   defp remote, do: :persistent_term.get({SymphonyElixir.ReviewExecutionTest, :validation_remote})
+end
+
+defmodule SymphonyElixir.ReviewExecutionTest.ReviewTransport do
+  def get_pr(_config, _number) do
+    Agent.get_and_update(remote(), fn state ->
+      {{:ok, state.pr}, %{state | calls: state.calls ++ [:get_pr]}}
+    end)
+  end
+
+  def reviews(_config, _number) do
+    Agent.get_and_update(remote(), fn state ->
+      {{:ok, state.reviews}, %{state | calls: state.calls ++ [:reviews]}}
+    end)
+  end
+
+  def create_review(_config, _number, payload) do
+    {{:ok, review}, on_create} =
+      Agent.get_and_update(remote(), fn state ->
+        id = state.creates + 1
+        state_name = %{"APPROVE" => "APPROVED", "REQUEST_CHANGES" => "CHANGES_REQUESTED", "COMMENT" => "COMMENTED"}[payload["event"]]
+
+        review = %{
+          id: id,
+          url: "https://github.com/RigCodeAI/rig/pull/241#pullrequestreview-#{id}",
+          head_sha: payload["commit_id"],
+          state: state_name,
+          body: payload["body"],
+          author_login: "review-app[bot]",
+          author_type: "Bot",
+          owned: true
+        }
+
+        comments =
+          payload["comments"]
+          |> Enum.with_index(1)
+          |> Enum.map(fn {comment, index} ->
+            %{
+              id: id * 1_000 + index,
+              path: comment["path"],
+              line: comment["line"],
+              side: comment["side"],
+              start_line: comment["start_line"],
+              start_side: comment["start_side"],
+              body: comment["body"],
+              head_sha: payload["commit_id"],
+              owned: true
+            }
+          end)
+
+        next = %{
+          state
+          | reviews: state.reviews ++ [review],
+            comments: Map.put(state.comments, id, comments),
+            creates: id,
+            calls: state.calls ++ [:create_review],
+            last_payload: payload
+        }
+
+        {{{:ok, review}, state.on_create}, next}
+      end)
+
+    if is_function(on_create, 0), do: on_create.()
+    {:ok, review}
+  end
+
+  def review_comments(_config, _number, review_id) do
+    Agent.get_and_update(remote(), fn state ->
+      comments = Map.get(state.comments, review_id, [])
+
+      comments =
+        case state.comment_mode do
+          :missing -> Enum.drop(comments, -1)
+          :wrong -> List.update_at(comments, 0, &Map.put(&1, :body, "unexpected inline comment"))
+          _ -> comments
+        end
+
+      {{:ok, comments}, %{state | calls: state.calls ++ [:review_comments]}}
+    end)
+  end
+
+  defp remote, do: :persistent_term.get({SymphonyElixir.ReviewExecutionTest, :review_remote})
 end

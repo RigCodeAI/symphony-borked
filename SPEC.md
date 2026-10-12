@@ -2777,8 +2777,10 @@ MUST form one normal success chain. Bounded review repair MAY return through the
 normal validation/publication path to a distinct Cloud Agent, with at most three
 completed unsuccessful review-fix rounds. Generic gate repair restrictions remain.
 
-The service MUST pin current PR/base/head and the exact rubric before creating a
-separate standalone reviewer checkout. It MUST start a separate conversation and
+The service MUST match the current PR to the latest passed publication in the same
+candidate context before preparation, model launch and submission. It MUST pin
+current PR/base/head and the exact rubric before creating a separate standalone
+reviewer checkout. It MUST start a separate conversation and
 retain its session independently from the Cloud Agent. Exact rubric JSON MUST be
 validated in full against the committed head-side diff. Malformed, stale or any
 unplaceable finding MUST block; no finding may be discarded to produce approval.

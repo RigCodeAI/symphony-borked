@@ -219,11 +219,33 @@ defmodule SymphonyElixir.WorkstreamRunner do
   end
 
   defp run_executable_check(stage, state, workspace, opts) do
-    inputs = Map.take(state.outputs, stage.inputs)
+    inputs = state.outputs |> Map.take(stage.inputs) |> producer_inputs(stage, state)
 
     case opts[:worker_control] do
       nil -> WorkstreamCommand.run(stage.gate.command, workspace, stage.gate.timeout_ms, inputs)
       control -> WorkerOperation.run_check(stage.gate.command, workspace, stage.gate.timeout_ms, state.current_attempt_id, control, opts[:on_process_start], inputs)
+    end
+  end
+
+  defp producer_inputs(inputs, stage, state) do
+    producer_stage = state.execution[:candidate_producer_stage] || "local-commit"
+
+    if stage.id == producer_stage do
+      inputs = Map.delete(inputs, "candidate_context")
+
+      case state.execution[:candidate_context_id] do
+        nil ->
+          inputs
+
+        id ->
+          Map.put(inputs, "candidate_context", %{
+            "id" => id,
+            "repair_parent_sha" => state.execution[:repair_parent_sha],
+            "validation_base" => state.execution[:validation_base]
+          })
+      end
+    else
+      inputs
     end
   end
 

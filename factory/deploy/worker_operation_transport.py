@@ -50,6 +50,8 @@ MAX_ARGV_BYTES = 32 * 1024
 MAX_ARGUMENT_BYTES = 4096
 MAX_CANDIDATE_BUNDLE_BYTES = 64 * 1024 * 1024
 CANDIDATE_BUNDLE_CHUNK_BYTES = 64 * 1024
+MAX_REVIEW_PREPARATION_SCRIPT_BYTES = 16 * 1024
+MAX_REVIEW_PREPARATION_REQUEST_BYTES = 32 * 1024
 MAX_STREAM_BUFFER = 1024 * 1024
 STREAM_TIMEOUT_SECONDS = 60 * 60
 TERMINAL_STREAM_RETENTION_SECONDS = 60.0
@@ -61,6 +63,9 @@ _HEX32_RE = re.compile(r"^[0-9a-f]{32}$")
 _HEX40_RE = re.compile(r"^[0-9a-f]{40}$")
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _BOOT_ID_RE = _HEX32_RE
+_REVIEW_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_REVIEW_STAGE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_REVIEW_ORDINAL_RE = re.compile(r"^[1-9][0-9]{0,8}$")
 _USER_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 
 IDENTITY_KEYS = frozenset({
@@ -69,6 +74,10 @@ IDENTITY_KEYS = frozenset({
 })
 RELEASE_KEYS = frozenset({"service_revision", "release_sha256"})
 REQUEST_KEYS = frozenset({"operation_id", "argv", "workspace"})
+REVIEW_IDENTITY_KEYS = frozenset({
+    "number", "url", "base_sha", "head_sha", "head_branch", "base_branch",
+    "rubric_sha256", "cloud_thread_id", "candidate_context_id",
+})
 
 
 class ProtocolError(ValueError):
@@ -203,6 +212,106 @@ def validate_prepare_request(value: Any) -> dict[str, Any]:
     return {"operation_id": operation_id, "argv": list(argv), "workspace": workspace}
 
 
+def validate_review_preparation_request(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ProtocolError("invalid review preparation request")
+    expected = frozenset({
+        "current_operation_id", "run_id", "stable_operation_id", "source_workspace",
+        "identity", "command_argv",
+    })
+    _require_exact_keys(value, expected, "review preparation request")
+    operation_ids = {
+        key: validate_operation_id(value.get(key))
+        for key in ("current_operation_id", "run_id", "stable_operation_id")
+    }
+    if any(len(item.encode("utf-8")) > 200 for item in operation_ids.values()):
+        raise ProtocolError("invalid review preparation operation ID")
+    run_id = operation_ids["run_id"]
+    if not _REVIEW_RUN_ID_RE.fullmatch(run_id):
+        raise ProtocolError("invalid review preparation run ID")
+
+    def operation_parts(operation_id: str) -> tuple[str, str, str]:
+        parts = operation_id.split("/")
+        if (len(parts) != 3 or not _REVIEW_RUN_ID_RE.fullmatch(parts[0])
+                or not _REVIEW_STAGE_ID_RE.fullmatch(parts[1])
+                or not _REVIEW_ORDINAL_RE.fullmatch(parts[2])):
+            raise ProtocolError("invalid review preparation operation ID")
+        return parts[0], parts[1], parts[2]
+
+    current_parts = operation_parts(operation_ids["current_operation_id"])
+    stable_parts = operation_parts(operation_ids["stable_operation_id"])
+    if (current_parts[0] != run_id or stable_parts[0] != run_id
+            or current_parts[:2] != stable_parts[:2]):
+        raise ProtocolError("review preparation operation IDs do not match their run and stage")
+    source_workspace = value.get("source_workspace")
+    try:
+        source_size = (
+            len(source_workspace.encode("utf-8", errors="strict"))
+            if isinstance(source_workspace, str) else 0
+        )
+    except UnicodeEncodeError as error:
+        raise ProtocolError("invalid review source workspace") from error
+    if (not isinstance(source_workspace, str) or not source_workspace.startswith("/")
+            or source_size > 4096
+            or any(char in source_workspace for char in ("\0", "\n", "\r", "$", "%"))):
+        raise ProtocolError("invalid review source workspace")
+    identity = value.get("identity")
+    if not isinstance(identity, dict):
+        raise ProtocolError("invalid review identity")
+    _require_exact_keys(identity, REVIEW_IDENTITY_KEYS, "review identity")
+    number = identity.get("number")
+    url = identity.get("url")
+    if type(number) is not int or not 1 <= number <= 2**31 - 1:
+        raise ProtocolError("invalid review identity")
+    try:
+        url_size = len(url.encode("utf-8", errors="strict")) if isinstance(url, str) else 0
+    except UnicodeEncodeError as error:
+        raise ProtocolError("invalid review identity") from error
+    if (not isinstance(url, str) or url_size > 2048
+            or "\x00" in url or "\n" in url or "\r" in url):
+        raise ProtocolError("invalid review identity")
+    for key in ("base_sha", "head_sha"):
+        if not isinstance(identity.get(key), str) or not _HEX40_RE.fullmatch(identity[key]):
+            raise ProtocolError("invalid review identity")
+    if not isinstance(identity.get("rubric_sha256"), str) or not _HEX64_RE.fullmatch(identity["rubric_sha256"]):
+        raise ProtocolError("invalid review identity")
+    for key in ("head_branch", "base_branch", "cloud_thread_id"):
+        field = identity.get(key)
+        try:
+            field_size = len(field.encode("utf-8", errors="strict")) if isinstance(field, str) else 0
+        except UnicodeEncodeError as error:
+            raise ProtocolError("invalid review identity") from error
+        if (not isinstance(field, str) or not field or field_size > 512
+                or any(ord(char) < 0x20 or ord(char) == 0x7f for char in field)):
+            raise ProtocolError("invalid review identity")
+    candidate_context_id = identity.get("candidate_context_id")
+    if candidate_context_id is not None and (
+        not isinstance(candidate_context_id, str) or not _HEX64_RE.fullmatch(candidate_context_id)
+    ):
+        raise ProtocolError("invalid review identity")
+
+    command_argv = value.get("command_argv")
+    if (not isinstance(command_argv, list) or len(command_argv) != 4
+            or command_argv[:3] != ["/usr/bin/python3", "-I", "-c"]):
+        raise ProtocolError("invalid review preparation command")
+    script = command_argv[3]
+    if not isinstance(script, str) or "\x00" in script:
+        raise ProtocolError("invalid review preparation command")
+    try:
+        script_size = len(script.encode("utf-8", errors="strict"))
+        request_size = sum(len(item.encode("utf-8", errors="strict")) for item in command_argv)
+    except UnicodeEncodeError as error:
+        raise ProtocolError("invalid review preparation command") from error
+    if script_size > MAX_REVIEW_PREPARATION_SCRIPT_BYTES or request_size > MAX_REVIEW_PREPARATION_REQUEST_BYTES:
+        raise ProtocolError("review preparation command exceeds its bound")
+    return {
+        **operation_ids,
+        "source_workspace": source_workspace,
+        "identity": dict(identity),
+        "command_argv": list(command_argv),
+    }
+
+
 def validate_rpc_request(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ProtocolError("invalid RPC request")
@@ -215,6 +324,14 @@ def validate_rpc_request(value: Any) -> dict[str, Any]:
         return {
             "action": action,
             "request": validate_prepare_request(value.get("request")),
+            "expected_release": validate_release(value.get("expected_release")),
+        }
+    if action == "prepare_review_workspace":
+        _require_exact_keys(value, frozenset({"action", "request", "expected_release"}),
+                            "review preparation request")
+        return {
+            "action": action,
+            "request": validate_review_preparation_request(value.get("request")),
             "expected_release": validate_release(value.get("expected_release")),
         }
     if action in {"release", "status", "stop"}:
@@ -323,6 +440,7 @@ class BrokerConfig:
     service_revision: str
     release_sha256: str
     candidate_producer_command_sha256: str | None = None
+    review_preparation_command_sha256: str | None = None
 
     @classmethod
     def load(cls, path: Path = DAEMON_CONFIG, *, expected_owner_uid: int = 0) -> "BrokerConfig":
@@ -335,7 +453,9 @@ class BrokerConfig:
             "service_revision", "release_sha256",
         })
         candidate_pin_key = "candidate_producer_command_sha256"
-        if set(raw) not in (expected, expected | {candidate_pin_key}):
+        review_pin_key = "review_preparation_command_sha256"
+        optional_keys = {candidate_pin_key, review_pin_key}
+        if not expected.issubset(raw) or not set(raw).issubset(expected | optional_keys):
             raise ProtocolError("invalid daemon config fields")
         if type(raw.get("version")) is not int or raw["version"] != 1:
             raise ProtocolError("unsupported daemon config version")
@@ -379,6 +499,11 @@ class BrokerConfig:
                 and (not isinstance(candidate_producer_command_sha256, str)
                      or not _HEX64_RE.fullmatch(candidate_producer_command_sha256))):
             raise ProtocolError("invalid candidate producer command pin")
+        review_preparation_command_sha256 = raw.get(review_pin_key)
+        if (review_preparation_command_sha256 is not None
+                and (not isinstance(review_preparation_command_sha256, str)
+                     or not _HEX64_RE.fullmatch(review_preparation_command_sha256))):
+            raise ProtocolError("invalid review preparation command pin")
         wrapper_suffix = f"/releases/{release['service_revision']}/factory/deploy/worker_operation_exec.py"
         allowed_wrappers = {
             Path(f"/opt/factory{wrapper_suffix}"),
@@ -425,6 +550,7 @@ class BrokerConfig:
             service_revision=release["service_revision"],
             release_sha256=release["release_sha256"],
             candidate_producer_command_sha256=candidate_producer_command_sha256,
+            review_preparation_command_sha256=review_preparation_command_sha256,
         )
 
     def expected_release(self) -> dict[str, str]:
@@ -952,6 +1078,9 @@ class OperationBroker:
                     "candidate_bundle_v1": bool(
                         getattr(self.controller, "candidate_bundle_available", False)
                     ),
+                    "review_preparation_v1": bool(
+                        getattr(self.controller, "review_preparation_available", False)
+                    ),
                     "containment_qualified": (
                         capabilities.get("contained") is True
                         and containment_is_qualified(
@@ -974,6 +1103,18 @@ class OperationBroker:
                 raise ProtocolError("release_mismatch")
             if action == "prepare":
                 result = self.controller.prepare(request["request"])
+                if not isinstance(result, dict):
+                    raise ProtocolError("invalid_request")
+                identity = validate_identity(result)
+                if identity["machine_id"] != self.expected_machine_id:
+                    raise ProtocolError("operation_unavailable")
+                return identity
+            if action == "prepare_review_workspace":
+                method = getattr(self.controller, "prepare_review_workspace", None)
+                if (not callable(method)
+                        or getattr(self.controller, "review_preparation_available", False) is not True):
+                    raise ProtocolError("unsupported_action")
+                result = method(request["request"])
                 if not isinstance(result, dict):
                     raise ProtocolError("invalid_request")
                 identity = validate_identity(result)
@@ -1616,6 +1757,107 @@ def _validate_worker_environment(value: Any, *, worker_home: Path) -> dict[str, 
     return {key: value[key] for key in sorted(_WORKER_ENVIRONMENT_KEYS)}
 
 
+def _review_worker_environment() -> dict[str, str]:
+    try:
+        worker_user = pwd.getpwuid(os.geteuid()).pw_name
+    except (KeyError, OSError) as error:
+        raise ProtocolError("review worker account is unavailable") from error
+    return {
+        "HOME": "/nonexistent",
+        "USER": worker_user,
+        "LOGNAME": worker_user,
+        "PATH": "/usr/bin:/bin",
+        "LANG": "C",
+        "LC_ALL": "C",
+    }
+
+
+def _review_command_sha256(argv: list[str]) -> str:
+    payload = json.dumps(argv, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _validate_review_preparation_manifest(
+    *,
+    operation_id: str,
+    argv: list[str],
+    workspace: Path,
+    workspace_root: Path,
+    environment: Any,
+    command_sha256: Any,
+    expected_owner_uid: int,
+    expected_worker_gid: int,
+) -> dict[str, str]:
+    """Authorize only the pinned review script's bounded, credential-free environment."""
+    if (not isinstance(command_sha256, str) or not _HEX64_RE.fullmatch(command_sha256)
+            or len(argv) != 6 or argv[0] != "/usr/bin/env"
+            or not argv[1].startswith("WORKSTREAM_INPUTS_JSON=")
+            or argv[2:5] != ["/usr/bin/python3", "-I", "-c"]
+            or _review_command_sha256(argv[2:]) != command_sha256):
+        raise ProtocolError("review preparation command is not pinned")
+    expected_environment = _review_worker_environment()
+    if not isinstance(environment, dict) or environment != expected_environment:
+        raise ProtocolError("review preparation environment is not restricted")
+
+    encoded_inputs = argv[1][len("WORKSTREAM_INPUTS_JSON="):].encode("utf-8", errors="strict")
+    pins = decode_json_object(encoded_inputs, maximum=MAX_REVIEW_PREPARATION_REQUEST_BYTES)
+    expected_pin_keys = REVIEW_IDENTITY_KEYS | frozenset({
+        "root", "workspace", "operation_id", "run_id", "current_operation_id", "source_workspace",
+    })
+    _require_exact_keys(pins, expected_pin_keys, "review preparation inputs")
+    request = validate_review_preparation_request({
+        "current_operation_id": pins["current_operation_id"],
+        "run_id": pins["run_id"],
+        "stable_operation_id": pins["operation_id"],
+        "source_workspace": pins["source_workspace"],
+        "identity": {key: pins[key] for key in REVIEW_IDENTITY_KEYS},
+        "command_argv": argv[2:],
+    })
+    if (pins["root"] != str(workspace_root)
+            or pins["workspace"] != str(workspace_root / ".factory-reviews" / hashlib.sha256(
+                f"{request['run_id']}\n{request['stable_operation_id']}".encode("utf-8")
+            ).hexdigest() / "checkout")
+            or request["current_operation_id"] != operation_id
+            or request["source_workspace"] != str(workspace)):
+        raise ProtocolError("review preparation inputs do not match their operation paths")
+
+    reviews = workspace_root / ".factory-reviews"
+    leaf = reviews / hashlib.sha256(
+        f"{request['run_id']}\n{request['stable_operation_id']}".encode("utf-8")
+    ).hexdigest()
+    for path, expected_gid, expected_mode in (
+        (reviews, expected_worker_gid, 0o710),
+        (leaf, expected_worker_gid, 0o770),
+    ):
+        try:
+            info = path.lstat()
+        except OSError as error:
+            raise ProtocolError("review preparation leaf is unavailable") from error
+        if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or info.st_uid != expected_owner_uid or info.st_gid != expected_gid
+                or stat.S_IMODE(info.st_mode) != expected_mode):
+            raise ProtocolError("review preparation leaf is unsafe")
+    checkout = leaf / "checkout"
+    try:
+        checkout_info = checkout.lstat()
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        raise ProtocolError("review checkout path is unavailable") from error
+    else:
+        if (not stat.S_ISDIR(checkout_info.st_mode) or stat.S_ISLNK(checkout_info.st_mode)
+                or Path(os.path.realpath(checkout, strict=True)) != checkout):
+            raise ProtocolError("review checkout path is unsafe")
+    try:
+        source = Path(request["source_workspace"])
+        source.relative_to(reviews)
+    except ValueError:
+        pass
+    else:
+        raise ProtocolError("review source cannot be another review checkout")
+    return {key: environment[key] for key in sorted(expected_environment)}
+
+
 def held_wrapper_main(
     descriptor_path: str | Path,
     *,
@@ -1637,9 +1879,14 @@ def held_wrapper_main(
             raise ProtocolError("invalid operation descriptor path")
         operation_root = Path(operation_root)
         manifest = _read_root_manifest(path, expected_owner_uid=expected_owner_uid, operation_root=operation_root)
+        manifest_keys = frozenset({
+            "version", "operation_id", "request_sha256", "argv", "workspace", "release_file", "environment",
+        })
+        review_pin_key = "review_preparation_command_sha256"
+        review_manifest = review_pin_key in manifest
         _require_exact_keys(
             manifest,
-            frozenset({"version", "operation_id", "request_sha256", "argv", "workspace", "release_file", "environment"}),
+            manifest_keys | ({review_pin_key} if review_manifest else set()),
             "operation manifest",
         )
         if type(manifest.get("version")) is not int or manifest["version"] != 1:
@@ -1670,7 +1917,6 @@ def held_wrapper_main(
             raise ProtocolError("operation executable is unsafe")
         if not isinstance(workspace, str) or not workspace.startswith("/") or "\x00" in workspace:
             raise ProtocolError("invalid operation workspace")
-        worker_environment = _validate_worker_environment(manifest.get("environment"), worker_home=Path(worker_home))
         workspace_path = Path(workspace)
         workspace_root = Path(workspace_root)
         try:
@@ -1701,6 +1947,21 @@ def held_wrapper_main(
         if (workspace_root_info.st_uid != expected_owner_uid or workspace_root_info.st_gid != expected_worker_gid
                 or stat.S_IMODE(workspace_root_info.st_mode) != 0o750):
             raise ProtocolError("workspace root is unsafe")
+        if review_manifest:
+            worker_environment = _validate_review_preparation_manifest(
+                operation_id=operation_id,
+                argv=argv,
+                workspace=canonical_workspace,
+                workspace_root=canonical_root,
+                environment=manifest.get("environment"),
+                command_sha256=manifest.get(review_pin_key),
+                expected_owner_uid=expected_owner_uid,
+                expected_worker_gid=expected_worker_gid,
+            )
+        else:
+            worker_environment = _validate_worker_environment(
+                manifest.get("environment"), worker_home=Path(worker_home)
+            )
         expected_release_file = path.parent / "release"
         if release_file != str(expected_release_file):
             raise ProtocolError("invalid operation release path")
@@ -1762,6 +2023,7 @@ def _load_engine(config: BrokerConfig) -> tuple[Any, Any]:
         expected_machine_id=config.expected_machine_id,
         service_revision=config.service_revision,
         candidate_producer_command_sha256=config.candidate_producer_command_sha256,
+        review_preparation_command_sha256=config.review_preparation_command_sha256,
     )
     return controller, manager
 

@@ -2797,7 +2797,13 @@ completed unsuccessful review-fix rounds. Generic gate repair restrictions remai
 The service MUST match the current PR to the latest passed publication in the same
 candidate context before preparation, model launch and submission. It MUST pin
 current PR/base/head and the exact rubric before creating a separate standalone
-reviewer checkout. It MUST start a separate conversation and
+reviewer checkout. Contained preparation MUST use a root-pinned command capability
+that derives its destination from the run and stable operation identity. Only its
+private review leaf MAY be writable; source, sibling tasks and credential roots
+MUST remain read-only or inaccessible. Durable registration and validated release
+MUST precede execution. Competing live or unknown writers for the same leaf MUST
+block retry. Interrupted staging and unknown paths MUST be retained.
+It MUST start a separate conversation and
 retain its session independently from the Cloud Agent. Exact rubric JSON MUST be
 validated in full against the committed head-side diff. Malformed, stale or any
 unplaceable finding MUST block; no finding may be discarded to produce approval.

@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
+from urllib.parse import urlsplit
 
 
 PROTOCOL_VERSION = 1
@@ -61,9 +62,18 @@ _UNIT_RE = re.compile(r"^factory-operation-[0-9a-f]{64}\.service$")
 _HEX_32_RE = re.compile(r"^[0-9a-f]{32}$")
 _HEX_40_RE = re.compile(r"^[0-9a-f]{40}$")
 _HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
+_REVIEW_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_REVIEW_STAGE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_REVIEW_ORDINAL_RE = re.compile(r"^[1-9][0-9]{0,8}$")
 MAX_CANDIDATE_BUNDLE_BYTES = 64 * 1024 * 1024
 CANDIDATE_BUNDLE_CHUNK_BYTES = 64 * 1024
 MAX_CANDIDATE_BUNDLE_CACHE_ENTRIES = 16
+MAX_REVIEW_PREPARATION_SCRIPT_BYTES = 16 * 1024
+_REVIEW_OPERATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*$")
+_REVIEW_IDENTITY_KEYS = frozenset({
+    "number", "url", "base_sha", "head_sha", "head_branch", "base_branch",
+    "rubric_sha256", "cloud_thread_id", "candidate_context_id",
+})
 
 
 class OperationError(RuntimeError):
@@ -424,6 +434,7 @@ class OperationController:
         expected_machine_id: str | None = None,
         service_revision: str | None = None,
         candidate_producer_command_sha256: str | None = None,
+        review_preparation_command_sha256: str | None = None,
         worker_user: str = "factory-worker",
         worker_group: str = "factory-worker",
         expected_owner_uid: int = 0,
@@ -443,6 +454,7 @@ class OperationController:
         self.expected_machine_id = (expected_machine_id or "").replace("-", "").lower()
         self.service_revision = service_revision or ""
         self.candidate_producer_command_sha256 = candidate_producer_command_sha256 or ""
+        self.review_preparation_command_sha256 = review_preparation_command_sha256 or ""
         self.worker_user = worker_user
         self.worker_group = worker_group
         self.expected_owner_uid = expected_owner_uid
@@ -485,6 +497,26 @@ class OperationController:
 
     def prepare(self, request: Mapping[str, Any]) -> dict[str, str]:
         canonical = self._validate_request(request)
+        return self._prepare_validated(canonical, review_preparation=None)
+
+    def prepare_review_workspace(self, request: Mapping[str, Any]) -> dict[str, str]:
+        """Prepare the pinned review checkout command with one private writable leaf."""
+
+        if not self.review_preparation_available:
+            raise OperationUnavailable("review workspace preparation is not configured")
+        canonical, review_preparation = self._validate_review_preparation_request(request)
+        return self._prepare_validated(canonical, review_preparation=review_preparation)
+
+    @property
+    def review_preparation_available(self) -> bool:
+        return bool(_HEX_64_RE.fullmatch(self.review_preparation_command_sha256))
+
+    def _prepare_validated(
+        self,
+        canonical: Mapping[str, Any],
+        *,
+        review_preparation: Mapping[str, Any] | None,
+    ) -> dict[str, str]:
         operation_id = canonical["operation_id"]
         request_sha256 = _sha256_json(canonical)
         unit = _unit_name(operation_id)
@@ -499,12 +531,17 @@ class OperationController:
                     or existing.get("request_sha256") != request_sha256
                 ):
                     raise OperationConflict("operation ID is already reserved")
+                if review_preparation is not None:
+                    self._assert_review_preparation_owner(review_preparation)
+                    self._assert_review_preparation_leaf(review_preparation, required=True)
                 identity = self._recover_identity(existing)
                 if identity is None:
                     raise OperationUnavailable("operation reservation has no proven unit identity")
                 return identity
 
             self._assert_capacity_available()
+            if review_preparation is not None:
+                self._register_review_preparation_owner(review_preparation)
             machine_id = _read_machine_id(self.machine_id_path)
             boot_id = _read_boot_id(self.boot_id_path)
             if not machine_id or not boot_id:
@@ -537,6 +574,9 @@ class OperationController:
             operation_path = self._operation_path(operation_id)
             try:
                 self._create_operation_directory(operation_path)
+                review_leaf = None
+                if review_preparation is not None:
+                    review_leaf = self._ensure_review_preparation_leaf(review_preparation)
                 descriptor = {
                     "version": PROTOCOL_VERSION,
                     "operation_id": operation_id,
@@ -544,8 +584,14 @@ class OperationController:
                     "argv": canonical["argv"],
                     "workspace": canonical["workspace"],
                     "release_file": str(operation_path / "release"),
-                    "environment": self._runtime_environment(),
+                    "environment": (
+                        self._review_preparation_environment()
+                        if review_preparation is not None
+                        else self._runtime_environment()
+                    ),
                 }
+                if review_preparation is not None:
+                    descriptor["review_preparation_command_sha256"] = self.review_preparation_command_sha256
                 manifest_path = operation_path / "manifest.json"
                 self._write_public_file(manifest_path, _canonical_json(descriptor), exclusive=True)
                 self._sync_directory(operation_path)
@@ -556,6 +602,7 @@ class OperationController:
                     request_sha256=request_sha256,
                     workspace=canonical["workspace"],
                     environment=descriptor["environment"],
+                    review_workspace_leaf=str(review_leaf) if review_leaf is not None else None,
                 )
                 if isinstance(self.manager, SystemdManager):
                     _assert_trusted_executable(self.wrapper_path, expected_owner_uid=self.expected_owner_uid)
@@ -972,7 +1019,8 @@ class OperationController:
         expected_keys = {
             "version", "operation_id", "request_sha256", "argv", "workspace", "release_file", "environment",
         }
-        if (not isinstance(manifest, dict) or set(manifest) != expected_keys
+        if (not isinstance(manifest, dict)
+                or set(manifest) not in (expected_keys, expected_keys | {"review_preparation_command_sha256"})
                 or manifest.get("version") != PROTOCOL_VERSION
                 or manifest.get("operation_id") != identity["operation_id"]
                 or manifest.get("request_sha256") != identity["request_sha256"]
@@ -985,11 +1033,20 @@ class OperationController:
                 "operation_id": manifest["operation_id"],
                 "argv": manifest["argv"],
                 "workspace": manifest["workspace"],
-            })
+            }, allow_protected_review=True)
         except (OperationValidationError, KeyError, TypeError) as exc:
             raise OperationUnavailable("operation descriptor request is invalid") from exc
         if _sha256_json(request) != identity["request_sha256"]:
             raise OperationUnavailable("operation descriptor digest does not match")
+        review_preparation = self._review_preparation_details(request, required=False)
+        if review_preparation is not None:
+            if manifest.get("review_preparation_command_sha256") != self.review_preparation_command_sha256:
+                raise OperationUnavailable("review operation command pin is not root-authorized")
+        elif "review_preparation_command_sha256" in manifest:
+            raise OperationUnavailable("ordinary operation carries a review command pin")
+        if (review_preparation is not None
+                and manifest["environment"] != self._review_preparation_environment()):
+            raise OperationUnavailable("review operation environment is not restricted")
         return {**manifest, "argv": request["argv"], "workspace": request["workspace"]}
 
     def _open_candidate_bundle(
@@ -1521,7 +1578,12 @@ class OperationController:
                 continue
             raise OperationCapacityError("factory-worker already has an active or unproven operation")
 
-    def _validate_request(self, request: Mapping[str, Any]) -> dict[str, Any]:
+    def _validate_request(
+        self,
+        request: Mapping[str, Any],
+        *,
+        allow_protected_review: bool = False,
+    ) -> dict[str, Any]:
         if not isinstance(request, Mapping) or set(request) != {"operation_id", "argv", "workspace"}:
             raise OperationValidationError("request must contain only operation_id, argv and workspace")
         operation_id = request["operation_id"]
@@ -1539,6 +1601,12 @@ class OperationController:
         argv_value = request["argv"]
         if not isinstance(argv_value, list) or not argv_value or len(argv_value) > 128:
             raise OperationValidationError("argv must be a nonempty list with at most 128 items")
+        command_is_pinned_review = self._review_command_is_pinned(argv_value)
+        if command_is_pinned_review and not allow_protected_review:
+            raise OperationValidationError("review preparation requires its protected RPC action")
+        review_command_pinned = (
+            allow_protected_review and command_is_pinned_review
+        )
         argv: list[str] = []
         total = 0
         for index, value in enumerate(argv_value):
@@ -1549,7 +1617,12 @@ class OperationController:
             except UnicodeEncodeError as exc:
                 raise OperationValidationError("argv items must be valid UTF-8 strings") from exc
             total += encoded_size
-            if encoded_size > 4096 or total > 32768:
+            maximum_argument_size = (
+                MAX_REVIEW_PREPARATION_SCRIPT_BYTES
+                if review_command_pinned and index == 5
+                else 4096
+            )
+            if encoded_size > maximum_argument_size or total > 32768:
                 raise OperationValidationError("argv exceeds the bounded request size")
             if index == 0:
                 if not os.path.isabs(value):
@@ -1584,7 +1657,472 @@ class OperationController:
             raise OperationValidationError("workspace is outside the allowed workspace root") from exc
         if workspace == root:
             raise OperationValidationError("workspace must be below the allowed workspace root")
-        return {"operation_id": operation_id, "argv": argv, "workspace": str(workspace)}
+        canonical = {"operation_id": operation_id, "argv": argv, "workspace": str(workspace)}
+        if review_command_pinned:
+            self._review_preparation_details(canonical, required=True)
+        return canonical
+
+    def _validate_review_preparation_request(
+        self,
+        request: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        expected = {
+            "current_operation_id", "run_id", "stable_operation_id", "source_workspace",
+            "identity", "command_argv",
+        }
+        if not isinstance(request, Mapping) or set(request) != expected:
+            raise OperationValidationError("review preparation request has invalid fields")
+        current_operation_id = self._validate_review_operation_id(
+            request["current_operation_id"], "current operation ID"
+        )
+        run_id = self._validate_review_operation_id(request["run_id"], "run ID")
+        stable_operation_id = self._validate_review_operation_id(
+            request["stable_operation_id"], "stable operation ID"
+        )
+        self._validate_review_operation_binding(run_id, current_operation_id, stable_operation_id)
+        source_workspace = self._canonical_review_source_workspace(request["source_workspace"])
+        identity = self._validate_review_identity(request["identity"])
+        command_argv = request["command_argv"]
+        self._validate_review_command(command_argv)
+
+        leaf = self._review_preparation_leaf_path(run_id, stable_operation_id)
+        pins = {
+            **identity,
+            "root": str(self.workspace_root),
+            "workspace": str(leaf / "checkout"),
+            "operation_id": stable_operation_id,
+            "run_id": run_id,
+            "current_operation_id": current_operation_id,
+            "source_workspace": source_workspace,
+        }
+        inputs = json.dumps(pins, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        operation_request = {
+            "operation_id": current_operation_id,
+            "argv": ["/usr/bin/env", f"WORKSTREAM_INPUTS_JSON={inputs}", *command_argv],
+            "workspace": source_workspace,
+        }
+        canonical = self._validate_request(operation_request, allow_protected_review=True)
+        details = self._review_preparation_details(canonical, required=True)
+        return canonical, details
+
+    @staticmethod
+    def _validate_review_operation_id(value: Any, label: str) -> str:
+        try:
+            size = len(value.encode("utf-8", "strict")) if isinstance(value, str) else 0
+        except UnicodeEncodeError as exc:
+            raise OperationValidationError(f"{label} is invalid") from exc
+        if (not isinstance(value, str) or size > 200
+                or not _REVIEW_OPERATION_ID_RE.fullmatch(value)
+                or any(part in {"", ".", ".."} for part in value.split("/"))):
+            raise OperationValidationError(f"{label} is invalid")
+        return value
+
+    @staticmethod
+    def _validate_review_operation_binding(
+        run_id: str,
+        current_operation_id: str,
+        stable_operation_id: str,
+    ) -> None:
+        if not _REVIEW_RUN_ID_RE.fullmatch(run_id):
+            raise OperationValidationError("review run ID is invalid")
+
+        def parts(operation_id: str) -> tuple[str, str, str]:
+            values = operation_id.split("/")
+            if (len(values) != 3 or not _REVIEW_RUN_ID_RE.fullmatch(values[0])
+                    or not _REVIEW_STAGE_ID_RE.fullmatch(values[1])
+                    or not _REVIEW_ORDINAL_RE.fullmatch(values[2])):
+                raise OperationValidationError("review operation ID is invalid")
+            return values[0], values[1], values[2]
+
+        current = parts(current_operation_id)
+        stable = parts(stable_operation_id)
+        if current[0] != run_id or stable[0] != run_id or current[:2] != stable[:2]:
+            raise OperationValidationError("review operation IDs do not share the run and stage")
+
+    def _canonical_review_source_workspace(self, value: Any) -> str:
+        if (not isinstance(value, str) or not os.path.isabs(value)
+                or any(char in value for char in ("\0", "\n", "\r", "$", "%"))):
+            raise OperationValidationError("review source workspace is invalid")
+        try:
+            value.encode("utf-8", "strict")
+        except UnicodeEncodeError as exc:
+            raise OperationValidationError("review source workspace is invalid") from exc
+        try:
+            requested = Path(value)
+            source = requested.resolve(strict=True)
+            source_info = requested.lstat()
+            root = self.workspace_root.resolve(strict=True)
+        except OSError as exc:
+            raise OperationValidationError("review source workspace is unavailable") from exc
+        if (str(requested) != str(source) or stat.S_ISLNK(source_info.st_mode)
+                or not stat.S_ISDIR(source_info.st_mode) or source == root):
+            raise OperationValidationError("review source workspace must be a canonical directory")
+        try:
+            source.relative_to(root)
+        except ValueError as exc:
+            raise OperationValidationError("review source workspace is outside the configured root") from exc
+        review_parent = root / ".factory-reviews"
+        if source == review_parent or review_parent in source.parents:
+            raise OperationValidationError("review source workspace cannot be another review checkout")
+        return str(source)
+
+    def _validate_review_identity(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, Mapping) or set(value) != _REVIEW_IDENTITY_KEYS:
+            raise OperationValidationError("review identity has invalid fields")
+        number = value["number"]
+        if type(number) is not int or not 1 <= number <= 2**31 - 1:
+            raise OperationValidationError("review number is invalid")
+        url = value["url"]
+        try:
+            url_size = len(url.encode("utf-8", "strict")) if isinstance(url, str) else 0
+        except UnicodeEncodeError as exc:
+            raise OperationValidationError("review URL is invalid") from exc
+        if not isinstance(url, str) or url_size > 2048:
+            raise OperationValidationError("review URL is invalid")
+        try:
+            parsed_url = urlsplit(url)
+        except ValueError as exc:
+            raise OperationValidationError("review URL is invalid") from exc
+        if (parsed_url.scheme != "https" or not parsed_url.netloc or parsed_url.username
+                or parsed_url.password or parsed_url.query or parsed_url.fragment
+                or not re.fullmatch(r"/[^/]+/[^/]+/pull/" + str(number), parsed_url.path)):
+            raise OperationValidationError("review URL is invalid")
+        checked: dict[str, Any] = {"number": number, "url": url}
+        for key in ("base_sha", "head_sha"):
+            revision = value[key]
+            if not isinstance(revision, str) or not _HEX_40_RE.fullmatch(revision):
+                raise OperationValidationError("review commit identity is invalid")
+            checked[key] = revision
+        rubric_sha256 = value["rubric_sha256"]
+        if not isinstance(rubric_sha256, str) or not _HEX_64_RE.fullmatch(rubric_sha256):
+            raise OperationValidationError("review rubric identity is invalid")
+        checked["rubric_sha256"] = rubric_sha256
+        for key in ("head_branch", "base_branch", "cloud_thread_id"):
+            field = value[key]
+            try:
+                field_size = len(field.encode("utf-8", "strict")) if isinstance(field, str) else 0
+            except UnicodeEncodeError as exc:
+                raise OperationValidationError("review identity contains an invalid value") from exc
+            if (not isinstance(field, str) or not field or field_size > 512
+                    or any(ord(char) < 0x20 or ord(char) == 0x7f for char in field)):
+                raise OperationValidationError("review identity contains an invalid value")
+            checked[key] = field
+        candidate_context_id = value["candidate_context_id"]
+        if candidate_context_id is not None and (
+            not isinstance(candidate_context_id, str) or not _HEX_64_RE.fullmatch(candidate_context_id)
+        ):
+            raise OperationValidationError("review candidate context identity is invalid")
+        checked["candidate_context_id"] = candidate_context_id
+        return checked
+
+    def _validate_review_command(self, command_argv: Any) -> list[str]:
+        if not self.review_preparation_available:
+            raise OperationUnavailable("review workspace preparation is not configured")
+        if (not isinstance(command_argv, list) or len(command_argv) != 4
+                or command_argv[:3] != ["/usr/bin/python3", "-I", "-c"]):
+            raise OperationValidationError("review preparation command is invalid")
+        script = command_argv[3]
+        if not isinstance(script, str) or "\0" in script:
+            raise OperationValidationError("review preparation command is invalid")
+        try:
+            script_bytes = len(script.encode("utf-8", "strict"))
+        except UnicodeEncodeError as exc:
+            raise OperationValidationError("review preparation command is invalid") from exc
+        if script_bytes > MAX_REVIEW_PREPARATION_SCRIPT_BYTES:
+            raise OperationValidationError("review preparation command exceeds the protected bound")
+        digest = _sha256_command(command_argv)
+        if digest != self.review_preparation_command_sha256:
+            raise OperationValidationError("review preparation command does not match its protected pin")
+        return list(command_argv)
+
+    def _review_command_is_pinned(self, argv: Any) -> bool:
+        if (not self.review_preparation_available or not isinstance(argv, list) or len(argv) != 6
+                or argv[0] != "/usr/bin/env" or not isinstance(argv[1], str)
+                or not argv[1].startswith("WORKSTREAM_INPUTS_JSON=")):
+            return False
+        return _sha256_command(argv[2:]) == self.review_preparation_command_sha256
+
+    def _review_preparation_details(
+        self,
+        canonical: Mapping[str, Any],
+        *,
+        required: bool,
+    ) -> dict[str, Any] | None:
+        argv = canonical.get("argv")
+        if not self._review_command_is_pinned(argv):
+            if required:
+                raise OperationValidationError("review preparation command is not protected")
+            return None
+        assert isinstance(argv, list)
+        raw_inputs = argv[1][len("WORKSTREAM_INPUTS_JSON="):]
+        try:
+            pins = json.loads(
+                raw_inputs,
+                object_pairs_hook=_unique_json_object,
+                parse_constant=_reject_json_constant,
+            )
+        except (TypeError, ValueError, json.JSONDecodeError, RecursionError) as exc:
+            raise OperationValidationError("review preparation inputs are invalid") from exc
+        expected_keys = set(_REVIEW_IDENTITY_KEYS) | {
+            "root", "workspace", "operation_id", "run_id", "current_operation_id", "source_workspace",
+        }
+        if not isinstance(pins, dict) or set(pins) != expected_keys:
+            raise OperationValidationError("review preparation inputs have invalid fields")
+        checked_identity = self._validate_review_identity({
+            key: pins[key] for key in _REVIEW_IDENTITY_KEYS
+        })
+        run_id = self._validate_review_operation_id(pins["run_id"], "run ID")
+        current_operation_id = self._validate_review_operation_id(
+            pins["current_operation_id"], "current operation ID"
+        )
+        stable_operation_id = self._validate_review_operation_id(
+            pins["operation_id"], "stable operation ID"
+        )
+        self._validate_review_operation_binding(run_id, current_operation_id, stable_operation_id)
+        source_workspace = self._canonical_review_source_workspace(pins["source_workspace"])
+        leaf = self._review_preparation_leaf_path(run_id, stable_operation_id)
+        if (pins["root"] != str(self.workspace_root)
+                or pins["workspace"] != str(leaf / "checkout")
+                or pins["operation_id"] != stable_operation_id
+                or current_operation_id != canonical.get("operation_id")
+                or source_workspace != canonical.get("workspace")):
+            raise OperationValidationError("review preparation paths or operation IDs do not match")
+        return {
+            "run_id": run_id,
+            "current_operation_id": current_operation_id,
+            "stable_operation_id": stable_operation_id,
+            "source_workspace": source_workspace,
+            "leaf": leaf,
+            "identity": checked_identity,
+            "pins": pins,
+        }
+
+    def _review_preparation_leaf_path(self, run_id: str, stable_operation_id: str) -> Path:
+        name = hashlib.sha256(f"{run_id}\n{stable_operation_id}".encode("utf-8")).hexdigest()
+        return self.workspace_root / ".factory-reviews" / name
+
+    def _review_owner_directory(self) -> Path:
+        return self.records_dir / "review-owners"
+
+    def _review_owner_record_path(self, review_preparation: Mapping[str, Any]) -> Path:
+        leaf = review_preparation["leaf"]
+        return self._review_owner_directory() / f"{leaf.name}.json"
+
+    def _review_owner_record(self, review_preparation: Mapping[str, Any]) -> dict[str, Any]:
+        binding = {
+            "kind": "review-preparation-leaf-owner",
+            "run_id": review_preparation["run_id"],
+            "stable_operation_id": review_preparation["stable_operation_id"],
+            "source_workspace": review_preparation["source_workspace"],
+            "identity": review_preparation["identity"],
+            "leaf": str(review_preparation["leaf"]),
+        }
+        return {
+            "version": PROTOCOL_VERSION,
+            **binding,
+            "binding_sha256": _sha256_json(binding),
+        }
+
+    def _ensure_review_owner_directory(self) -> Path:
+        directory = self._review_owner_directory()
+        try:
+            info = directory.lstat()
+        except FileNotFoundError:
+            try:
+                directory.mkdir(mode=0o700)
+                os.chmod(directory, 0o700)
+                self._sync_directory(self.records_dir)
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                raise OperationUnavailable("review ownership ledger could not be created") from exc
+        except OSError as exc:
+            raise OperationUnavailable("review ownership ledger is unavailable") from exc
+        else:
+            del info
+        try:
+            info = directory.lstat()
+        except OSError as exc:
+            raise OperationUnavailable("review ownership ledger is unavailable") from exc
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != self.expected_owner_uid
+                or stat.S_IMODE(info.st_mode) != 0o700):
+            raise OperationUnavailable("review ownership ledger permissions are unsafe")
+        return directory
+
+    def _read_review_owner_record(self, path: Path) -> dict[str, Any] | None:
+        self._ensure_review_owner_directory()
+        try:
+            before_path = path.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise OperationUnavailable("review ownership record cannot be inspected") from exc
+        if (not stat.S_ISREG(before_path.st_mode) or before_path.st_uid != self.expected_owner_uid
+                or stat.S_IMODE(before_path.st_mode) != 0o600 or before_path.st_nlink != 1
+                or before_path.st_size > 16 * 1024):
+            raise OperationUnavailable("review ownership record is unsafe")
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                path,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+            )
+            before = os.fstat(descriptor)
+            if (not stat.S_ISREG(before.st_mode) or before.st_uid != self.expected_owner_uid
+                    or stat.S_IMODE(before.st_mode) != 0o600 or before.st_nlink != 1
+                    or before.st_size > 16 * 1024):
+                raise OperationUnavailable("review ownership record is unsafe")
+            chunks = bytearray()
+            while len(chunks) <= 16 * 1024:
+                block = os.read(descriptor, min(4096, 16 * 1024 + 1 - len(chunks)))
+                if not block:
+                    break
+                chunks.extend(block)
+            after = os.fstat(descriptor)
+            after_path = os.stat(path, follow_symlinks=False)
+            if (len(chunks) > 16 * 1024 or not self._same_file_snapshot(before, after)
+                    or not self._same_file_snapshot(before, after_path)):
+                raise OperationUnavailable("review ownership record changed while reading")
+            value = json.loads(bytes(chunks).decode("utf-8"), object_pairs_hook=_unique_json_object)
+        except OperationError:
+            raise
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
+            raise OperationUnavailable("review ownership record is corrupt") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        if not isinstance(value, dict):
+            raise OperationUnavailable("review ownership record is corrupt")
+        return value
+
+    def _create_review_owner_record(self, path: Path, value: Mapping[str, Any]) -> None:
+        directory = self._ensure_review_owner_directory()
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+        except FileExistsError as exc:
+            raise OperationConflict("review ownership record already exists") from exc
+        except OSError as exc:
+            raise OperationUnavailable("review ownership record could not be created") from exc
+        try:
+            os.fchmod(descriptor, 0o600)
+            self._write_all(descriptor, _canonical_json(value))
+            os.fsync(descriptor)
+        except OSError as exc:
+            raise OperationUnavailable("review ownership record could not be persisted") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        self._sync_directory(directory)
+
+    def _register_review_preparation_owner(self, review_preparation: Mapping[str, Any]) -> None:
+        leaf = review_preparation["leaf"]
+        self._ensure_review_preparation_parent(leaf)
+        owner_path = self._review_owner_record_path(review_preparation)
+        expected = self._review_owner_record(review_preparation)
+        existing = self._read_review_owner_record(owner_path)
+        if existing is not None:
+            if existing != expected:
+                raise OperationConflict("review workspace ownership binding does not match")
+            self._assert_review_preparation_leaf(review_preparation, required=False)
+            return
+        try:
+            leaf.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise OperationUnavailable("review preparation leaf cannot be inspected") from exc
+        else:
+            raise OperationUnavailable("review preparation leaf has no broker ownership record")
+        self._create_review_owner_record(owner_path, expected)
+
+    def _assert_review_preparation_owner(self, review_preparation: Mapping[str, Any]) -> None:
+        owner_path = self._review_owner_record_path(review_preparation)
+        existing = self._read_review_owner_record(owner_path)
+        if existing != self._review_owner_record(review_preparation):
+            raise OperationUnavailable("review workspace ownership binding is unavailable")
+
+    def _review_worker_gid(self) -> int:
+        try:
+            return grp.getgrnam(self.worker_group).gr_gid
+        except KeyError as exc:
+            raise OperationUnavailable("configured worker group does not exist") from exc
+
+    def _ensure_review_preparation_parent(self, leaf: Path) -> None:
+        parent = leaf.parent
+        root = self.workspace_root.resolve(strict=True)
+        if leaf.parent.parent != root:
+            raise OperationValidationError("review preparation leaf is outside the configured root")
+        if not parent.exists() and not parent.is_symlink():
+            try:
+                os.mkdir(parent, 0o710)
+                os.chown(parent, self.expected_owner_uid, self._review_worker_gid())
+                os.chmod(parent, 0o710)
+                self._sync_directory(root)
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                raise OperationUnavailable("review preparation directory could not be created") from exc
+        try:
+            parent_info = parent.lstat()
+        except OSError as exc:
+            raise OperationUnavailable("review preparation directory is unavailable") from exc
+        if (not stat.S_ISDIR(parent_info.st_mode) or parent_info.st_uid != self.expected_owner_uid
+                or parent_info.st_gid != self._review_worker_gid()
+                or stat.S_IMODE(parent_info.st_mode) != 0o710):
+            raise OperationUnavailable("review preparation directory ownership is unsafe")
+
+    def _assert_review_preparation_leaf(
+        self,
+        review_preparation: Mapping[str, Any],
+        *,
+        required: bool,
+    ) -> bool:
+        leaf = review_preparation["leaf"]
+        self._ensure_review_preparation_parent(leaf)
+        try:
+            leaf_info = leaf.lstat()
+        except FileNotFoundError:
+            if required:
+                raise OperationUnavailable("review preparation leaf is missing")
+            return False
+        except OSError as exc:
+            raise OperationUnavailable("review preparation leaf is unavailable") from exc
+        if (not stat.S_ISDIR(leaf_info.st_mode) or leaf_info.st_uid != self.expected_owner_uid
+                or leaf_info.st_gid != self._review_worker_gid()
+                or stat.S_IMODE(leaf_info.st_mode) != 0o770):
+            raise OperationUnavailable("review preparation leaf ownership is unsafe")
+        return True
+
+    def _ensure_review_preparation_leaf(self, review_preparation: Mapping[str, Any]) -> Path:
+        leaf = review_preparation["leaf"]
+        self._assert_review_preparation_owner(review_preparation)
+        self._ensure_review_preparation_parent(leaf)
+        if not self._assert_review_preparation_leaf(review_preparation, required=False):
+            try:
+                os.mkdir(leaf, 0o770)
+                os.chown(leaf, self.expected_owner_uid, self._review_worker_gid())
+                os.chmod(leaf, 0o770)
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                raise OperationUnavailable("review preparation leaf could not be created") from exc
+        self._assert_review_preparation_leaf(review_preparation, required=True)
+        return leaf
+
+    def _review_preparation_environment(self) -> dict[str, str]:
+        return {
+            "HOME": "/nonexistent",
+            "USER": self.worker_user,
+            "LOGNAME": self.worker_user,
+            "PATH": "/usr/bin:/bin",
+            "LANG": "C",
+            "LC_ALL": "C",
+        }
 
     def _validate_identity_shape(self, identity: Mapping[str, Any]) -> dict[str, str]:
         if not isinstance(identity, Mapping) or set(identity) != set(IDENTITY_KEYS):
@@ -1618,6 +2156,7 @@ class OperationController:
         request_sha256: str,
         workspace: str,
         environment: Mapping[str, str],
+        review_workspace_leaf: str | None = None,
     ) -> dict[str, str | Sequence[str]]:
         try:
             worker_account = pwd.getpwnam(self.worker_user)
@@ -1630,7 +2169,11 @@ class OperationController:
             raise OperationUnavailable("worker account is not an isolated non-root identity")
         if not Path(self.worker_home).is_absolute():
             raise OperationValidationError("worker home must be absolute")
-        read_write_paths = [workspace, self.worker_home, "/srv/factory/tmp", *self.cache_paths]
+        read_write_paths = (
+            [review_workspace_leaf]
+            if review_workspace_leaf is not None
+            else [workspace, self.worker_home, "/srv/factory/tmp", *self.cache_paths]
+        )
         for path in read_write_paths:
             if not os.path.isabs(path):
                 raise OperationValidationError("writable paths must be absolute")
@@ -1641,6 +2184,8 @@ class OperationController:
             "/run/dbus/system_bus_socket",
             "/run/user",
         ]
+        if review_workspace_leaf is not None:
+            inaccessible.append(self.worker_home)
         if isinstance(self.manager, SystemdManager) and worker_account.pw_dir != self.worker_home:
             raise OperationUnavailable("configured worker home does not match the passwd entry")
         del worker_uid, worker_gid
@@ -2027,6 +2572,11 @@ def _reject_json_constant(value: str) -> None:
 
 def _sha256_json(value: Any) -> str:
     return hashlib.sha256(_canonical_json(value)).hexdigest()
+
+
+def _sha256_command(argv: Sequence[str]) -> str:
+    payload = json.dumps(argv, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _read_machine_id(path: str) -> str:

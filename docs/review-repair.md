@@ -18,7 +18,9 @@ passed publication in the same candidate context. PR number, URL, head and branc
 identity must agree before preparation, model launch and submission, including the
 first review. It records the PR, main base, head, rubric digest and original Cloud
 Agent thread. One contained check prepares
-a standalone reviewer clone under the workspace root's `.factory-reviews` directory.
+a standalone reviewer clone at
+`<workspace-root>/.factory-reviews/<sha256(run-id + newline + stable-operation-id)>/checkout`.
+Staging is created only inside that same private leaf.
 Its own Git metadata and service marker bind it to the recorded operation. Replay
 reuses that exact checkout; a changed identity or unsafe metadata blocks it.
 
@@ -187,3 +189,78 @@ deployment, dispatch release or live review was performed.
 [merged-source command](evidence/dev240/restart-recovery-command.txt),
 [merged-source output](evidence/dev240/restart-recovery-tests.log) and
 [source digests](evidence/dev240/restart-recovery-snapshot.json) record the boundary.
+
+## Contained preparation release requirements
+
+The remote client uses `prepare_review_workspace`, not a generic check with sibling
+write access. Its exact request contains the current operation, run and stable
+operation IDs, source workspace, nine review identity fields and command argv.
+The root broker derives all destination paths and input pins. The configured
+`review_preparation_command_sha256` must equal `ReviewWorkspace.command_sha256()`
+from the exact packaged coordinator source; omission disables this capability.
+The protected Python script has a separate 16 KiB limit. Generic command arguments
+retain their 4 KiB limit. The held unit still requires durable registration,
+stream readiness and root-validated release before executing.
+
+The broker creates the review parent and private leaf with checked ownership and
+permissions. Its protected owner record is
+`<records-dir>/review-owners/<leaf-digest>.json` (mode `0600`, in a `0700` directory).
+Version 1 stores `kind=review-preparation-leaf-owner`, `run_id`,
+`stable_operation_id`, `source_workspace`, all nine `identity` pins, `leaf`, and
+`binding_sha256` over the compact sorted binding JSON plus newline. It records no
+current attempt ID. Only a missing leaf can receive a new owner record; a plausible
+worker marker never grants ownership. The root-owned public operation manifest
+adds `review_preparation_command_sha256`; the held wrapper verifies that pin and
+restricted environment against its exact argv and derived paths before release. Preparation grants only that leaf in `ReadWritePaths`; source Git is
+read-only. It grants no worker home, shared cache or shared temporary root and uses
+an environment with no model or GitHub credential references. The worker home is
+inaccessible during preparation. A different operation
+cannot prepare the same leaf while its previous operation is live or termination is
+unknown. Completed replay binds the stable ID and source, while each new attempt
+retains its own contained operation identity. Interrupted and unknown data remains
+retained. The reviewer model subsequently receives only the completed checkout.
+
+This is a source capability. Unit-property derivation tests do not prove that a
+systemd unit actually enforces these permissions on the deployed worker.
+
+### Activation order and exact human actions
+
+1. The organization owner creates a private **Rig Factory Review** GitHub App,
+   installs it only on `RigCodeAI/rig`, and grants Contents read and Pull requests
+   write (Metadata read is automatic). Record its App/installation IDs and verified
+   bot login, distinct from publisher and validation identities. Generate its RSA
+   key through the approved coordinator secret route. Place the regular key file
+   with mode `0600` outside worker, reviewer and validator roots. Do not copy key
+   bytes to chat, Git or Terraform state. In the protected workflow, set `review`
+   fields `app_id`, `installation_id`, and `private_key_path` to that actual file.
+2. The release owner approves a maintenance window for one exact coordinator,
+   broker, producer and protected configuration revision. Before replacement,
+   reconcile every active or unknown worker identity; fence scheduling and prove
+   exact termination where required. Retain old pinned runs and directories. Set
+   the root-owned preparation command hash from that packaged release, with the
+   existing producer hash, release identity and containment receipt preserved.
+3. On the intended worker, qualify real systemd preparation: inspect its actual
+   command, environment and mount grants; prove source/siblings/home/cache/key
+   writes fail; prove final/staging writes succeed; exercise interruption, duplicate
+   preparation, cross-task/symlink tampering, restart and cancellation. Save redacted
+   unit identity, journal and cgroup termination receipts. Qualify the configured
+   DefaultReview model, effort, subscription account and observed effective runtime.
+4. The cleanup owner completes sealed typed review output archival and private-leaf
+   ownership/termination checks. The Coverage Factory owner supplies an approved
+   disposable PR and frozen review-quality oracle. Run a real inline review,
+   same-PR repair, new-head validation/review, stale/malformed rejection,
+   duplicate/restart retry, and three-round/disagreement escalation. A human merges.
+5. Before enabling factory fix dispatch, the Rig feedback owner adds this condition
+   to the existing `dispatch` job in `.github/workflows/codex-pr-feedback.yml`:
+   `!startsWith(github.event.pull_request.head.ref, 'cycle/factory-') &&`.
+   Review and release that exclusion with Symphony activation so only one owner
+   can push factory fixes; other branches keep their existing owner. The workflow
+   was read on 2026-10-12; this source PR does not change Rig. Verify the trusted
+   `factory/validation` check is required on the current head before human merge.
+
+Rollback fences new dispatch first, reconciles exact contained identities and
+retains all unknown, staged, completed and archived data. Restore the reviewed
+coordinator/broker/configuration package together, without adopting new-release
+runs into an old execution pin. Missing preparation capability must block review.
+Do not restore the old feedback owner for factory branches while any Symphony fix
+writer may remain live. Resume only after ownership and qualification are proven.

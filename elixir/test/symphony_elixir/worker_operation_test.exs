@@ -265,6 +265,110 @@ defmodule SymphonyElixir.WorkerOperationTest do
              WorkerOperation.stop(@config, identity, rpc_fun: fn _config, %{"action" => "stop"} -> {:ok, terminal_payload(identity)} end)
   end
 
+  test "review preparation sends identity without caller target paths and registers before release" do
+    identity = identity()
+    command = ["/usr/bin/python3", "-I", "-c", String.duplicate("#", 4_407)]
+    preparation = review_preparation()
+
+    rpc_fun = fn _config, %{"action" => action} = request ->
+      case action do
+        "prepare_review_workspace" ->
+          assert request["request"] == Map.merge(preparation, %{"current_operation_id" => @operation_id, "source_workspace" => @workspace, "command_argv" => command})
+          assert request["expected_release"] == Map.take(@config, ["service_revision", "release_sha256"])
+          send(self(), :prepared_review)
+          {:ok, identity}
+
+        "release" ->
+          assert_receive :registered_review
+          {:ok, released_payload(identity)}
+
+        "status" ->
+          {:ok, terminal_payload(identity)}
+      end
+    end
+
+    assert {:ok, %{exit_status: 0}} =
+             WorkerOperation.run_review_prepare(
+               command,
+               @workspace,
+               1_000,
+               @operation_id,
+               @config,
+               fn ^identity ->
+                 send(self(), :registered_review)
+                 :ok
+               end,
+               preparation, rpc_fun: rpc_fun, stream_start_fun: fn _, _, _ -> {:ok, fake_port(stream_script(~s(echo '{"ok":"stream_ready"}'), "exit 0"))} end)
+
+    assert_receive :prepared_review
+    assert {:error, :invalid_worker_check_command} = WorkerOperation.run_check(command, @workspace, 1_000, @operation_id, @config, fn _ -> :ok end, %{})
+  end
+
+  test "review preparation rejects caller paths and oversized or altered command shape before RPC" do
+    command = ["/usr/bin/python3", "-I", "-c", "pass"]
+    opts = [rpc_fun: fn _, _ -> flunk("invalid input must not reach broker") end]
+
+    for {argv, preparation} <- [
+          {command, Map.put(review_preparation(), "workspace", "/other")},
+          {command, Map.put(review_preparation(), "run_id", "another-run")},
+          {command, Map.put(review_preparation(), "stable_operation_id", "run-1/other-stage/1")},
+          {["/usr/bin/python3", "-c", "pass"], review_preparation()},
+          {["/usr/bin/python3", "-I", "-c", String.duplicate("x", 16_385)], review_preparation()}
+        ] do
+      assert {:error, :invalid_review_preparation_request} = WorkerOperation.run_review_prepare(argv, @workspace, 1_000, @operation_id, @config, fn _ -> :ok end, preparation, opts)
+    end
+  end
+
+  test "review preparation registration failure stops exact unit and ambiguous preparation remains unknown" do
+    identity = identity()
+    command = ["/usr/bin/python3", "-I", "-c", "pass"]
+
+    rpc = fn _, %{"action" => action} = request ->
+      case action do
+        "prepare_review_workspace" ->
+          {:ok, identity}
+
+        "stop" ->
+          assert request["identity"] == identity
+          {:ok, terminal_payload(identity)}
+      end
+    end
+
+    assert {:error, {:worker_registration_rejected, {:callback_rejected, :durable_write_failed}}} =
+             WorkerOperation.run_review_prepare(command, @workspace, 1_000, @operation_id, @config, fn _ -> {:error, :durable_write_failed} end, review_preparation(),
+               rpc_fun: rpc,
+               stream_start_fun: fn _, _, _ -> flunk("unregistered operation cannot stream") end
+             )
+
+    assert {:uncertain, :external_termination_unknown} =
+             WorkerOperation.run_review_prepare(command, @workspace, 1_000, @operation_id, @config, fn _ -> :ok end, review_preparation(),
+               rpc_fun: fn _, _ -> {:error, {:remote_error, "operation_unavailable"}} end
+             )
+
+    assert {:error, {:worker_prepare_rejected, "unsupported_action"}} =
+             WorkerOperation.run_review_prepare(command, @workspace, 1_000, @operation_id, @config, fn _ -> :ok end, review_preparation(),
+               rpc_fun: fn _, _ -> {:error, {:remote_error, "unsupported_action"}} end
+             )
+  end
+
+  defp review_preparation do
+    %{
+      "run_id" => "run-1",
+      "stable_operation_id" => @operation_id,
+      "identity" => %{
+        "number" => 1,
+        "url" => "https://github.com/RigCodeAI/rig/pull/1",
+        "base_sha" => String.duplicate("a", 40),
+        "head_sha" => String.duplicate("b", 40),
+        "head_branch" => "cycle/factory-1",
+        "base_branch" => "main",
+        "rubric_sha256" => String.duplicate("c", 64),
+        "cloud_thread_id" => "cloud-1",
+        "candidate_context_id" => nil
+      }
+    }
+  end
+
   defp capabilities do
     %{
       "protocol_version" => 1,

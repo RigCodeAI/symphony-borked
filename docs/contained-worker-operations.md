@@ -55,6 +55,19 @@ home/caches are writable. It inherits a fixed runtime environment; request and
 coordinator secret environments are discarded. Child `setsid` calls remain inside
 the same cgroup.
 
+Reviewer preparation has a separate, opt-in `prepare_review_workspace` capability.
+Its root-owned daemon configuration accepts `review_preparation_command_sha256`,
+the digest returned by `ReviewWorkspace.command_sha256()` in the packaged source.
+Omitting this key disables preparation; `review_preparation_v1` advertises availability.
+The broker derives one private leaf from run and stable operation IDs and stores
+its immutable ownership pins in protected state. Only that leaf is writable for
+preparation, with source Git read-only and no worker home/cache grants. Destination
+paths and systemd properties cannot be supplied by the caller. The pinned script
+has a separate bounded allowance; generic argv limits are unchanged. Held identity,
+release, cancellation and terminal proof rules remain the same. This capability
+requires a new deployed containment qualification; historical DEV-233 receipts do
+not qualify its mount grants. See [release and rollback requirements](review-repair.md#contained-preparation-release-requirements).
+
 Cancellation commits a stop tombstone immediately and runs bounded control work
 outside the webhook handler. It validates the exact operation/boot/invocation,
 sends TERM, then KILL if needed. Capacity releases only after a recorded empty

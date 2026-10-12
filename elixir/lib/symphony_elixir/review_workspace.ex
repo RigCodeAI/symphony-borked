@@ -4,17 +4,23 @@ defmodule SymphonyElixir.ReviewWorkspace do
   alias SymphonyElixir.{WorkerOperation, WorkstreamCommand}
 
   @script ~S"""
-  import ctypes, json, os, pathlib, re, subprocess, sys, tempfile
+  import ctypes, hashlib, json, os, pathlib, re, subprocess, sys, tempfile
   try:
       p = json.loads(os.environ['WORKSTREAM_INPUTS_JSON'])
       source = pathlib.Path.cwd().resolve()
       root = pathlib.Path(p['root'])
       target = pathlib.Path(p['workspace'])
       assert root.is_absolute() and root.resolve() == root and root.is_dir()
-      assert target.parent == root / '.factory-reviews' and target != source
-      parent = target.parent
+      name = hashlib.sha256((p['run_id']+'\n'+p['operation_id']).encode()).hexdigest()
+      reviews = root / '.factory-reviews'
+      parent = reviews / name
+      assert target == parent / 'checkout' and source == pathlib.Path(p['source_workspace'])
+      assert source.is_relative_to(root) and not source.is_relative_to(reviews)
+      reviews.mkdir(mode=0o700, exist_ok=True)
+      assert reviews.resolve() == reviews and not reviews.is_symlink()
       parent.mkdir(mode=0o700, exist_ok=True)
       assert parent.resolve() == parent and not parent.is_symlink()
+      durable = {k:v for k,v in p.items() if k != 'current_operation_id'}
       gitdir = source / '.git'
       assert gitdir.is_dir() and not gitdir.is_symlink()
       assert not any((gitdir / n).exists() for n in ('commondir','config.worktree','objects/info/alternates'))
@@ -47,7 +53,7 @@ defmodule SymphonyElixir.ReviewWorkspace do
       marker = target / '.git' / 'factory-review.json'
       if target.exists() or target.is_symlink():
           assert target.is_dir() and target.resolve() == target and not target.is_symlink()
-          assert marker.is_file() and not marker.is_symlink() and json.loads(marker.read_text()) == p
+          assert marker.is_file() and not marker.is_symlink() and json.loads(marker.read_text()) == durable
       else:
           staging = pathlib.Path(tempfile.mkdtemp(prefix='.'+target.name+'.prepare-',dir=parent))
           staged = staging / 'checkout'
@@ -56,7 +62,7 @@ defmodule SymphonyElixir.ReviewWorkspace do
           assert git(staged,'rev-parse','HEAD') == p['head_sha']
           assert not git(staged,'status','--porcelain=v1')
           with (staged / '.git' / 'factory-review.json').open('x') as record:
-              record.write(json.dumps(p,sort_keys=True))
+              record.write(json.dumps(durable,sort_keys=True))
               record.flush()
               os.fsync(record.fileno())
           publish(staged)
@@ -72,20 +78,30 @@ defmodule SymphonyElixir.ReviewWorkspace do
       sys.exit(1)
   """
 
+  @doc "Digest of the exact preparation command for the root-owned broker allowlist."
+  @spec command_sha256() :: String.t()
+  def command_sha256 do
+    :crypto.hash(:sha256, Jason.encode!(["/usr/bin/python3", "-I", "-c", @script])) |> Base.encode16(case: :lower)
+  end
+
   @spec prepare(map(), map(), keyword()) :: {:ok, map()} | {:error, term()} | {:uncertain, term()}
   def prepare(run, identity, opts) do
     operation = run.operations[run.current_attempt_id]
     stable_id = if operation, do: operation.side_effect_id, else: run.current_attempt_id
     root = Keyword.fetch!(opts, :workspace_root)
     name = :crypto.hash(:sha256, run.id <> "\n" <> stable_id) |> Base.encode16(case: :lower)
-    workspace = Path.join([root, ".factory-reviews", name])
-    pins = Map.merge(identity, %{root: root, workspace: workspace, operation_id: stable_id})
+    workspace = Path.join([root, ".factory-reviews", name, "checkout"])
+    pins = Map.merge(identity, %{root: root, workspace: workspace, operation_id: stable_id, run_id: run.id, source_workspace: run.workspace, current_operation_id: run.current_attempt_id})
     command = ["/usr/bin/python3", "-I", "-c", @script]
 
     result =
       case opts[:worker_control] do
-        nil -> WorkstreamCommand.run(command, run.workspace, 120_000, pins)
-        control -> WorkerOperation.run_check(command, run.workspace, 120_000, run.current_attempt_id, control, opts[:on_process_start], pins)
+        nil ->
+          WorkstreamCommand.run(command, run.workspace, 120_000, pins)
+
+        control ->
+          preparation = %{"run_id" => run.id, "stable_operation_id" => stable_id, "identity" => Jason.decode!(Jason.encode!(identity))}
+          WorkerOperation.run_review_prepare(command, run.workspace, 120_000, run.current_attempt_id, control, opts[:on_process_start], preparation)
       end
 
     case result do

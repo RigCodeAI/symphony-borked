@@ -222,6 +222,33 @@ defmodule SymphonyElixir.WorkerOperation do
     _, _ -> {:uncertain, :external_termination_unknown}
   end
 
+  @doc "Prepares a reviewer checkout through the broker's pinned private-directory capability."
+  @spec run_review_prepare([String.t()], Path.t(), pos_integer(), String.t(), map(), (map() -> :ok | term()), map()) ::
+          {:ok, map()} | {:error, term()} | {:uncertain, term()}
+  def run_review_prepare(command, workspace, timeout_ms, operation_id, control, on_process_start, preparation),
+    do: run_review_prepare(command, workspace, timeout_ms, operation_id, control, on_process_start, preparation, [])
+
+  @spec run_review_prepare([String.t()], Path.t(), pos_integer(), String.t(), map(), (map() -> :ok | term()), map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:uncertain, term()}
+  def run_review_prepare(command, workspace, timeout_ms, operation_id, control, on_process_start, preparation, opts) when is_list(opts) do
+    with :ok <- validate_config(control),
+         :ok <- validate_review_preparation(command, workspace, timeout_ms, operation_id, preparation),
+         :ok <- validate_registration_callback(on_process_start),
+         request = Map.merge(preparation, %{"current_operation_id" => operation_id, "source_workspace" => workspace, "command_argv" => command}),
+         {:ok, raw_identity} <- prepare_request(control, "prepare_review_workspace", request, opts),
+         {:ok, port, identity} <- start_prepared(control, operation_id, raw_identity, on_process_start, opts) do
+      run_started_check(port, identity, control, monotonic_ms() + timeout_ms, opts)
+    else
+      {:prepare_uncertain, _} -> {:uncertain, :external_termination_unknown}
+      {:uncertain, _} = uncertain -> uncertain
+      {:error, _} = error -> error
+    end
+  rescue
+    _ -> {:uncertain, :external_termination_unknown}
+  catch
+    _, _ -> {:uncertain, :external_termination_unknown}
+  end
+
   @doc "Reads a bounded candidate bundle from an exact successful service-check operation; no caller path is sent."
   @spec candidate_bundle(map(), map(), map(), keyword()) :: {:ok, binary()} | {:error, term()}
   def candidate_bundle(control, identity, expected, opts \\ []) do
@@ -423,7 +450,11 @@ defmodule SymphonyElixir.WorkerOperation do
 
   defp prepare(config, workspace, operation_id, argv, opts) do
     request = %{"operation_id" => operation_id, "argv" => argv, "workspace" => workspace}
-    envelope = %{"action" => "prepare", "request" => request, "expected_release" => expected_release(config)}
+    prepare_request(config, "prepare", request, opts)
+  end
+
+  defp prepare_request(config, action, request, opts) do
+    envelope = %{"action" => action, "request" => request, "expected_release" => expected_release(config)}
 
     case rpc(config, envelope, opts) do
       {:ok, identity} when is_map(identity) ->
@@ -784,6 +815,36 @@ defmodule SymphonyElixir.WorkerOperation do
     else
       false -> {:error, :invalid_worker_check_request}
       {:error, _} = error -> error
+    end
+  end
+
+  defp validate_review_preparation(command, workspace, timeout_ms, operation_id, preparation) do
+    with ["/usr/bin/python3", "-I", "-c", script] <- command,
+         true <- is_binary(script) and byte_size(script) in 1..16_384 and String.valid?(script) and not String.contains?(script, <<0>>),
+         :ok <- validate_workspace(workspace),
+         :ok <- validate_operation_id(operation_id),
+         true <- is_integer(timeout_ms) and timeout_ms > 0 and timeout_ms <= @max_check_timeout_ms,
+         true <- is_map(preparation) and Enum.sort(Map.keys(preparation)) == ~w(identity run_id stable_operation_id),
+         :ok <- validate_operation_id(preparation["run_id"]),
+         :ok <- validate_operation_id(preparation["stable_operation_id"]),
+         true <- review_operation_ids_match?(preparation["run_id"], operation_id, preparation["stable_operation_id"]),
+         true <- is_map(preparation["identity"]),
+         true <- Enum.sort(Map.keys(preparation["identity"])) == ~w(base_branch base_sha candidate_context_id cloud_thread_id head_branch head_sha number rubric_sha256 url),
+         {:ok, _} <- encode_inputs(preparation) do
+      :ok
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :invalid_review_preparation_request}
+    end
+  end
+
+  defp review_operation_ids_match?(run_id, current, stable) do
+    case {String.split(current, "/"), String.split(stable, "/")} do
+      {[^run_id, stage, current_ordinal], [^run_id, stage, stable_ordinal]} ->
+        Regex.match?(~r/\A[1-9][0-9]*\z/, current_ordinal) and Regex.match?(~r/\A[1-9][0-9]*\z/, stable_ordinal)
+
+      _ ->
+        false
     end
   end
 

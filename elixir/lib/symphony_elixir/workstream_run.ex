@@ -21,6 +21,7 @@ defmodule SymphonyElixir.WorkstreamRun do
                        publisher_git.ex
                        publisher_github.ex
                        candidate_transfer.ex
+                       workstream_cleanup.ex
                        evidence.ex
                      )
 

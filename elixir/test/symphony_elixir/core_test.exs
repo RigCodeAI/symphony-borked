@@ -538,7 +538,7 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "terminal issue state stops running agent before cleaning workspace" do
+  test "terminal issue state stops running agent and retains work without merge/archive proof" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -608,8 +608,8 @@ defmodule SymphonyElixir.CoreTest do
       refute Map.has_key?(updated_state.running, issue_id)
       refute MapSet.member?(updated_state.claimed, issue_id)
       refute Process.alive?(agent_pid)
-      assert File.read!(cleanup_marker) == "stopped"
-      refute File.exists?(workspace)
+      refute File.exists?(cleanup_marker)
+      assert File.exists?(workspace)
     after
       File.rm_rf(test_root)
     end

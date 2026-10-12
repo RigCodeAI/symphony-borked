@@ -433,7 +433,8 @@ defmodule SymphonyElixir.WorkstreamChild do
     attempt_id = intent.parent_attempt_id
 
     base_valid =
-      Enum.sort(Map.keys(attempt)) == Enum.sort(@recovery_attempt_keys) and
+      Enum.sort(Map.keys(Map.delete(attempt, :candidate_context_id))) == Enum.sort(@recovery_attempt_keys) and
+        is_nil(attempt[:candidate_context_id]) and
         attempt[:id] == attempt_id and attempt[:stage] == intent.parent_stage_id and attempt[:type] == :child and
         attempt[:ordinal] == ordinal and attempt_id == "#{parent[:id]}/#{intent.parent_stage_id}/#{ordinal}" and
         is_map(operation) and operation[:id] == attempt_id and operation[:attempt_id] == attempt_id and

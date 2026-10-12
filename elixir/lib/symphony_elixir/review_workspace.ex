@@ -4,7 +4,7 @@ defmodule SymphonyElixir.ReviewWorkspace do
   alias SymphonyElixir.{WorkerOperation, WorkstreamCommand}
 
   @script ~S"""
-  import json, os, pathlib, re, subprocess, sys
+  import ctypes, json, os, pathlib, re, subprocess, sys, tempfile
   try:
       p = json.loads(os.environ['WORKSTREAM_INPUTS_JSON'])
       source = pathlib.Path.cwd().resolve()
@@ -25,6 +25,20 @@ defmodule SymphonyElixir.ReviewWorkspace do
           r = subprocess.run(argv + list(args), cwd=cwd, env=env, capture_output=True, text=True, timeout=60)
           assert r.returncode == 0, 'review Git operation failed'
           return r.stdout.strip()
+      def publish(staged):
+          libc = ctypes.CDLL(None, use_errno=True)
+          if sys.platform.startswith('linux') and hasattr(libc, 'renameat2'):
+              rename = libc.renameat2
+              rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+              result = rename(-100, os.fsencode(staged), -100, os.fsencode(target), 1)
+          elif sys.platform == 'darwin' and hasattr(libc, 'renamex_np'):
+              rename = libc.renamex_np
+              rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+              result = rename(os.fsencode(staged), os.fsencode(target), 4)
+          else:
+              raise OSError('exclusive atomic rename unavailable')
+          if result != 0:
+              raise OSError(ctypes.get_errno(), 'exclusive checkout publication failed')
       safe = re.compile(r'(?:core\.(?:repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|hookspath|fsmonitor)|commit\.gpgsign|user\.(?:name|email)|extensions\.objectformat|remote\..+\.(?:url|fetch|pushurl)|branch\..+\.(?:remote|merge))')
       assert all(safe.fullmatch(n) for n in git(source,'config','--file',str(gitdir/'config'),'--no-includes','--name-only','--list').splitlines())
       assert git(source,'rev-parse','HEAD') == p['head_sha']
@@ -35,9 +49,21 @@ defmodule SymphonyElixir.ReviewWorkspace do
           assert target.is_dir() and target.resolve() == target and not target.is_symlink()
           assert marker.is_file() and not marker.is_symlink() and json.loads(marker.read_text()) == p
       else:
-          git(source,'clone','--no-hardlinks','--no-checkout','--template=','--',str(source),str(target))
-          git(target,'checkout','--detach',p['head_sha'])
-          marker.write_text(json.dumps(p,sort_keys=True))
+          staging = pathlib.Path(tempfile.mkdtemp(prefix='.'+target.name+'.prepare-',dir=parent))
+          staged = staging / 'checkout'
+          git(source,'clone','--no-hardlinks','--no-checkout','--template=','--',str(source),str(staged))
+          git(staged,'checkout','--detach',p['head_sha'])
+          assert git(staged,'rev-parse','HEAD') == p['head_sha']
+          assert not git(staged,'status','--porcelain=v1')
+          with (staged / '.git' / 'factory-review.json').open('x') as record:
+              record.write(json.dumps(p,sort_keys=True))
+              record.flush()
+              os.fsync(record.fileno())
+          publish(staged)
+      final_gitdir = target / '.git'
+      assert final_gitdir.is_dir() and not final_gitdir.is_symlink()
+      assert not any((final_gitdir / n).exists() for n in ('commondir','config.worktree','objects/info/alternates'))
+      assert not any(f.is_symlink() for f in final_gitdir.rglob('*'))
       assert git(target,'rev-parse','HEAD') == p['head_sha']
       assert not git(target,'status','--porcelain=v1')
       print(json.dumps(p,sort_keys=True))

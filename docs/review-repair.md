@@ -22,6 +22,13 @@ a standalone reviewer clone under the workspace root's `.factory-reviews` direct
 Its own Git metadata and service marker bind it to the recorded operation. Replay
 reuses that exact checkout; a changed identity or unsafe metadata blocks it.
 
+Preparation clones into a fresh private staging directory and verifies checkout
+and clean state before writing the marker. It publishes the completed directory
+with exclusive atomic rename, so an existing final path is never replaced. A
+process interruption leaves staging retained; retry uses fresh staging. Unknown
+directories and symlinks remain blocked and untouched. Filesystems without that
+exclusive operation block preparation rather than falling back to overwrite.
+
 `review` uses the pinned review agent in a fresh app-server conversation. It receives
 the embedded rubric verbatim. Its writable root is only the reviewer clone, and
 question/wait tools for the Cloud Agent are disabled. Its thread/session are retained
@@ -153,3 +160,30 @@ The exact PR body validator also passed. Both check containers were removed.
 [final runtime digests](evidence/dev240/integration-snapshot.json) record this source
 boundary. Broad hosted CI remains a separate alpha check. Real reviewer quality,
 App provisioning, feedback-owner cutover and the live same-PR pilot remain gated.
+
+## Checkout interruption and held-recovery integration
+
+Review found that the old direct-to-final clone could leave a markerless final
+directory after interruption. The staged preparation fix passed compilation,
+specs and 31 focused tests. Its real Git/Python regression kills the process after
+clone and before checkout/marker creation, then proves retry, completed replay and
+retention of the interrupted data. The exclusive-publication race test creates an
+empty unknown final directory during checkout and proves failure preserves that
+directory's inode. Changed completed identity also blocks without replacing data.
+A disposable macOS smoke passed interruption, retry and replay as well.
+
+After main `58cbe54` added full held startup, the final combined source passed
+warnings-as-errors compilation, public specs, PR-body validation and **41 focused
+tests**, seed `240`; eight other capture cases were excluded by explicit selection.
+This includes actual linked-child capture, cold full application held boot/restart,
+and readonly validation of child attempts. That validator accepts only an optional
+`nil` context field (including the legacy absent field); non-nil context claims or
+unknown keys remain blocked. Both executor source inventories and the final child
+source hash are included in the refreshed offline migration pins. No migration,
+deployment, dispatch release or live review was performed.
+
+[Restart command](evidence/dev240/restart-command.txt),
+[restart output](evidence/dev240/restart-tests.log),
+[merged-source command](evidence/dev240/restart-recovery-command.txt),
+[merged-source output](evidence/dev240/restart-recovery-tests.log) and
+[source digests](evidence/dev240/restart-recovery-snapshot.json) record the boundary.

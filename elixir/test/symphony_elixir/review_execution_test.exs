@@ -96,6 +96,106 @@ defmodule SymphonyElixir.ReviewExecutionTest do
     assert {:error, :review_checkout_failed} = ReviewWorkspace.prepare(run, identity, workspace_root: c.review_root)
   end
 
+  test "interruption after cloning leaves only private staging and retry publishes a complete checkout", c do
+    run = %{id: "interrupted-review-run", workspace: c.workspace, current_attempt_id: "checkout-attempt", operations: %{}}
+    identity = workspace_identity(c, "cloud-thread", nil)
+    name = :crypto.hash(:sha256, run.id <> "\n" <> run.current_attempt_id) |> Base.encode16(case: :lower)
+    target = Path.join([c.review_root, ".factory-reviews", name])
+    pins = Map.merge(identity, %{root: c.review_root, workspace: target, operation_id: run.current_attempt_id})
+    interrupted_path = Path.join(c.root, "interrupted-staging.json")
+
+    interrupt = """
+    import os, pathlib, signal, subprocess
+    original_run = subprocess.run
+    def interrupted_run(args, **kwargs):
+        result = original_run(args, **kwargs)
+        if 'clone' in args and result.returncode == 0:
+            pathlib.Path(#{Jason.encode!(interrupted_path)}).write_text(args[-1])
+            os.kill(os.getpid(), signal.SIGKILL)
+        return result
+    subprocess.run = interrupted_run
+    """
+
+    {_output, status} =
+      System.cmd("/usr/bin/python3", ["-I", "-c", interrupt <> review_workspace_script()],
+        cd: c.workspace,
+        env: [{"WORKSTREAM_INPUTS_JSON", Jason.encode!(pins)}],
+        stderr_to_stdout: true
+      )
+
+    assert status != 0
+    staged = File.read!(interrupted_path)
+    assert File.dir?(Path.join(staged, ".git"))
+    refute File.exists?(Path.join(staged, ".git/factory-review.json"))
+    refute File.exists?(target)
+    File.write!(Path.join(staged, "retained-interrupted-data"), "retain me")
+
+    assert {:ok, prepared} = ReviewWorkspace.prepare(run, identity, workspace_root: c.review_root)
+    assert prepared.workspace == target
+    assert git!(target, ["rev-parse", "HEAD"]) == c.head_sha
+    assert git!(target, ["status", "--porcelain=v1"]) == ""
+    assert File.read!(Path.join(staged, "retained-interrupted-data")) == "retain me"
+    assert {:ok, ^prepared} = ReviewWorkspace.prepare(run, identity, workspace_root: c.review_root)
+  end
+
+  test "completed replay rejects changed identity and unknown final directories without deleting data", c do
+    run = %{id: "review-replay-identity", workspace: c.workspace, current_attempt_id: "checkout-attempt", operations: %{}}
+    identity = workspace_identity(c, "cloud-thread", nil)
+    assert {:ok, prepared} = ReviewWorkspace.prepare(run, identity, workspace_root: c.review_root)
+    marker = Path.join(prepared.workspace, ".git/factory-review.json")
+    original_marker = File.read!(marker)
+
+    assert {:error, :review_checkout_failed} = ReviewWorkspace.prepare(run, %{identity | cloud_thread_id: "another-cloud-thread"}, workspace_root: c.review_root)
+    assert File.read!(marker) == original_marker
+    assert git!(prepared.workspace, ["rev-parse", "HEAD"]) == c.head_sha
+    assert {:ok, ^prepared} = ReviewWorkspace.prepare(run, identity, workspace_root: c.review_root)
+
+    other = %{run | id: "unknown-review-directory"}
+    name = :crypto.hash(:sha256, other.id <> "\n" <> other.current_attempt_id) |> Base.encode16(case: :lower)
+    target = Path.join([c.review_root, ".factory-reviews", name])
+    File.mkdir_p!(target)
+    File.write!(Path.join(target, "unknown-data"), "never remove")
+    assert {:error, :review_checkout_failed} = ReviewWorkspace.prepare(other, identity, workspace_root: c.review_root)
+    assert File.read!(Path.join(target, "unknown-data")) == "never remove"
+  end
+
+  test "exclusive publication refuses an empty target created during preparation", c do
+    run = %{id: "raced-review-target", workspace: c.workspace, current_attempt_id: "checkout-attempt", operations: %{}}
+    identity = workspace_identity(c, "cloud-thread", nil)
+    name = :crypto.hash(:sha256, run.id <> "\n" <> run.current_attempt_id) |> Base.encode16(case: :lower)
+    target = Path.join([c.review_root, ".factory-reviews", name])
+    pins = Map.merge(identity, %{root: c.review_root, workspace: target, operation_id: run.current_attempt_id})
+    inode_path = Path.join(c.root, "unknown-target-inode")
+
+    race = """
+    import json, os, pathlib, subprocess
+    original_run = subprocess.run
+    def raced_run(args, **kwargs):
+        result = original_run(args, **kwargs)
+        if 'checkout' in args and result.returncode == 0:
+            target = pathlib.Path(json.loads(os.environ['WORKSTREAM_INPUTS_JSON'])['workspace'])
+            target.mkdir()
+            pathlib.Path(#{Jason.encode!(inode_path)}).write_text(str(target.stat().st_ino))
+        return result
+    subprocess.run = raced_run
+    """
+
+    {output, status} =
+      System.cmd("/usr/bin/python3", ["-I", "-c", race <> review_workspace_script()],
+        cd: c.workspace,
+        env: [{"WORKSTREAM_INPUTS_JSON", Jason.encode!(pins)}],
+        stderr_to_stdout: true
+      )
+
+    assert status != 0
+    assert output =~ "REVIEW_CHECKOUT_FAILED"
+    assert File.ls!(target) == []
+    assert File.stat!(target).inode == String.to_integer(File.read!(inode_path))
+    assert [_completed_staging_marker] = Path.wildcard(Path.join([c.review_root, ".factory-reviews", ".*.prepare-*", "checkout", ".git", "factory-review.json"]), match_dot: true)
+    assert {:error, :review_checkout_failed} = ReviewWorkspace.prepare(run, identity, workspace_root: c.review_root)
+    assert File.stat!(target).inode == String.to_integer(File.read!(inode_path))
+  end
+
   test "rejects a symlinked review root", c do
     File.mkdir_p!(c.review_root)
     symlink_root = Path.join(c.root, "review-root-link")
@@ -881,6 +981,12 @@ defmodule SymphonyElixir.ReviewExecutionTest do
       cloud_thread_id: cloud_thread,
       candidate_context_id: candidate_context_id
     }
+  end
+
+  defp review_workspace_script do
+    source = File.read!(Path.expand("../../lib/symphony_elixir/review_workspace.ex", __DIR__))
+    [_, script] = Regex.run(~r/@script ~S"""\n(.*?)\n  """/s, source)
+    script |> String.split("\n") |> Enum.map(&String.replace_prefix(&1, "  ", "")) |> Enum.join("\n")
   end
 
   defp seal_checkout_fixture(run, stage_id, attempt_id, checkout) do

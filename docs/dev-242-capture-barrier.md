@@ -2,8 +2,8 @@
 
 Status: the PR #18 baseline passed compilation, build, specs, format and 85
 focused tests in the isolated Docker runtime. PR #19's merged source is now
-integrated; its combined capture/cleanup checks are queued after DEV-239's
-correction pass. PR #20's validation timer changes are still unmerged. No live capture or
+integrated and passed 49 combined capture/cleanup tests plus compile/spec/format.
+PR #20's validation timer changes are still unmerged. No live capture or
 restore is authorized or qualified. Reviewed against merged main
 `e7fd8290ed7e508547867c9a5233d9b9eb0bfd16` (PR #18), and live DEV-239,
 DEV-241, DEV-242 and DEV-243 scope. Recheck the seams after their integrations.
@@ -178,7 +178,7 @@ cleanup tasks and uncertain deletion outcomes. The merged job map is recognized,
 its hold hook now calls `capture_held?/1`, and capture cancels/re-arms the cleanup
 timer. Evidence's new `retained` action exports a bundle, so it is also write-held.
 The merge preserved DEV-241's retained-archive checks and cleanup reconciliation.
-These integration edits await the queued combined tests. Unknown durable-owner
+These integration edits passed 49 focused combined tests. Unknown durable-owner
 fields continue to reject rather than silently bypass a new producer.
 
 DEV-239 integration must expose any active or uncertain validation-check job to
@@ -249,6 +249,21 @@ rejection, lost-worker settlement, publication-intent ambiguity and snapshot
 byte/manifest identity. New and existing focused tests cover those observable
 paths. Power-loss durability still depends on the explicit directory-sync flag;
 an atomic no-follow open and full deployed restore are not qualified here.
+
+### Combined PR #19 integration pass
+
+After merging `c498b78044cd5392615f4f623955fe1fbca2004e`, the same isolated
+container ran the four capture/owner files above plus
+`test/symphony_elixir/workstream_cleanup_test.exs`: **49 tests, zero failures**.
+Warnings-as-errors compile, specs, full format and PR-body checks passed.
+The cleanup hold fixture now expects the documented `capture_in_progress`
+refusal from a mutating reconciliation call; its no-cleanup/no-deletion assertions
+remain intact. The new cleanup job/uncertain-delete refusals and retained-export
+hold passed. The container is stopped after this focused pass and the slot is
+released for DEV-239's short merge recheck, then DEV-243's remaining tests.
+
+PR #20 remains unmerged; its timer field and validation/capture combined proof
+are still pending. No unmerged validation APIs are claimed integrated.
 
 ## Remaining full-ticket work
 

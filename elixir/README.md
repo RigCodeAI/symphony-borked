@@ -433,7 +433,7 @@ This project is licensed under the [Apache License 2.0](../LICENSE).
 The optional [local owner capture](../docs/dev-242-capture-barrier.md) is selected
 through trusted startup options, holds both database owners and rejects new
 mutations while copying. Its PR #18 baseline passed compilation and 85 focused
-tests; merged cleanup integration checks remain queued. Its local
+tests; merged cleanup integration passed 49 focused tests. Its local
 manifest always reports `restore_ready: false`. No deployed capture/restore is
 configured by this increment.
 

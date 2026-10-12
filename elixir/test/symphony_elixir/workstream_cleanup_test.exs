@@ -264,7 +264,7 @@ defmodule SymphonyElixir.WorkstreamCleanupTest do
       put_in(state.workstreams[:capture], %{id: "capture-held"})
     end)
 
-    assert :ok = Orchestrator.reconcile_workstreams(runtime.coordinator)
+    assert {:error, :capture_in_progress} = Orchestrator.reconcile_workstreams(runtime.coordinator)
     state = :sys.get_state(runtime.coordinator)
     assert state.workstreams.cleanup.jobs == %{}
     refute Orchestrator.cleanup_active_or_uncertain?(state)

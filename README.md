@@ -91,7 +91,7 @@ retention and the current acceptance boundary.
 DEV-242 adds source for a private local capture of the workstream and Evidence
 databases at a quiet boundary. Its [owner capture contract](docs/dev-242-capture-barrier.md)
 passed compilation and 85 focused tests on the PR #18 baseline; merged cleanup
-integration checks remain queued. Deployed restore, fencing and freshness
+integration passed 49 focused tests. Deployed restore, fencing and freshness
 monitoring remain pending.
 
 DEV-235 adds [named cloud-agent routing and safe reassignment](docs/dev-235-agent-mapping.md)

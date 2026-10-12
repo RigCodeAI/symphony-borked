@@ -272,8 +272,11 @@ defmodule SymphonyElixir.BackupCaptureOwnerTest do
 
     :sys.replace_state(coordinator, fn state ->
       state = put_in(state.workstreams.cleanup.jobs, %{})
-      put_in(state.workstreams.runs[c.waiting_run.id][:cleanup],
-        %{status: :pending, delete_started: true, last_error: :cleanup_outcome_unknown})
+
+      put_in(
+        state.workstreams.runs[c.waiting_run.id][:cleanup],
+        %{status: :pending, delete_started: true, last_error: :cleanup_outcome_unknown}
+      )
     end)
 
     assert {:error, :capture_cleanup_active_or_uncertain} = Orchestrator.capture_backup(coordinator, "cleanup-uncertain")

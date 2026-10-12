@@ -2399,7 +2399,20 @@ defmodule SymphonyElixir.Orchestrator do
 
             :ok = Evidence.recover!(store, runs)
             {:ok, store_path} = SymphonyElixir.PathSafety.canonicalize(path)
-            durable = %{store: store, store_path: store_path, runs: Map.new(runs, &{&1.id, &1}), workers: %{}, cancellations: %{}, publications: %{}, cleanup: %{jobs: %{}, timer: nil}, capture: nil, capture_results: %{}, opts: opts}
+
+            durable = %{
+              store: store,
+              store_path: store_path,
+              runs: Map.new(runs, &{&1.id, &1}),
+              workers: %{},
+              cancellations: %{},
+              publications: %{},
+              cleanup: %{jobs: %{}, timer: nil},
+              capture: nil,
+              capture_results: %{},
+              opts: opts
+            }
+
             {:ok, %{state | workstreams: durable, polling_enabled: false}}
           end
         end
@@ -2442,7 +2455,7 @@ defmodule SymphonyElixir.Orchestrator do
       when is_binary(root) and is_binary(revision) and is_list(roots) and roots != [] and cleanup_mode in [:disabled, :enabled] ->
         if Path.type(root) == :absolute and Regex.match?(~r/\A[a-f0-9]{40}([a-f0-9]{24})?\z/, revision) and
              Enum.all?(roots, &(is_binary(&1) and Path.type(&1) == :absolute)) and
-             (cleanup_mode == :enabled) == cleanup_enabled?(state) do
+             cleanup_mode == :enabled == cleanup_enabled?(state) do
           server = Map.get(config, :evidence_server, Evidence)
           if is_atom(server) or is_pid(server), do: {:ok, Map.put(config, :evidence_server, server)}, else: {:error, :capture_not_configured}
         else

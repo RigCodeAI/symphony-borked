@@ -13,6 +13,19 @@ A repair agent receives the immediately preceding failed check's result and gate
 in its prompt, including when its executing attempt is already durably recorded. A
 passing check or an older failure does not add repair feedback to a later agent turn.
 
+The shipped `software-change` workstream leaves model-produced changes uncommitted.
+A pinned service-owned `local-commit` executable check runs as the unprivileged
+worker after the agent operation has terminated. It requires a dedicated clone and
+local branch, rejects unsafe Git metadata/configuration, disables hooks, signing,
+interactive authentication and network protocols, and excludes service credentials.
+It commits candidate changes locally and requires a clean checkout. A clean replay
+requires the same persisted candidate-input marker; a pristine base cannot qualify.
+Its output records the actual candidate SHA, bundle prerequisite SHA, branch and
+checksum/size of an incremental Git bundle under protected Git metadata. This is
+candidate preparation, not trusted validation or authorization to publish/merge.
+Existing runs retain their original stage definitions and commit ownership. See
+[local candidate commits](docs/local-candidate-commits.md).
+
 The existing orchestrator can own manually queued durable runs with SQLite storage.
 One coordinator holds the database write lock. Enqueue pins resolved workstream, agent,
 instruction and skill text/digests, execution context, and service policy digests. Each
@@ -168,7 +181,10 @@ matching prior/current pins; silent mutation rejects. Task and
 policy identity remain fixed. Old bundles remain immutable.
 
 Observable completed messages/tool events are allowlisted and credentials are
-redacted before persistence. Reasoning/raw protocol fields are omitted. Every
+redacted before persistence. Reasoning/raw protocol fields are omitted. The
+viewer projects retained agent messages and task input as escaped readable text,
+with stage/attempt labels and the latest gate/check status. Full run/policy/event
+details remain expandable; this presentation does not change archived bytes. Every
 viewer/artifact request requires a verified signed IAP JWT with the configured
 audience and domain/email allowlist; unsigned identity headers never authorize
 access. A root uploader validates manifests and object bytes after immutable GCS

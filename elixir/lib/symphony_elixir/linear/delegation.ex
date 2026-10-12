@@ -6,16 +6,17 @@ defmodule SymphonyElixir.Linear.Delegation do
   alias SymphonyElixir.{WorkerOperation, WorkstreamRunner}
 
   @required ~w(organization_id team_id app_user_id oauth_client_id webhook_secret_env store_path workspace_root workstream_path agent_id rig_label)
-  @optional ~w(workspaces codex_command reconcile_interval_ms worker_control token_env client_secret_env cloud_agents secret_environment_names validation)
+  @optional ~w(workspaces child_workspaces codex_command reconcile_interval_ms worker_control token_env client_secret_env cloud_agents secret_environment_names validation)
 
   @spec validate(map()) :: {:ok, map()} | {:error, atom()}
   def validate(config) when is_map(config) do
     workspaces = config["workspaces"] || %{}
+    child_workspaces = config["child_workspaces"] || %{}
 
     if valid_fields?(config) and valid_paths?(config) and valid_environment?(config) and
-         valid_workspaces?(workspaces) and valid_optional?(config) and
+         valid_workspaces?(workspaces) and valid_workspaces?(child_workspaces) and valid_optional?(config) and
          match?({:ok, _}, AgentMapping.validate(config)) do
-      {:ok, Map.put(config, "workspaces", workspaces)}
+      {:ok, config |> Map.put("workspaces", workspaces) |> Map.put("child_workspaces", child_workspaces)}
     else
       {:error, :invalid_linear_delegation_config}
     end
@@ -67,6 +68,7 @@ defmodule SymphonyElixir.Linear.Delegation do
   def prepare(issue, config, opts) do
     inputs = %{"task" => "Repository: RigCodeAI/rig\n#{issue.identifier}: #{issue.title}\n#{issue.description || ""}\nDo not publish, push, or merge this candidate."}
     workspace = config["workspaces"][issue.id]
+    child_workspace = (config["child_workspaces"] || %{})[issue.id]
 
     execution = [
       workspace: workspace,
@@ -76,6 +78,7 @@ defmodule SymphonyElixir.Linear.Delegation do
       secret_environment_names: AgentMapping.credential_environment_names(config) ++ ["FACTORY_LINEAR_SECRET_NAMES_JSON"]
     ]
 
+    execution = if is_binary(child_workspace), do: Keyword.put(execution, :child_workspace, child_workspace), else: execution
     execution = if config["codex_command"], do: Keyword.put(execution, :codex_command, config["codex_command"]), else: execution
     execution = if config["worker_control"], do: Keyword.put(execution, :worker_control, config["worker_control"]), else: execution
     execution = add_validation_options(execution, config["validation"])
@@ -105,6 +108,26 @@ defmodule SymphonyElixir.Linear.Delegation do
     control = Keyword.get(opts, :linear_execution_control, fn _definition, _agent -> qualify_worker_control(config["worker_control"]) end)
     with :ok <- credential_environment(config), :ok <- readiness.(definition, agent), do: control.(definition, agent)
   end
+
+  @doc "Qualifies a prepared child against the task's pinned native route and parent selection."
+  @spec qualified_child(map(), map(), map(), map(), keyword()) :: :ok | {:error, term()}
+  def qualified_child(%{definition: child_definition} = child, %{definition: parent_definition} = parent, task, route, opts)
+      when is_map(child_definition) and is_map(parent_definition) and is_map(task) and is_map(route) and is_list(opts) do
+    with {:ok, agent_id} <- child_agent_id(child_definition, parent_definition, task, route),
+         :ok <- child_workspace_matches(child, parent, task, route),
+         :ok <- shared_credential_exclusions(child, parent),
+         :ok <- execution_isolated(child, route),
+         :ok <- qualify(child_definition, agent_id, route, opts) do
+      :ok
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :native_child_not_qualified}
+    end
+  rescue
+    _ -> {:error, :native_child_not_qualified}
+  end
+
+  def qualified_child(_child, _parent, _task, _route, _opts), do: {:error, :native_child_not_qualified}
 
   defp qualify_worker_control(nil), do: {:error, :worker_execution_control_unavailable}
   defp qualify_worker_control(control), do: WorkerOperation.qualify(control)
@@ -197,6 +220,67 @@ defmodule SymphonyElixir.Linear.Delegation do
   defp valid_environment?(config), do: Enum.all?([config["webhook_secret_env"], config["client_secret_env"] || config["token_env"]], &environment_name?/1)
   defp environment_name?(name), do: is_binary(name) and Regex.match?(~r/^[A-Z][A-Z0-9_]*$/, name)
   defp valid_workspaces?(workspaces), do: is_map(workspaces) and Enum.all?(workspaces, fn {id, path} -> is_binary(id) and absolute?(path) end)
+
+  defp child_agent_id(child_definition, parent_definition, task, route) do
+    agent_id = route["agent_id"]
+    child_selection = child_definition[:agent_selection]
+    parent_selection = parent_definition[:agent_selection]
+
+    with true <- is_binary(agent_id) and task[:agent_id] == agent_id,
+         true <- child_definition.name == "software-change",
+         %{type: :agent, agent: ^agent_id} <- child_definition.stages[child_definition.entry],
+         true <- Map.has_key?(child_definition.agents, agent_id),
+         %{agent_id: ^agent_id} <- parent_selection,
+         %{agent_id: ^agent_id} <- child_selection,
+         true <- child_selection == parent_selection,
+         {:ok, rebound_parent} <- AgentMapping.bind(parent_definition, agent_id),
+         {:ok, rebound_child} <- AgentMapping.bind(child_definition, agent_id),
+         true <- rebound_parent.agent_selection == parent_selection,
+         true <- rebound_child.agent_selection == child_selection do
+      {:ok, agent_id}
+    else
+      _ -> {:error, :native_child_agent_mismatch}
+    end
+  end
+
+  defp child_workspace_matches(child, parent, task, route) do
+    issue_id = task[:issue_id]
+    configured = (route["child_workspaces"] || %{})[issue_id]
+    pinned = get_in(parent, [:execution, :child_preparation, :workspace])
+    workspace_root = route["workspace_root"]
+
+    with true <- is_binary(issue_id) and is_binary(configured) and is_binary(pinned),
+         true <- Path.expand(configured) == Path.expand(pinned),
+         true <- Path.expand(child.workspace) == Path.expand(configured),
+         true <- not workspaces_overlap?(child.workspace, parent.workspace),
+         true <- Path.expand(get_in(parent, [:execution, :workspace_root])) == Path.expand(workspace_root),
+         true <- Path.expand(get_in(child, [:execution, :workspace_root])) == Path.expand(workspace_root),
+         {:ok, _workspace} <- WorkstreamRunner.validate_workspace(child.workspace, workspace_root, child.definition) do
+      :ok
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :child_workspace_unconfigured_or_mismatched}
+    end
+  end
+
+  defp shared_credential_exclusions(child, parent) do
+    child_names = get_in(child, [:execution, :secret_environment_names])
+    parent_names = get_in(parent, [:execution, :secret_environment_names])
+
+    if is_list(child_names) and is_list(parent_names) and Enum.sort(child_names) == Enum.sort(parent_names),
+      do: :ok,
+      else: {:error, :child_credential_exclusions_mismatch}
+  end
+
+  defp workspaces_overlap?(left, right) when is_binary(left) and is_binary(right) do
+    left = Path.expand(left)
+    right = Path.expand(right)
+    left == right or within_path?(left, right) or within_path?(right, left)
+  end
+
+  defp workspaces_overlap?(_left, _right), do: true
+
+  defp within_path?(path, root), do: String.starts_with?(path, String.trim_trailing(root, "/") <> "/")
 
   defp valid_optional?(config) do
     interval = config["reconcile_interval_ms"] || 5_000

@@ -534,7 +534,10 @@ The bounded `child` stage is described in [child workstreams](../docs/child-work
 It uses the durable coordinator and a separately prepared `child_workspace`; the synchronous
 local runner does not dispatch children. Contract tests cover atomic creation, restarts,
 cancellation, archived typed results and exact parent resume. Native child authorization
-and live external qualification remain pending. No test fixture certifies coverage.
+uses a fresh, short-lived parent-assignment grant and the trusted `child_workspaces`
+issue-ID mapping described in [native delegation](../docs/linear-delegation.md).
+Native intake still accepts only `software-change`; Coverage intake, child question/reply
+routing and live external qualification remain pending. No test fixture certifies coverage.
 
 ### Independent review and repair
 

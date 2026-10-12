@@ -31,7 +31,10 @@ runtime dashboard. See the Elixir README for its current behavior and limitation
 Factory Setup adds file-defined workstreams, durable run/stage records, native Linear
 delegation and questions, trusted validation and PR publication, independent reviews,
 permanent evidence, and reproducible GCP deployment. Check current code and ticket
-evidence before treating any planned addition as available.
+evidence before treating any planned addition as available. Bounded native child
+handoffs use an exact parent-assignment grant and a separately configured clone;
+Coverage intake and live child qualification remain pending. See
+[child workstreams](docs/child-workstreams.md).
 
 Workstreams define stages and inline gates. Agent definitions select instructions,
 models and runtime permissions; skills supply reusable procedures. Evaluators return

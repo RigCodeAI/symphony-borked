@@ -33,6 +33,22 @@ transfer directories remain retained until their lifecycle owners provide an
 explicit registration contract. Current-root changes and old service-policy pins
 also retain work; stored pins are never rewritten to match a new build.
 
+The shipped `software-change` definition does **not** currently qualify for
+deletion. Its `candidate_validation` stage uses `CandidateTransfer.sync` followed
+by the local trusted `Validation.execute` adapter, without registering a systemd
+external-process identity. The current all-checks quiescence gate therefore
+retains that run. Recognizing supported service-only checks with authenticated,
+attempt-bound completion evidence is a missing integration distinction, not
+proof that an unknown check terminated. DEV-239's service GitHub-check adapter
+needs the same explicit treatment after it merges. Agents and arbitrary
+executable checks must keep their fresh contained-termination requirement.
+
+The shipped candidate outputs also contain opaque strings that the supported
+output contract below retains. The usable source boundary is read-only
+merge/archive proof plus the owned-removal/retry integration exercised by
+contained-operation contract fixtures. The shipped end-to-end cleanup path is
+not enabled or qualified by this PR.
+
 Admission denies equal and ancestor/descendant workspace overlap with any recorded
 run. Cleanup jobs stay tracked by the sole coordinator; another task cannot claim
 an overlapping path during observation or deletion.

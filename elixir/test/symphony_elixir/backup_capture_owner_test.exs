@@ -14,7 +14,7 @@ defmodule SymphonyElixir.BackupCaptureOwnerTest do
 
   alias SymphonyElixirWeb.LinearWebhookController
 
-  setup do
+  setup test_context do
     root = Path.join(System.tmp_dir!(), "backup-capture-owner-#{System.unique_integer([:positive])}")
     workspace_root = Path.join(root, "workspaces")
     ready_workspace = Path.join(workspace_root, "rig-ready")
@@ -156,6 +156,15 @@ defmodule SymphonyElixir.BackupCaptureOwnerTest do
 
     waiting_run = human_wait_fixture(context)
     ready_run = %{context.ready_run | validation_repair_rounds: 2, review_repair_rounds: 1, transport_retries: 3}
+
+    {ready_run, waiting_run} =
+      if test_context[:stale_saved_policy] do
+        policy = Map.put(WorkstreamRun.policy(), :lifecycle_sha256, String.duplicate("0", 64))
+        {Map.put(ready_run, :policy, policy), Map.put(waiting_run, :policy, policy)}
+      else
+        {ready_run, waiting_run}
+      end
+
     seed_store!(context.db, [ready_run, waiting_run])
     context = Map.merge(context, %{ready_run: ready_run, waiting_run: waiting_run})
 
@@ -507,6 +516,340 @@ defmodule SymphonyElixir.BackupCaptureOwnerTest do
 
     assert :ok = WorkstreamStore.linear_receive(store, "after-capture", %{kind: :created})
     assert :ok = Evidence.capture(c.waiting_run, %{payload: %{"method" => "item/completed", "params" => %{"item" => %{"type" => "agentMessage", "text" => "after hold"}}}}, Evidence)
+  end
+
+  test "anchored recovery inspection preserves captured runs and remains dispatch-held across restart", c do
+    capture = create_quiet_capture(c)
+    state_db_digest = digest_file(c.db)
+    capture_digest_before = capture_files_digest(c.capture_root, "quiet-capture")
+
+    # A held inspection must use the captured definition even if today's source file changed.
+    File.write!(c.workstream_path, "this is no longer valid workstream YAML\n")
+
+    runtime = start_recovery_runtime(c, "quiet-capture", capture.manifest_sha256, WorkstreamRun.policy())
+    state = :sys.get_state(runtime.coordinator)
+    recovery = recovery_report(runtime.coordinator)
+
+    assert recovery.status == :dispatch_held
+    assert recovery.restore_ready == false
+    assert recovery.dispatch_allowed == false
+    assert recovery.policy_compatible == true
+    assert state.recovery == recovery
+    assert state.polling_enabled == false
+    assert state.tick_timer_ref == nil
+    assert state.tick_token == nil
+    assert state.linear == nil
+    assert state.workstreams.store == nil
+    assert state.workstreams.store_path == nil
+    assert state.workstreams.validation_check_timer == nil
+    assert state.workstreams.cleanup.timer == nil
+    assert map_size(state.workstreams.workers) == 0
+    assert map_size(state.workstreams.cancellations) == 0
+    assert map_size(state.workstreams.publications) == 0
+    assert map_size(state.workstreams.validation_checks) == 0
+    assert Task.Supervisor.children(runtime.tasks) == []
+    assert Process.whereis(Evidence) == c.evidence_pid
+
+    for {run_id, captured_run} <- capture.runs do
+      assert Map.fetch!(state.workstreams.runs, run_id) == captured_run
+      assert {:ok, report} = Orchestrator.workstream_state(runtime.coordinator, run_id)
+      assert report == Map.fetch!(capture.reports, run_id)
+    end
+
+    assert is_map(Orchestrator.snapshot(runtime.coordinator, 1_000))
+
+    assert {:error, :recovery_dispatch_held} =
+             Orchestrator.receive_linear_event(runtime.coordinator, %{kind: :created})
+
+    assert {:error, :recovery_dispatch_held} =
+             Orchestrator.queue_workstream(
+               runtime.coordinator,
+               "held-queue",
+               "held-task",
+               c.workstream_path,
+               %{"task" => "must not start"},
+               c.options
+             )
+
+    assert {:error, :recovery_dispatch_held} =
+             Orchestrator.answer_workstream(runtime.coordinator, "held-answer", "run-capture-humanwait", "wait", %{"body" => "no"})
+
+    assert {:error, :recovery_dispatch_held} = Orchestrator.step_workstreams(runtime.coordinator)
+    assert {:error, :recovery_dispatch_held} = Orchestrator.reconcile_workstreams(runtime.coordinator)
+
+    assert {:error, :recovery_dispatch_held} =
+             GenServer.call(runtime.coordinator, {:validation_monitor_owner, "run-capture-ready", %{}})
+
+    assert {:error, :recovery_dispatch_held} =
+             GenServer.call(runtime.coordinator, {:workstream_publication_intent, "run-capture-ready", %{}})
+
+    before_messages = :sys.get_state(runtime.coordinator)
+
+    for message <- [
+          :linear_process,
+          :linear_tick,
+          :reconcile_validation_checks,
+          :advance_workstreams,
+          :reconcile_merged_cleanup,
+          :observe_stopped_publications,
+          {:validation_checks_tick, make_ref()},
+          {:linear_result, make_ref(), {:ok, :ignored}},
+          {make_ref(), {:validation_observation, "run-capture-ready", %{}, :qualified}},
+          {make_ref(), {:workstream_canceled, "run-capture-ready", "attempt", :terminated}}
+        ] do
+      send(runtime.coordinator, message)
+    end
+
+    assert :ok = GenServer.cast(runtime.coordinator, {:unexpected_mutating_cast, make_ref()})
+
+    after_messages = :sys.get_state(runtime.coordinator)
+    assert after_messages == before_messages
+    assert Task.Supervisor.children(runtime.tasks) == []
+    assert capture_files_digest(c.capture_root, "quiet-capture") == capture_digest_before
+    assert digest_file(c.db) == state_db_digest
+    assert evidence_tree_digest(c.evidence_root) == capture.evidence_tree_digest
+
+    stop_runtime(runtime)
+    restarted = start_recovery_runtime(c, "quiet-capture", capture.manifest_sha256, WorkstreamRun.policy())
+    restarted_state = :sys.get_state(restarted.coordinator)
+
+    assert recovery_report(restarted.coordinator).status == :dispatch_held
+    assert recovery_report(restarted.coordinator).dispatch_allowed == false
+    assert restarted_state.workstreams.store == nil
+    assert restarted_state.workstreams.validation_check_timer == nil
+    assert restarted_state.workstreams.cleanup.timer == nil
+    assert restarted_state.workstreams.runs == capture.runs
+    assert restarted_state.tick_timer_ref == nil
+    assert restarted_state.linear == nil
+    assert Task.Supervisor.children(restarted.tasks) == []
+    assert Process.whereis(Evidence) == c.evidence_pid
+    assert capture_files_digest(c.capture_root, "quiet-capture") == capture_digest_before
+    assert digest_file(c.db) == state_db_digest
+    assert evidence_tree_digest(c.evidence_root) == capture.evidence_tree_digest
+  end
+
+  @tag stale_saved_policy: true
+  test "rejects changed or missing capture anchors and reports incompatible policy without writes", c do
+    capture = create_quiet_capture(c)
+    manifest_path = Path.join([c.capture_root, "quiet-capture", "manifest.json"])
+    manifest_bytes = File.read!(manifest_path)
+    state_db_digest = digest_file(c.db)
+    capture_digest_before = capture_files_digest(c.capture_root, "quiet-capture")
+
+    File.write!(manifest_path, manifest_bytes <> " ")
+    assert_recovery_start_fails(c, "quiet-capture", capture.manifest_sha256, WorkstreamRun.policy())
+    File.write!(manifest_path, manifest_bytes)
+
+    missing_manifest_path = manifest_path <> ".missing"
+    File.rename!(manifest_path, missing_manifest_path)
+    assert_recovery_start_fails(c, "quiet-capture", capture.manifest_sha256, WorkstreamRun.policy())
+    File.rename!(missing_manifest_path, manifest_path)
+
+    runtime = start_recovery_runtime(c, "quiet-capture", capture.manifest_sha256, WorkstreamRun.policy())
+    state = :sys.get_state(runtime.coordinator)
+    recovery = recovery_report(runtime.coordinator)
+
+    assert recovery.status == :dispatch_held
+    assert recovery.restore_ready == false
+    assert recovery.dispatch_allowed == false
+    assert recovery.policy_compatible == false
+    assert recovery.incompatible_run_ids == Enum.sort(Map.keys(capture.runs))
+    assert state.workstreams.store == nil
+    assert state.workstreams.validation_check_timer == nil
+    assert state.workstreams.cleanup.timer == nil
+    assert state.workstreams.runs == capture.runs
+    assert state.tick_timer_ref == nil
+    assert state.linear == nil
+    assert Task.Supervisor.children(runtime.tasks) == []
+    assert Process.whereis(Evidence) == c.evidence_pid
+    assert capture_files_digest(c.capture_root, "quiet-capture") == capture_digest_before
+    assert digest_file(c.db) == state_db_digest
+    assert evidence_tree_digest(c.evidence_root) == capture.evidence_tree_digest
+  end
+
+  test "recovery evidence inspection rejects changed identity, duplicate JSON and unsupported schema", c do
+    capture = create_quiet_capture(c)
+    original = capture_files_digest(c.capture_root, "quiet-capture")
+    assert {:ok, images} = BackupCapture.read_images(c.capture_root, "quiet-capture", [c.workspace_root], capture.manifest_sha256)
+    runs = Map.values(capture.runs)
+    assert {:ok, _} = Evidence.inspect_recovery_image(images.images["evidence"], runs)
+
+    for sql <- [
+          "UPDATE evidence_runs SET task_key='wrong-task'",
+          "UPDATE evidence_events SET run_id='missing-run'",
+          "UPDATE evidence_runs SET snapshot='{\"id\":\"wrong\",' || substr(snapshot,2)",
+          "UPDATE evidence_events SET payload='{\"kind\":\"one\",\"kind\":\"two\"}'",
+          "CREATE TABLE unexpected (value TEXT)",
+          "PRAGMA user_version=2"
+        ] do
+      path = Path.join(c.root, "mutated-evidence-#{System.unique_integer([:positive])}.sqlite")
+      File.write!(path, images.images["evidence"])
+      assert {:ok, db} = Sqlite3.open(path)
+      assert :ok = Sqlite3.execute(db, sql)
+      assert :ok = Sqlite3.close(db)
+      assert {:error, :invalid_recovery_evidence} = Evidence.inspect_recovery_image(File.read!(path), runs)
+    end
+
+    assert capture_files_digest(c.capture_root, "quiet-capture") == original
+  end
+
+  defp create_quiet_capture(c) do
+    runtime = start_capture_runtime(c)
+    coordinator = runtime.coordinator
+
+    pause_evidence_flush()
+    assert :ok = Evidence.artifact(c.waiting_run, "held inspection fixture", "captured inspection evidence", Evidence)
+    assert {:ok, %{id: "quiet-capture", status: :capturing, restore_ready: false}} = Orchestrator.capture_backup(coordinator, "quiet-capture")
+    assert {:ok, manifest} = await_capture(coordinator, "quiet-capture")
+    assert {:ok, ^manifest} = BackupCapture.verify(c.capture_root, "quiet-capture", [c.workspace_root])
+    pause_evidence_flush()
+
+    state = :sys.get_state(coordinator)
+    runs = state.workstreams.runs
+
+    reports =
+      Map.new(runs, fn {run_id, _run} ->
+        assert {:ok, report} = Orchestrator.workstream_state(coordinator, run_id)
+        {run_id, report}
+      end)
+
+    manifest_sha256 = digest_file(Path.join([c.capture_root, "quiet-capture", "manifest.json"]))
+    stop_runtime(runtime)
+
+    %{manifest: manifest, manifest_sha256: manifest_sha256, runs: runs, reports: reports, evidence_tree_digest: evidence_tree_digest(c.evidence_root)}
+  end
+
+  defp start_recovery_runtime(c, capture_id, manifest_sha256, policy) do
+    suffix = System.unique_integer([:positive])
+    supervisor = Module.concat(__MODULE__, "RecoveryRuntime#{suffix}")
+    coordinator = Module.concat(__MODULE__, "RecoveryCoordinator#{suffix}")
+    tasks = Module.concat(__MODULE__, "RecoveryTasks#{suffix}")
+
+    opts = [
+      name: supervisor,
+      orchestrator_name: coordinator,
+      task_supervisor_name: tasks,
+      recovery_capture: %{
+        root: c.capture_root,
+        id: capture_id,
+        workspace_roots: [c.workspace_root],
+        manifest_sha256: manifest_sha256,
+        service_revision: String.duplicate("c", 40),
+        policy: policy
+      }
+    ]
+
+    runtime = start_isolated_runtime(opts)
+    assert {:ok, _report} = Orchestrator.recovery_status(coordinator)
+    runtime
+  end
+
+  defp start_capture_runtime(c) do
+    suffix = System.unique_integer([:positive])
+    supervisor = Module.concat(__MODULE__, "CaptureRuntime#{suffix}")
+    coordinator = c.coordinator
+    tasks = Module.concat(__MODULE__, "CaptureTasks#{suffix}")
+
+    opts = [
+      name: supervisor,
+      orchestrator_name: coordinator,
+      task_supervisor_name: tasks,
+      workstream_store_path: c.db,
+      auto_advance: false,
+      backup_capture: %{
+        root: c.capture_root,
+        service_revision: String.duplicate("c", 40),
+        workspace_roots: [c.workspace_root],
+        cleanup: :disabled,
+        evidence_server: Evidence
+      }
+    ]
+
+    start_isolated_runtime(opts)
+  end
+
+  defp start_isolated_runtime(opts) do
+    {:ok, pid} = AgentRuntimeSupervisor.start_link(opts)
+    Process.unlink(pid)
+
+    runtime = %{
+      pid: pid,
+      coordinator: Keyword.fetch!(opts, :orchestrator_name),
+      tasks: Keyword.fetch!(opts, :task_supervisor_name)
+    }
+
+    on_exit(fn -> stop_runtime(runtime) end)
+    runtime
+  end
+
+  defp assert_recovery_start_fails(c, capture_id, manifest_sha256, policy) do
+    suffix = System.unique_integer([:positive])
+
+    opts = [
+      name: Module.concat(__MODULE__, "RejectedRecoveryRuntime#{suffix}"),
+      orchestrator_name: Module.concat(__MODULE__, "RejectedRecoveryCoordinator#{suffix}"),
+      task_supervisor_name: Module.concat(__MODULE__, "RejectedRecoveryTasks#{suffix}"),
+      recovery_capture: %{
+        root: c.capture_root,
+        id: capture_id,
+        workspace_roots: [c.workspace_root],
+        manifest_sha256: manifest_sha256,
+        service_revision: String.duplicate("c", 40),
+        policy: policy
+      }
+    ]
+
+    task =
+      Task.async(fn ->
+        Process.flag(:trap_exit, true)
+
+        case AgentRuntimeSupervisor.start_link(opts) do
+          {:error, _reason} = error ->
+            error
+
+          {:ok, pid} ->
+            Supervisor.stop(pid)
+            :unexpected_recovery_start
+        end
+      end)
+
+    assert {:error, _reason} = Task.await(task, 5_000)
+  end
+
+  defp recovery_report(coordinator) do
+    assert {:ok, report} = Orchestrator.recovery_status(coordinator)
+    report
+  end
+
+  defp capture_files_digest(root, id) do
+    directory = Path.join(root, id)
+
+    Map.new(["state.sqlite", "evidence.sqlite", "manifest.json"], fn filename ->
+      {filename, digest_file(Path.join(directory, filename))}
+    end)
+  end
+
+  defp evidence_tree_digest(root) do
+    root
+    |> Path.join("**/*")
+    |> Path.wildcard()
+    |> Enum.filter(&File.regular?/1)
+    |> Enum.sort()
+    |> Map.new(fn path -> {Path.relative_to(path, root), digest_file(path)} end)
+  end
+
+  defp pause_evidence_flush do
+    :sys.replace_state(Evidence, fn state ->
+      if is_reference(state.flush_timer), do: Process.cancel_timer(state.flush_timer)
+      %{state | flush_timer: nil}
+    end)
+  end
+
+  defp digest_file(path) do
+    path
+    |> File.read!()
+    |> then(fn bytes -> :crypto.hash(:sha256, bytes) end)
+    |> Base.encode16(case: :lower)
   end
 
   defp start_runtime(c, extra \\ []) do

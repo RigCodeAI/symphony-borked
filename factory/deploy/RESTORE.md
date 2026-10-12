@@ -107,6 +107,12 @@ actions. GCP recreation, freshness alerts and the deployed rehearsal remain pend
 
 ## Local test/demo
 
+The separate Elixir [held recovery inspector](../../docs/held-recovery-inspection.md)
+can consume an independently anchored `local_owner_capture` in memory. It checks
+saved application payloads and pins and exposes them with dispatch held. It does
+not install databases, release dispatch, fence writers or change this Python
+verifier's legacy manifest contract and blocked exit codes.
+
 ```bash
 cd factory/deploy/tests
 python3 -m unittest test_backup_verifier

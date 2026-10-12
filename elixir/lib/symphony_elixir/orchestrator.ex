@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, BackupCapture, Config, Evidence, StatusDashboard, Tracker, WorkstreamCleanup, WorkstreamRun, WorkstreamRunner, WorkstreamStore}
+  alias SymphonyElixir.{AgentRunner, BackupCapture, Config, Evidence, RecoveryInspection, StatusDashboard, Tracker, WorkstreamCleanup, WorkstreamRun, WorkstreamRunner, WorkstreamStore}
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.Linear.Coordinator, as: LinearCoordinator
 
@@ -42,6 +42,7 @@ defmodule SymphonyElixir.Orchestrator do
       claimed: MapSet.new(),
       blocked: %{},
       linear: nil,
+      recovery: nil,
       retry_attempts: %{},
       codex_totals: nil,
       codex_rate_limits: nil
@@ -73,9 +74,17 @@ defmodule SymphonyElixir.Orchestrator do
           codex_rate_limits: nil
         }
 
-        initialized = with {:ok, state} <- init_workstreams(state, opts), do: LinearCoordinator.init(state, opts)
+        initialized =
+          if Keyword.has_key?(opts, :recovery_capture) do
+            init_recovery_inspection(state, opts)
+          else
+            with {:ok, state} <- init_workstreams(state, opts), do: LinearCoordinator.init(state, opts)
+          end
 
         case initialized do
+          {:ok, %{recovery: recovery} = state} when not is_nil(recovery) ->
+            {:ok, state}
+
           {:ok, state} ->
             state = state |> recover_workstreams() |> schedule_validation_checks_tick() |> schedule_merged_cleanup()
             if state.workstreams, do: send(self(), :reconcile_validation_checks)
@@ -98,6 +107,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @impl true
+  def handle_info(_message, %{recovery: recovery} = state) when not is_nil(recovery), do: {:noreply, state}
+
   def handle_info({:backup_capture_result, token, pid, result}, %{workstreams: %{capture: %{token: token, pid: pid} = capture}} = state) do
     Process.demonitor(capture.ref, [:flush])
     {:noreply, finish_backup_capture(state, capture, result)}
@@ -365,6 +376,9 @@ defmodule SymphonyElixir.Orchestrator do
     Logger.debug("Orchestrator ignored message: #{inspect(msg)}")
     {:noreply, state}
   end
+
+  @impl true
+  def handle_cast(_message, %{recovery: recovery} = state) when not is_nil(recovery), do: {:noreply, state}
 
   @spec receive_linear_event(GenServer.server(), map()) :: :ok | {:duplicate, map()} | {:error, term()}
   def receive_linear_event(server, event), do: GenServer.call(server, {:linear_event, event}, 4_000)
@@ -1583,6 +1597,10 @@ defmodule SymphonyElixir.Orchestrator do
   def capture_held?(%{workstreams: %{capture: capture}}), do: not is_nil(capture)
   def capture_held?(_state), do: false
 
+  @doc "Returns the redacted held recovery inspection; it never authorizes dispatch."
+  @spec recovery_status(GenServer.server()) :: {:ok, map()} | {:error, :recovery_not_enabled}
+  def recovery_status(server), do: GenServer.call(server, :recovery_status)
+
   @doc "True while cleanup owns an active job or a deletion outcome remains uncertain."
   @spec cleanup_active_or_uncertain?(map()) :: boolean()
   def cleanup_active_or_uncertain?(%{workstreams: nil}), do: false
@@ -1598,6 +1616,29 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @impl true
+  def handle_call(:recovery_status, _from, %{recovery: nil} = state),
+    do: {:reply, {:error, :recovery_not_enabled}, state}
+
+  def handle_call(:recovery_status, _from, state), do: {:reply, {:ok, state.recovery}, state}
+
+  def handle_call(:snapshot, _from, %{recovery: recovery} = state) when not is_nil(recovery),
+    do:
+      {:reply,
+       %{
+         recovery: recovery,
+         running: [],
+         retrying: [],
+         blocked: [],
+         linear: nil,
+         polling: %{checking?: false, next_poll_in_ms: nil, poll_interval_ms: state.poll_interval_ms},
+         codex_totals: state.codex_totals,
+         rate_limits: nil
+       }, state}
+
+  def handle_call(message, _from, %{recovery: recovery} = state)
+      when not is_nil(recovery) and not (is_tuple(message) and tuple_size(message) == 2 and elem(message, 0) == :workstream_state),
+      do: {:reply, {:error, :recovery_dispatch_held}, state}
+
   def handle_call({:backup_capture, id}, _from, state), do: begin_backup_capture(state, id)
 
   def handle_call({:backup_capture_status, id}, _from, %{workstreams: workstreams} = state) when not is_nil(workstreams) do
@@ -2417,7 +2458,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp initial_orchestrator_settings(opts) do
-    if Keyword.has_key?(opts, :workstream_store_path) do
+    if Keyword.has_key?(opts, :workstream_store_path) or Keyword.has_key?(opts, :recovery_capture) do
       max = Keyword.get(opts, :max_concurrent_agents, 1)
 
       if is_integer(max) and max > 0,
@@ -2425,6 +2466,31 @@ defmodule SymphonyElixir.Orchestrator do
         else: {:error, :invalid_workstream_capacity}
     else
       Config.settings()
+    end
+  end
+
+  defp init_recovery_inspection(state, opts) do
+    if Keyword.has_key?(opts, :workstream_store_path) or Keyword.get(opts, :polling, false) != false do
+      {:error, :recovery_requires_inspection_only_mode}
+    else
+      with {:ok, inspected} <- RecoveryInspection.inspect(Keyword.get(opts, :recovery_capture)) do
+        workstreams = %{
+          store: nil,
+          store_path: nil,
+          runs: Map.new(inspected.runs, &{&1.id, &1}),
+          workers: %{},
+          cancellations: %{},
+          publications: %{},
+          validation_checks: %{},
+          validation_check_timer: nil,
+          cleanup: %{jobs: %{}, timer: nil},
+          capture: nil,
+          capture_results: %{},
+          opts: opts
+        }
+
+        {:ok, %{state | workstreams: workstreams, polling_enabled: false, recovery: inspected.report}}
+      end
     end
   end
 

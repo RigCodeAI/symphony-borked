@@ -111,7 +111,7 @@ defmodule SymphonyElixir.DurableChildProofTest do
         end)
 
       assert resumed.current_attempt_id == nil
-      assert Enum.count(resumed.attempts, &(&1.stage == "re-evaluate")) == 0
+      refute Enum.any?(resumed.attempts, &(&1.stage == "re-evaluate"))
       envelope = resumed.outputs["child-result"]
       assert envelope["child_run_id"] == child.id
       assert envelope["outputs"]["publication"] == retained_value

@@ -697,7 +697,14 @@ defmodule SymphonyElixir.CandidateTransfer do
     attempt_id = field(attempt, :id)
     operations = field(run, :operations) || %{}
     operation = map_fetch(operations, attempt_id)
-    identity = field(operation || %{}, :worker)
+
+    # Worker holds the local task; external_process holds the registered remote identity.
+    # Older records stored that identity in worker, so fall back only when absent.
+    identity =
+      case field(operation || %{}, :external_process) do
+        nil -> field(operation || %{}, :worker)
+        identity -> identity
+      end
 
     with true <- is_map(operation) and is_map(identity),
          true <- field(operation, :id) == attempt_id,

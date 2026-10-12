@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.CandidateTransferTest do
   use ExUnit.Case, async: false
 
-  alias SymphonyElixir.{CandidateContext, CandidateGit, CandidateTransfer}
+  alias SymphonyElixir.{CandidateContext, CandidateGit, CandidateTransfer, Orchestrator, WorkstreamRun, WorkstreamStore}
 
   @control %{
     "host" => "factory-control@worker",
@@ -15,6 +15,71 @@ defmodule SymphonyElixir.CandidateTransferTest do
     "thread_id" => "fixture-thread",
     "metadata" => %{"z" => 4, "a" => ["DEV-238", true]}
   }
+
+  test "imports with the external identity persisted by the coordinator registration callback" do
+    fixture = fixture()
+    id = fixture.identity["operation_id"]
+    worker = %{pid: inspect(self()), boot_id: "coordinator-boot", node: to_string(node())}
+
+    pending =
+      fixture.run
+      |> Map.merge(%{status: :executing, stage_id: "local-commit", current_attempt_id: id})
+      |> update_in([:operations, id], &(&1 |> Map.delete(:external_process) |> Map.put(:status, :executing)))
+      |> WorkstreamRun.record_worker(worker)
+
+    store = start_supervised!({WorkstreamStore, path: Path.join(fixture.root, "registration.sqlite"), owner: self()})
+    state = %Orchestrator.State{workstreams: %{store: store, runs: %{pending.id => pending}, workers: %{id => %{pid: self()}}}}
+
+    assert {:reply, :ok, registered} =
+             Orchestrator.handle_call({:workstream_process, pending.id, id, self(), fixture.identity}, {self(), make_ref()}, state)
+
+    assert {:ok, stored} = WorkstreamStore.fetch(store, pending.id)
+    assert stored.operations[id] == registered.workstreams.runs[pending.id].operations[id]
+    assert stored.operations[id].worker == worker
+    assert stored.operations[id].external_process == fixture.identity
+
+    # Complete the registered operation with the already successful producer result.
+    operation = %{stored.operations[id] | status: :completed}
+    run = put_in(fixture.run, [:operations, id], operation)
+    assert {:ok, transferred, _} = CandidateTransfer.sync(run, fixture.validation_stage, worker_operation_opts: [rpc_fun: rpc(fixture, fixture.bundle)])
+    assert {:ok, ^transferred} = CandidateTransfer.workspace(run)
+    assert File.read!(Path.join(transferred, "README.md")) == "candidate\n"
+    assert_receive {:candidate_bundle_requested, _}
+  end
+
+  test "legacy worker identities remain readable only when external process identity is absent" do
+    fixture = fixture()
+    id = fixture.identity["operation_id"]
+    operation = fixture.run.operations[id] |> Map.delete(:external_process) |> Map.put(:worker, fixture.identity)
+
+    for legacy <- [operation, Map.put(operation, :external_process, nil)] do
+      run = put_in(fixture.run, [:operations, id], legacy)
+      assert {:ok, _, _} = CandidateTransfer.sync(run, fixture.validation_stage, worker_operation_opts: [rpc_fun: rpc(fixture, fixture.bundle)])
+    end
+  end
+
+  test "invalid external identities and incomplete registrations never fall back to worker metadata" do
+    fixture = fixture()
+    id = fixture.identity["operation_id"]
+    operation = %{fixture.run.operations[id] | worker: fixture.identity}
+
+    invalid =
+      Enum.map(
+        [false, %{}, Map.put(fixture.identity, "kind", "other"), Map.put(fixture.identity, "operation_id", "other")],
+        &Map.put(operation, :external_process, &1)
+      ) ++
+        Enum.map([id: "other", attempt_id: "other", stage: "other", type: :agent, status: :executing], fn {key, value} ->
+          Map.put(operation, key, value)
+        end) ++
+        [operation |> Map.delete(:external_process) |> Map.put(:worker, nil)]
+
+    for invalid_operation <- invalid do
+      run = put_in(fixture.run, [:operations, id], invalid_operation)
+
+      assert {:error, :candidate_transfer_registered_operation_missing} =
+               CandidateTransfer.sync(run, fixture.validation_stage, worker_operation_opts: [rpc_fun: fn _, _ -> flunk("invalid registration must not contact the worker") end])
+    end
+  end
 
   test "imports the exact candidate when the coordinator lacks history before its pinned base" do
     fixture = fixture()
@@ -511,7 +576,8 @@ defmodule SymphonyElixir.CandidateTransferTest do
           stage: "local-commit",
           type: :check,
           status: :completed,
-          worker: identity
+          worker: %{pid: "#PID<0.1.0>", boot_id: "coordinator-boot", node: "nonode@nohost"},
+          external_process: identity
         }
       }
     }
@@ -729,7 +795,8 @@ defmodule SymphonyElixir.CandidateTransferTest do
             stage: "local-commit",
             type: :check,
             status: :completed,
-            worker: identity
+            worker: %{pid: "#PID<0.1.0>", boot_id: "coordinator-boot", node: "nonode@nohost"},
+            external_process: identity
           })
     }
 

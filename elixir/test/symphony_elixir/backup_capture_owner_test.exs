@@ -166,6 +166,8 @@ defmodule SymphonyElixir.BackupCaptureOwnerTest do
     runtime = start_runtime(c)
     coordinator = runtime.coordinator
     store = :sys.get_state(coordinator).workstreams.store
+    {initial_timer_ref, initial_timer_token} = :sys.get_state(coordinator).workstreams.validation_check_timer
+    assert is_integer(Process.read_timer(initial_timer_ref))
 
     assert {:error, {:database_ownership_conflict, _, _}} = WorkstreamStore.start_link(path: c.db, owner: self())
     assert {:ok, %{status: :ready} = ready} = Orchestrator.workstream_state(coordinator, "run-capture-ready")
@@ -178,6 +180,37 @@ defmodule SymphonyElixir.BackupCaptureOwnerTest do
     assert :ok = Evidence.artifact(waiting, "retained fixture", "captured evidence bytes", Evidence)
     assert {:ok, %{id: "quiet-capture", status: :capturing, restore_ready: false}} = Orchestrator.capture_backup(coordinator, "quiet-capture")
     {:ok, manifest} = await_capture(coordinator, "quiet-capture")
+
+    {released_timer_ref, released_timer_token} = :sys.get_state(coordinator).workstreams.validation_check_timer
+    refute released_timer_ref == initial_timer_ref
+    refute released_timer_token == initial_timer_token
+    assert Process.read_timer(initial_timer_ref) == false
+    assert is_integer(Process.read_timer(released_timer_ref))
+
+    for _ <- 1..10 do
+      send(coordinator, {:validation_checks_tick, initial_timer_token})
+      send(coordinator, :reconcile_validation_checks)
+    end
+
+    assert {:ok, ^manifest} = Orchestrator.backup_capture_status(coordinator, "quiet-capture")
+    assert :sys.get_state(coordinator).workstreams.validation_check_timer == {released_timer_ref, released_timer_token}
+
+    send(coordinator, {:validation_checks_tick, released_timer_token})
+    assert {:ok, ^manifest} = Orchestrator.backup_capture_status(coordinator, "quiet-capture")
+    {next_timer_ref, next_timer_token} = :sys.get_state(coordinator).workstreams.validation_check_timer
+    refute next_timer_ref == released_timer_ref
+    refute next_timer_token == released_timer_token
+    assert Process.read_timer(released_timer_ref) == false
+    assert is_integer(Process.read_timer(next_timer_ref))
+
+    for _ <- 1..10 do
+      send(coordinator, {:validation_checks_tick, released_timer_token})
+      send(coordinator, :reconcile_validation_checks)
+    end
+
+    assert {:ok, ^manifest} = Orchestrator.backup_capture_status(coordinator, "quiet-capture")
+    assert :sys.get_state(coordinator).workstreams.validation_check_timer == {next_timer_ref, next_timer_token}
+    assert map_size(:sys.get_state(coordinator).workstreams.validation_checks) == 0
 
     assert manifest["restore_ready"] == false
     assert manifest["metadata"]["service_revision"] == String.duplicate("c", 40)
@@ -282,6 +315,34 @@ defmodule SymphonyElixir.BackupCaptureOwnerTest do
     assert {:error, :capture_cleanup_active_or_uncertain} = Orchestrator.capture_backup(coordinator, "cleanup-uncertain")
   end
 
+  test "actual capture clears the periodic token before a held expiry can rearm", c do
+    runtime = start_runtime(c)
+    coordinator = runtime.coordinator
+    test_pid = self()
+
+    held =
+      :sys.replace_state(coordinator, fn state ->
+        {timer_ref, token} = state.workstreams.validation_check_timer
+
+        {:reply, {:ok, %{status: :capturing}}, capturing} =
+          Orchestrator.handle_call({:backup_capture, "timer-boundary"}, {test_pid, make_ref()}, state)
+
+        assert Orchestrator.capture_held?(capturing)
+        assert capturing.workstreams.validation_check_timer == nil
+        assert Process.read_timer(timer_ref) == false
+        assert {:noreply, ^capturing} = Orchestrator.handle_info({:validation_checks_tick, token}, capturing)
+        assert {:noreply, ^capturing} = Orchestrator.handle_info(:reconcile_validation_checks, capturing)
+        capturing
+      end)
+
+    assert Orchestrator.capture_held?(held)
+    assert {:ok, %{"restore_ready" => false}} = await_capture(coordinator, "timer-boundary")
+    released = :sys.get_state(coordinator)
+    refute Orchestrator.capture_held?(released)
+    {timer_ref, _token} = released.workstreams.validation_check_timer
+    assert is_integer(Process.read_timer(timer_ref))
+  end
+
   test "holds intake during capture, ignores stale completion, and waits for both owners after interruption", c do
     runtime = start_runtime(c)
     coordinator = runtime.coordinator
@@ -309,6 +370,10 @@ defmodule SymphonyElixir.BackupCaptureOwnerTest do
         stale_evidence_end = Evidence.end_capture(Evidence, stale_token)
         send(test_pid, {:stale_capture_end, stale_store_end, stale_evidence_end})
 
+        validation_timer = Map.get(state.workstreams, :validation_check_timer)
+        if validation_timer, do: Process.cancel_timer(elem(validation_timer, 0))
+        send(test_pid, {:validation_timer_paused, validation_timer})
+
         linear =
           case state.linear do
             nil ->
@@ -320,7 +385,12 @@ defmodule SymphonyElixir.BackupCaptureOwnerTest do
           end
 
         capture = %{id: plan.id, token: token, pid: worker, ref: ref, evidence_server: Evidence}
-        workstreams = Map.put(state.workstreams, :capture, capture)
+
+        workstreams =
+          state.workstreams
+          |> Map.put(:validation_check_timer, nil)
+          |> Map.put(:capture, capture)
+
         %{state | workstreams: workstreams, linear: linear}
       end)
 
@@ -328,6 +398,9 @@ defmodule SymphonyElixir.BackupCaptureOwnerTest do
     token = capture.token
     worker = capture.pid
     assert_receive {:stale_capture_end, {:error, :capture_not_authorized}, {:error, :capture_not_authorized}}
+    assert_receive {:validation_timer_paused, {paused_timer_ref, paused_timer_token}}
+    assert Process.read_timer(paused_timer_ref) == false
+    assert held_state.workstreams.validation_check_timer == nil
     assert Orchestrator.capture_held?(held_state)
     assert :sys.get_state(store).capture.token == token
     assert :sys.get_state(Evidence).capture.token == token
@@ -341,7 +414,13 @@ defmodule SymphonyElixir.BackupCaptureOwnerTest do
     send(coordinator, :advance_workstreams)
     send(coordinator, {make_ref(), {:validation_stage_verified, "run-capture-ready", "attempt", self(), %{}, :qualified}})
     send(coordinator, {make_ref(), {:validation_observation, "run-capture-ready", %{}, :qualified}})
+    send(coordinator, {:validation_checks_tick, paused_timer_token})
+    send(coordinator, {:validation_checks_tick, make_ref()})
+    send(coordinator, :reconcile_validation_checks)
+    assert {:ok, %{status: :capturing, restore_ready: false}} = Orchestrator.backup_capture_status(coordinator, "interrupted-capture")
     assert :sys.get_state(coordinator).workstreams.runs == held_state.workstreams.runs
+    assert :sys.get_state(coordinator).workstreams.validation_check_timer == nil
+    assert map_size(:sys.get_state(coordinator).workstreams.validation_checks) == 0
 
     assert :ok = :sys.suspend(store)
 
@@ -395,6 +474,36 @@ defmodule SymphonyElixir.BackupCaptureOwnerTest do
     assert {:error, :capture_worker_failed} = await_capture(coordinator, "interrupted-capture")
     refute Orchestrator.capture_held?(:sys.get_state(coordinator))
     refute File.exists?(Path.join([c.capture_root, "interrupted-capture", "manifest.json"]))
+
+    {released_timer_ref, released_timer_token} = :sys.get_state(coordinator).workstreams.validation_check_timer
+    refute released_timer_ref == paused_timer_ref
+    refute released_timer_token == paused_timer_token
+    assert is_integer(Process.read_timer(released_timer_ref))
+
+    for _ <- 1..10 do
+      send(coordinator, {:validation_checks_tick, paused_timer_token})
+      send(coordinator, :reconcile_validation_checks)
+    end
+
+    assert {:error, :capture_worker_failed} = await_capture(coordinator, "interrupted-capture")
+    assert :sys.get_state(coordinator).workstreams.validation_check_timer == {released_timer_ref, released_timer_token}
+
+    send(coordinator, {:validation_checks_tick, released_timer_token})
+    assert {:error, :capture_worker_failed} = await_capture(coordinator, "interrupted-capture")
+    {next_timer_ref, next_timer_token} = :sys.get_state(coordinator).workstreams.validation_check_timer
+    refute next_timer_ref == released_timer_ref
+    refute next_timer_token == released_timer_token
+    assert Process.read_timer(released_timer_ref) == false
+    assert is_integer(Process.read_timer(next_timer_ref))
+
+    for _ <- 1..10 do
+      send(coordinator, {:validation_checks_tick, released_timer_token})
+      send(coordinator, :reconcile_validation_checks)
+    end
+
+    assert {:error, :capture_worker_failed} = await_capture(coordinator, "interrupted-capture")
+    assert :sys.get_state(coordinator).workstreams.validation_check_timer == {next_timer_ref, next_timer_token}
+    assert map_size(:sys.get_state(coordinator).workstreams.validation_checks) == 0
 
     assert :ok = WorkstreamStore.linear_receive(store, "after-capture", %{kind: :created})
     assert :ok = Evidence.capture(c.waiting_run, %{payload: %{"method" => "item/completed", "params" => %{"item" => %{"type" => "agentMessage", "text" => "after hold"}}}}, Evidence)

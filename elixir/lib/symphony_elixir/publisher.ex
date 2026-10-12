@@ -126,7 +126,7 @@ defmodule SymphonyElixir.Publisher do
   @spec reconcile(map(), map()) :: :retry_safe | :unknown
   def reconcile(run, operation) do
     stage = run.definition.stages[operation.stage]
-    if stage && stage.type == :publish, do: :retry_safe, else: :unknown
+    if stage && (stage.type == :publish or get_in(stage, [:gate, :evaluator]) == :github_validation), do: :retry_safe, else: :unknown
   end
 
   @doc "Records only safe publication identity before any GitHub write."

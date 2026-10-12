@@ -53,7 +53,8 @@ defmodule SymphonyElixir.SoftwareChangeTest do
       validation_archive: Path.join(root, "validation-archive"),
       validation_scratch: Path.join(root, "validation-scratch"),
       validation_base: String.trim(base),
-      publisher: %{app_id: "1", installation_id: "2", private_key_path: Path.join(root, "publisher.pem")}
+      publisher: %{app_id: "1", installation_id: "2", private_key_path: Path.join(root, "publisher.pem")},
+      validation_check: %{app_id: "3", installation_id: "4", private_key_path: Path.join(root, "validation.pem")}
     ]
 
     assert {:error, {:missing_validation_option, :validation_policy}} =
@@ -138,7 +139,7 @@ defmodule SymphonyElixir.SoftwareChangeTest do
     assert definition.stages["publish"].type == :publish
     assert definition.stages["publish"].gate.validation_stage == "validate"
     assert definition.stages["publish"].gate.required == definition.stages["validate"].gate.required
-    assert definition.stages["candidate-ready"].inputs == ["publication"]
+    assert definition.stages["candidate-ready"].inputs == ["publication", "github-validation"]
     assert definition.stages["candidate-ready"].prompt =~ "Human merge remains in GitHub"
     # A caller's prose or verdict cannot stand in for authenticated final validation.
     blocked = WorkstreamRun.finish_stage(run, {:ok, %{gate: %{verdict: :passed}, exit_status: 0}})

@@ -3,7 +3,8 @@
 Status: the PR #18 baseline passed compilation, build, specs, format and 85
 focused tests in the isolated Docker runtime. PR #19's merged source is now
 integrated and passed 49 combined capture/cleanup tests plus compile/spec/format.
-PR #20's validation timer changes are still unmerged. No live capture or
+PR #20's merged validation timer is integrated; its combined qualification is
+recorded below. No live capture or
 restore is authorized or qualified. Reviewed against merged main
 `e7fd8290ed7e508547867c9a5233d9b9eb0bfd16` (PR #18), and live DEV-239,
 DEV-241, DEV-242 and DEV-243 scope. Recheck the seams after their integrations.
@@ -164,13 +165,14 @@ Its pending-only wake is `reconcile_validation_checks(state, true)` inside
 `advance_workstreams/1`, rather than a new two-element mailbox message. Capture
 suppresses the advance message and step call, then re-arms advance on release;
 the queued reply stays in the saved run without requiring synchronous GitHub reads.
-The latest unmerged PR #20 separates immediate `:reconcile_validation_checks`
+PR #20 merged as `9fb13f8acf701f444e7a8a6f6e323193632a9d17`. It separates immediate `:reconcile_validation_checks`
 from tokenized `{:validation_checks_tick, token}` and owns
 `validation_check_timer: {ref, token}`. The capture guard recognizes the tokenized
-message. After that PR merges, integrate the actual timer field and reuse its
-`schedule_validation_checks_tick/1` on release; do not reintroduce a recurring
-timer from the immediate wake. Until then an unknown timer-owner field rejects
-capture, so this branch does not claim that timer integration is complete.
+message. Admission recognizes the timer field; capture cancels its reference and
+clears its token before holding. Release uses the existing
+`schedule_validation_checks_tick/1` once and separately sends the immediate wake.
+Expired or stale tokens cannot rearm while held or create a second periodic chain
+after release. Immediate wakes do not schedule timers.
 
 DEV-241 merged as `c498b78044cd5392615f4f623955fe1fbca2004e` (PR #19).
 Its actual `cleanup_active_or_uncertain?(state)` covers active jobs, surviving
@@ -262,8 +264,43 @@ remain intact. The new cleanup job/uncertain-delete refusals and retained-export
 hold passed. The container is stopped after this focused pass and the slot is
 released for DEV-239's short merge recheck, then DEV-243's remaining tests.
 
-PR #20 remains unmerged; its timer field and validation/capture combined proof
-are still pending. No unmerged validation APIs are claimed integrated.
+### Combined PR #20 integration
+
+Merged `9fb13f8acf701f444e7a8a6f6e323193632a9d17`, preserving both validation
+and capture/cleanup state and callbacks. Capture admission now accepts the actual
+timer-owner field, cancels and invalidates it while held, and explicitly rearms
+one periodic chain after release. The actual capture callback is checked at the
+held boundary before completion can be accepted. Expired tokens and immediate
+wakes leave that held state unchanged. Real capture release, interrupted-worker
+settlement and one valid periodic expiry are checked with the live timer refs;
+repeated stale tokens and immediate wakes do not create another chain.
+
+The first mixed owner/validation/cleanup pass found five validation fixture
+startup failures: the plain ExUnit fixture inherited a prior Evidence workflow.
+Using the existing `TestSupport` workflow isolation fixed that order dependency.
+The same seed (`181010`) then passed **43 tests, zero failures** across the owner,
+validation-check and cleanup files. This fixture repair does not change runtime
+Evidence semantics or suppress validation assertions.
+
+The final combined pass at seed `181010` passed **97 tests, zero failures**:
+
+```sh
+mix test test/symphony_elixir/backup_capture_test.exs \
+  test/symphony_elixir/backup_capture_owner_test.exs \
+  test/symphony_elixir/evidence_test.exs \
+  test/symphony_elixir/workstream_store_test.exs \
+  test/symphony_elixir/workstream_cleanup_test.exs \
+  test/symphony_elixir/validation_check_test.exs \
+  test/symphony_elixir/durable_workstream_test.exs \
+  test/symphony_elixir/durable_publication_test.exs --seed 181010
+```
+
+Warnings-as-errors compile, `mix build`, public specs, full format and PR-body
+checks passed. The isolated container was stopped and the granted heavy slot
+released after this pass. No live capture/restore or provider operation ran.
+GitHub make-all on the earlier PR head `0019e347` stopped at Credo with 407 static
+issues before full tests; its CodeQL and PR-description checks passed. Broad CI
+remains an alpha non-blocking check, not a passed acceptance claim.
 
 ## Remaining full-ticket work
 

@@ -77,8 +77,8 @@ defmodule SymphonyElixir.Orchestrator do
 
         case initialized do
           {:ok, state} ->
-            state = recover_workstreams(state)
-            state = schedule_merged_cleanup(state)
+            state = state |> recover_workstreams() |> schedule_validation_checks_tick() |> schedule_merged_cleanup()
+            if state.workstreams, do: send(self(), :reconcile_validation_checks)
 
             if state.polling_enabled do
               run_terminal_workspace_cleanup()
@@ -178,6 +178,40 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, accept_workstream_cancellation(state, ref, run_id, attempt_id, outcome)}
   end
 
+  def handle_info(:reconcile_validation_checks, state) do
+    {:noreply, reconcile_validation_checks(state)}
+  end
+
+  def handle_info({:validation_checks_tick, token}, %{workstreams: %{validation_check_timer: {_ref, token}}} = state) do
+    {:noreply, state |> reconcile_validation_checks() |> schedule_validation_checks_tick()}
+  end
+
+  def handle_info({:validation_checks_tick, _token}, state), do: {:noreply, state}
+
+  def handle_info({ref, {:validation_observation, run_id, artifacts, result}}, state) when is_reference(ref) do
+    {:noreply, accept_validation_observation(state, ref, run_id, artifacts, result)}
+  end
+
+  def handle_info({ref, {:validation_stage_verified, id, attempt, pid, artifacts, result}}, state) when is_reference(ref) do
+    key = "stage/" <> attempt
+
+    case state.workstreams && state.workstreams.validation_checks[key] do
+      %{ref: ^ref} ->
+        Process.demonitor(ref, [:flush])
+        state = update_in(state.workstreams.validation_checks, &Map.delete(&1, key))
+        run = durable_run(state, id)
+
+        if run && run.artifacts == artifacts do
+          {:noreply, accept_owned_workstream_result(state, id, attempt, pid, result)}
+        else
+          {:noreply, state}
+        end
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
   def handle_info(:observe_stopped_publications, state) do
     {:noreply, observe_stopped_publications(state)}
   end
@@ -239,6 +273,8 @@ defmodule SymphonyElixir.Orchestrator do
         {:DOWN, ref, :process, _pid, reason},
         %{running: running} = state
       ) do
+    state = validation_monitor_down(state, ref)
+
     case find_issue_id_for_ref(running, ref) do
       nil ->
         case merged_cleanup_down(state, ref) do
@@ -1719,6 +1755,28 @@ defmodule SymphonyElixir.Orchestrator do
     {:reply, :ok, state}
   end
 
+  def handle_call({:validation_stage_verifier_owner, id, attempt, artifacts}, {caller, _}, state) do
+    run = durable_run(state, id)
+    verifier = state.workstreams && Map.get(state.workstreams, :validation_checks, %{})["stage/" <> attempt]
+
+    allowed =
+      run && verifier && verifier[:pid] == caller && run.current_attempt_id == attempt &&
+        run.status in [:executing, :reconciling] && run.artifacts == artifacts && not linear_stopped?(state, run)
+
+    {:reply, if(allowed, do: :ok, else: {:error, :validation_no_longer_owned}), state}
+  end
+
+  def handle_call({:validation_monitor_owner, run_id, artifacts}, {caller, _}, state) do
+    run = durable_run(state, run_id)
+    monitor = state.workstreams && Map.get(state.workstreams, :validation_checks, %{})[run_id]
+
+    allowed =
+      run && monitor && monitor[:pid] == caller && run.artifacts == artifacts &&
+        SymphonyElixir.ValidationCheck.monitor?(run) && not linear_stopped?(state, run)
+
+    {:reply, if(allowed, do: :ok, else: {:error, :validation_no_longer_owned}), state}
+  end
+
   def handle_call({:workstream_cleanup_check, _token, _pid, _revision}, _from, %{workstreams: nil} = state),
     do: {:reply, {:error, :durable_workstreams_disabled}, state}
 
@@ -2407,6 +2465,7 @@ defmodule SymphonyElixir.Orchestrator do
               workers: %{},
               cancellations: %{},
               publications: %{},
+              validation_checks: %{},
               cleanup: %{jobs: %{}, timer: nil},
               capture: nil,
               capture_results: %{},
@@ -2476,7 +2535,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp capture_admission(state) do
     workstreams = state.workstreams
-    known_fields = [:store, :store_path, :runs, :workers, :cancellations, :publications, :cleanup, :opts, :capture, :capture_results, :validation_checks]
+    known_fields = [:store, :store_path, :runs, :workers, :cancellations, :publications, :cleanup, :opts, :capture, :capture_results, :validation_checks, :validation_check_timer]
 
     cond do
       not is_nil(workstreams.capture) -> {:error, :capture_in_progress}
@@ -2579,6 +2638,9 @@ defmodule SymphonyElixir.Orchestrator do
     if state.workstreams.cleanup.timer, do: Process.cancel_timer(state.workstreams.cleanup.timer)
     state = put_in(state.workstreams.cleanup.timer, nil)
 
+    if timer = state.workstreams[:validation_check_timer], do: Process.cancel_timer(elem(timer, 0))
+    state = put_in(state.workstreams[:validation_check_timer], nil)
+
     if state.linear do
       if state.linear.timer, do: Process.cancel_timer(state.linear.timer)
       put_in(state.linear.timer, nil)
@@ -2619,6 +2681,7 @@ defmodule SymphonyElixir.Orchestrator do
          :ok <- release_capture_lease(fn -> Evidence.end_capture(capture.evidence_server, capture.token) end) do
       state = put_in(state.workstreams.capture, nil)
       state = put_in(state.workstreams.capture_results[capture.id], result)
+      state = schedule_validation_checks_tick(state)
       send(self(), :advance_workstreams)
       send(self(), :linear_tick)
       send(self(), :observe_stopped_publications)
@@ -2876,7 +2939,8 @@ defmodule SymphonyElixir.Orchestrator do
                 :validation_scratch,
                 :validation_candidates,
                 :validation_base
-              ] and is_binary(value)) or (key in [:worker_control, :publisher] and is_map(value)) or
+              ] and is_binary(value)) or (key in [:worker_control, :publisher, :validation_check] and is_map(value)) or
+               (key == :validation_pr and is_integer(value) and value > 0) or
                (key == :secret_environment_names and is_list(value) and Enum.all?(value, &is_binary/1))
            end),
          {:ok, definition, workspace} <- WorkstreamRunner.prepare(path, inputs, opts),
@@ -2926,7 +2990,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     allowed =
       not is_nil(run) and not is_nil(worker) and caller == pid and worker.pid == pid and run.status in [:executing, :reconciling] and
-        run.current_attempt_id == attempt_id and run.definition.stages[run.stage_id].type == :publish and
+        run.current_attempt_id == attempt_id and (run.definition.stages[run.stage_id].type == :publish or get_in(run.definition.stages[run.stage_id], [:gate, :evaluator]) == :github_validation) and
         run.artifacts == artifacts and not linear_stopped?(state, run)
 
     if allowed, do: :ok, else: {:error, :publication_no_longer_owned}
@@ -2947,6 +3011,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp commit_workstream(state, run, event_id, event) do
     send(self(), :linear_process)
+    if run[:pending_validation_reply] && event[:kind] != :validation_observation, do: send(self(), :reconcile_validation_checks)
 
     case WorkstreamStore.commit(state.workstreams.store, run, event_id, event) do
       :ok ->
@@ -2973,9 +3038,86 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp schedule_validation_checks_tick(%{workstreams: nil} = state), do: state
+
+  defp schedule_validation_checks_tick(state) do
+    if previous = Map.get(state.workstreams, :validation_check_timer), do: Process.cancel_timer(elem(previous, 0))
+    token = make_ref()
+    ref = Process.send_after(self(), {:validation_checks_tick, token}, 60_000)
+    put_in(state.workstreams[:validation_check_timer], {ref, token})
+  end
+
+  defp reconcile_validation_checks(state), do: reconcile_validation_checks(state, false)
+  defp reconcile_validation_checks(%{workstreams: nil} = state, _pending_only), do: state
+
+  defp reconcile_validation_checks(state, pending_only) do
+    Enum.reduce(state.workstreams.runs, state, fn {id, run}, acc ->
+      monitors = Map.get(acc.workstreams, :validation_checks, %{})
+
+      if SymphonyElixir.ValidationCheck.monitor?(run) and (not pending_only or not is_nil(run[:pending_validation_reply])) and is_nil(monitors[id]) and not linear_stopped?(acc, run) do
+        owner = self()
+
+        task =
+          Task.Supervisor.async_nolink(acc.task_supervisor, fn ->
+            opts = [on_validation_check: fn -> GenServer.call(owner, {:validation_monitor_owner, id, run.artifacts}, 5_000) end]
+            result = SymphonyElixir.ValidationCheck.reconcile(run, SymphonyElixir.ValidationCheck.stage(run.definition), opts)
+            {:validation_observation, id, run.artifacts, result}
+          end)
+
+        put_in(acc.workstreams.validation_checks[id], %{ref: task.ref, pid: task.pid})
+      else
+        acc
+      end
+    end)
+  end
+
+  defp accept_validation_observation(%{workstreams: nil} = state, _ref, _id, _artifacts, _result), do: state
+
+  defp accept_validation_observation(state, ref, id, artifacts, result) do
+    case Map.get(state.workstreams, :validation_checks, %{})[id] do
+      %{ref: ^ref} ->
+        Process.demonitor(ref, [:flush])
+        state = update_in(state.workstreams.validation_checks, &Map.delete(&1, id))
+        run = durable_run(state, id)
+
+        if run && run.artifacts == artifacts && SymphonyElixir.ValidationCheck.monitor?(run) do
+          observation =
+            case result do
+              {:ok, value} -> value
+              _ -> %{qualified: false, reason: "Validation reconciliation unavailable."}
+            end
+
+          if SymphonyElixir.ValidationCheck.same_observation?(run[:validation_observation], observation) and (is_nil(run[:pending_validation_reply]) or observation[:qualified] != true) do
+            state
+          else
+            version = Map.get(run, :validation_observation_version, 0) + 1
+            updated = run |> Map.put(:validation_observation, observation) |> Map.put(:validation_observation_version, version)
+
+            updated =
+              case WorkstreamRun.complete_validation_reply(updated, observation) do
+                {:ok, resumed} -> resumed
+                _ -> updated
+              end
+
+            event_id = id <> "/validation-observation/" <> Integer.to_string(version)
+            state = commit_workstream(state, updated, event_id, %{kind: :validation_observation, observation: observation})
+            if updated.status == :ready, do: send(self(), :advance_workstreams)
+            state
+          end
+        else
+          state
+        end
+
+      _ ->
+        state
+    end
+  end
+
   defp advance_workstreams(%{workstreams: nil} = state), do: state
 
   defp advance_workstreams(state) do
+    state = reconcile_validation_checks(state, true)
+
     Enum.reduce(state.workstreams.runs, state, fn {id, _}, acc ->
       run = durable_run(acc, id)
 
@@ -3006,6 +3148,16 @@ defmodule SymphonyElixir.Orchestrator do
   defp workstream_operation_unconfirmed?(_run, _operation), do: false
 
   defp start_workstream_stage(state, run) do
+    if SymphonyElixir.ValidationCheck.protects_wait?(run) and
+         SymphonyElixir.ValidationCheck.verify_attested_completion(run, SymphonyElixir.ValidationCheck.stage(run.definition), {:ok, run[:validation_observation]}) != :ok do
+      updated = %{run | status: :blocked, phase: :blocked}
+      commit_workstream(state, updated, run.id <> "/validation-readiness/" <> workstream_fingerprint(run.artifacts), %{kind: :current_validation_required})
+    else
+      start_qualified_workstream_stage(state, run)
+    end
+  end
+
+  defp start_qualified_workstream_stage(state, run) do
     run = WorkstreamRun.start_stage(run)
     state = commit_workstream(state, run, run.current_attempt_id <> "/start", %{kind: :stage_started})
 
@@ -3031,9 +3183,48 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp accept_workstream_result(%{workstreams: nil} = state, _run, _attempt, _pid, _result), do: state
-
   defp accept_workstream_result(state, run_id, attempt_id, pid, result) do
+    run = durable_run(state, run_id)
+    worker = state.workstreams && state.workstreams.workers[attempt_id]
+    key = "stage/" <> attempt_id
+    check = run && get_in(run.definition.stages[run.stage_id], [:gate, :evaluator]) == :github_validation
+
+    if check && worker && worker.pid == pid && run.current_attempt_id == attempt_id && run.status in [:executing, :reconciling] && match?({:ok, _}, result) do
+      if Map.get(state.workstreams.validation_checks, key) do
+        state
+      else
+        owner = self()
+
+        task =
+          Task.Supervisor.async_nolink(state.task_supervisor, fn ->
+            opts = [on_validation_check: fn -> GenServer.call(owner, {:validation_stage_verifier_owner, run_id, attempt_id, run.artifacts}, 5_000) end]
+            stage = run.definition.stages[run.stage_id]
+
+            verified =
+              with {:ok, actual} <- SymphonyElixir.ValidationCheck.verify_ready(run, stage, opts),
+                   {:ok, submitted} <- result,
+                   true <- SymphonyElixir.ValidationCheck.same_observation?(actual, submitted),
+                   do: {:ok, actual}
+
+            verified =
+              case verified do
+                {:ok, value} -> {:ok, value}
+                _ -> {:error, :current_validation_required}
+              end
+
+            {:validation_stage_verified, run_id, attempt_id, pid, run.artifacts, verified}
+          end)
+
+        put_in(state.workstreams.validation_checks[key], %{ref: task.ref, pid: task.pid})
+      end
+    else
+      accept_owned_workstream_result(state, run_id, attempt_id, pid, result)
+    end
+  end
+
+  defp accept_owned_workstream_result(%{workstreams: nil} = state, _run, _attempt, _pid, _result), do: state
+
+  defp accept_owned_workstream_result(state, run_id, attempt_id, pid, result) do
     case {durable_run(state, run_id), Map.get(state.workstreams.workers, attempt_id)} do
       {%{current_attempt_id: ^attempt_id, status: status} = run, %{pid: ^pid, ref: ref}} when status in [:executing, :reconciling] ->
         {updated, event_id, event} =
@@ -3051,6 +3242,17 @@ defmodule SymphonyElixir.Orchestrator do
 
       _ ->
         state
+    end
+  end
+
+  defp validation_monitor_down(%{workstreams: nil} = state, _ref), do: state
+
+  defp validation_monitor_down(state, ref) do
+    checks = Map.get(state.workstreams, :validation_checks, %{})
+
+    case Enum.find(checks, fn {_id, task} -> task.ref == ref end) do
+      {id, _task} -> put_in(state.workstreams.validation_checks, Map.delete(checks, id))
+      nil -> state
     end
   end
 
@@ -3333,11 +3535,22 @@ defmodule SymphonyElixir.Orchestrator do
 
       updated =
         case outcome do
-          {:completed, result} -> WorkstreamRun.finish_stage(run, result)
-          :terminated when operation.type == :agent -> WorkstreamRun.retry_transport(run)
-          :not_applied -> WorkstreamRun.retry_transport(run)
-          :retry_safe when operation.type == :publish -> WorkstreamRun.retry_transport(run)
-          other -> WorkstreamRun.uncertain(run, other)
+          {:completed, result} ->
+            WorkstreamRun.finish_stage(run, result)
+
+          :terminated when operation.type == :agent ->
+            WorkstreamRun.retry_transport(run)
+
+          :not_applied ->
+            WorkstreamRun.retry_transport(run)
+
+          :retry_safe ->
+            if operation.type == :publish or get_in(run.definition.stages[operation.stage], [:gate, :evaluator]) == :github_validation,
+              do: WorkstreamRun.retry_transport(run),
+              else: WorkstreamRun.uncertain(run, :unknown)
+
+          other ->
+            WorkstreamRun.uncertain(run, other)
         end
 
       event_id = "#{operation.id}/reconcile/#{:crypto.strong_rand_bytes(8) |> Base.encode16()}"

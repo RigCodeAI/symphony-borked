@@ -62,8 +62,8 @@ defmodule SymphonyElixir.Workstream do
          {:ok, name} <- required_name(Map.get(document, "name"), :workstream_name),
          {:ok, input_names} <- names(Map.get(document, "inputs"), :workstream_inputs),
          {:ok, entry} <- required_name(Map.get(document, "entry"), :workstream_entry),
-         {:ok, agent_paths} <- validate_agent_paths(Map.get(document, "agents")),
          {:ok, stages} <- normalize_stages(Map.get(document, "stages")),
+         {:ok, agent_paths} <- validation_agent_paths(Map.get(document, "agents"), stages, entry),
          {:ok, agents, definitions} <- load_agents(agent_paths, Path.dirname(workstream_path)),
          :ok <- validate_input_values(input_names, input_values),
          :ok <- validate_agent_references(stages, agents),
@@ -173,6 +173,18 @@ defmodule SymphonyElixir.Workstream do
 
   defp names(_values, context), do: {:error, {:invalid_names, context}}
 
+  defp validation_agent_paths(paths, stages, entry) when paths == %{} do
+    if service_validation_entry?(stages, entry), do: {:ok, %{}}, else: validate_agent_paths(paths)
+  end
+
+  defp validation_agent_paths(paths, _stages, _entry), do: validate_agent_paths(paths)
+
+  defp service_validation_entry?(stages, entry) do
+    get_in(stages, [entry, :gate, :evaluator]) == :candidate_validation and
+      Enum.any?(stages, fn {_id, stage} -> get_in(stage, [:gate, :evaluator]) == :github_validation end) and
+      Enum.all?(stages, fn {_id, stage} -> stage.type == :human_wait or (stage.type == :check and stage.gate[:evaluator] in [:candidate_validation, :github_validation]) end)
+  end
+
   defp validate_agent_paths(agent_paths) when is_map(agent_paths) and map_size(agent_paths) > 0 do
     Enum.reduce_while(agent_paths, {:ok, %{}}, fn {id, path}, {:ok, acc} ->
       cond do
@@ -251,6 +263,16 @@ defmodule SymphonyElixir.Workstream do
 
   defp normalize_stage(%{"type" => type}), do: {:error, {:invalid_stage_type, type}}
   defp normalize_stage(stage), do: {:error, {:invalid_stage_definition, stage}}
+
+  defp normalize_gate(%{"evaluator" => "github_validation"} = gate, stage_id) do
+    with :ok <- exact_fields(gate, ~w(evaluator validation_stage required success failure), {:gate, stage_id}),
+         {:ok, validation_stage} <- required_name(gate["validation_stage"], {:validation_stage, stage_id}),
+         {:ok, required} <- validation_required(gate["required"], stage_id),
+         {:ok, success} <- gate_success(gate["success"], stage_id),
+         :ok <- publish_gate_failure(gate["failure"], stage_id) do
+      {:ok, %{evaluator: :github_validation, validation_stage: validation_stage, required: required, success: success, failure: :blocked}}
+    end
+  end
 
   defp normalize_gate(%{"evaluator" => evaluator} = gate, stage_id) do
     with :ok <- exact_fields(gate, ~w(evaluator required success failure), {:gate, stage_id}),
@@ -527,7 +549,7 @@ defmodule SymphonyElixir.Workstream do
       not Map.has_key?(stages, entry) ->
         {:error, {:unknown_workstream_entry, entry}}
 
-      stages[entry].type != :agent ->
+      stages[entry].type != :agent and not service_validation_entry?(stages, entry) ->
         {:error, {:workstream_entry_must_be_agent, entry}}
 
       true ->
@@ -597,6 +619,12 @@ defmodule SymphonyElixir.Workstream do
   defp validate_publish_provenance(stages) do
     Enum.reduce_while(stages, :ok, fn
       {id, %{type: :publish, gate: %{validation_stage: validation_stage}} = stage}, :ok ->
+        case validate_publish_provenance(id, stage, validation_stage, stages) do
+          :ok -> {:cont, :ok}
+          {:error, _} = error -> {:halt, error}
+        end
+
+      {id, %{type: :check, gate: %{evaluator: :github_validation, validation_stage: validation_stage}} = stage}, :ok ->
         case validate_publish_provenance(id, stage, validation_stage, stages) do
           :ok -> {:cont, :ok}
           {:error, _} = error -> {:halt, error}

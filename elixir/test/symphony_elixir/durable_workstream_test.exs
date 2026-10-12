@@ -1,5 +1,5 @@
 defmodule SymphonyElixir.DurableWorkstreamTest do
-  use ExUnit.Case, async: false
+  use SymphonyElixir.TestSupport
   alias SymphonyElixir.{AgentRuntimeSupervisor, Orchestrator, WorkstreamRun, WorkstreamStore}
 
   setup do

@@ -2669,23 +2669,64 @@ Human GitHub merge remains a separate boundary. Contract tests and source capabi
 MUST NOT be described as live Linear/GCP/GitHub acceptance. See
 [trusted publication](docs/trusted-publication.md) for the operator plan and limits.
 
-## 23. Optional local owner capture
+## 23. Trusted GitHub validation checks
+
+A version-1 check stage MAY use `evaluator: github_validation` with inline
+`validation_stage`, `required`, `success`, and `failure: blocked`. The referenced
+candidate-validation stage MUST be a normal ancestor and supply a validation input.
+The coordinator MUST recompute both contracts from authenticated final evidence,
+verify permanent archival and reconcile the actual Rig PR head and current main
+base. Failed selected executable assertions MUST NOT be averaged away by scores.
+Candidate-owned definitions MUST NOT replace pinned policy.
+
+A separately configured validation App MUST publish `factory/validation`. Its
+credentials MUST be separate from publisher/worker/test credentials. Completed
+aggregates MUST use success or failure, never neutral/skipped. Unknown remote or
+archive outcomes MUST NOT qualify readiness. Check retries MUST reconcile the
+expected App/head/contract identity before creating another check. The coordinator
+MUST independently verify completion and recheck current evidence before protected
+human waits advance. It MUST reconcile enrolled published waits through restart;
+remote head/base changes invalidate qualification. Human merge remains external.
+
+Repository protection MUST require the expected App and up-to-date branches, but
+activation MUST wait until affected factory and non-factory PRs have qualified
+validation paths. The source increment provides transports, evaluator and polling;
+it does not install an App, activate protection, or prove live merge enforcement.
+See [the rollout plan](docs/trusted-validation-check.md).
+
+Validation-only service workstreams MAY start with registered candidate validation
+when their stages contain only registered candidate/GitHub validation evaluators
+and human waits. Generic executable-check entries and mixed agent/publish flows
+MUST retain the normal entry restrictions. An empty agent map is supported only
+for this validation-only case.
+
+Protected human replies MUST be persisted before queued acknowledgement and
+consumed exactly once after async current-validation verification. Stale evidence,
+changed wait/artifact identity or stopped ownership MUST retain but not consume
+the reply. Stage completion remote verification MUST run outside the coordinator;
+the coordinator authenticates the domain-separated service seal and current local
+proof, with a bounded observation age. GitHub reads MUST NOT block reply callbacks.
+
+## 24. Optional local owner capture
 
 The durable manual coordinator MAY expose a service-owned local capture action
 through trusted startup options. It MUST NOT expose capture to candidate code or
 treat it as restoration, publication, worker fencing or a gate verdict.
 
 Admission MUST reject active or unresolved workers, outgoing publication,
-cancellation, Linear activity and validation-check work. Terminal status alone
-does not prove an external operation settled. Cleanup-enabled capture MUST remain
-unavailable until its owner supplies the active/uncertain-job admission contract.
+cancellation, Linear activity, validation-check work and active or uncertain cleanup
+jobs. Terminal status alone does not prove an external operation settled.
 
 The coordinator MUST hold advancement and reject new mutating calls without
 acknowledging unpersisted input. Both SQLite owners MUST enforce the same hold on
 their write handlers, including direct evidence producers and future child-run
 commits. The evidence outbox MUST be empty and the Evidence snapshots MUST match
 the saved runs before capture starts. The original exclusive Store owner MUST
-retain its connection and lock throughout capture.
+retain its connection and lock throughout capture. The coordinator MUST cancel
+and invalidate its periodic validation timer while held and rearm exactly one
+periodic chain after release. Expired or stale tokens MUST NOT restart it while
+held or create another chain after release. Immediate reconciliation wakes MUST
+remain separate from periodic scheduling.
 
 Snapshots MUST come from those existing connections into fixed private files
 outside issue workspaces. Completion MUST verify both standalone copies and

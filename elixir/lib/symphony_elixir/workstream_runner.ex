@@ -9,7 +9,22 @@ defmodule SymphonyElixir.WorkstreamRunner do
   """
 
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{AgentReadiness, CandidateGit, CandidateTransfer, Config, Evidence, PathSafety, Publisher, Validation, ValidationPolicy, WorkerOperation, Workstream, WorkstreamCommand}
+
+  alias SymphonyElixir.{
+    AgentReadiness,
+    CandidateGit,
+    CandidateTransfer,
+    Config,
+    Evidence,
+    PathSafety,
+    Publisher,
+    Validation,
+    ValidationCheck,
+    ValidationPolicy,
+    WorkerOperation,
+    Workstream,
+    WorkstreamCommand
+  }
 
   @source_root Path.expand("../../..", __DIR__)
 
@@ -48,8 +63,9 @@ defmodule SymphonyElixir.WorkstreamRunner do
 
     with {:ok, validation} <- validation,
          {:ok, transfer} <- pin_candidate_transfer(opts, definition),
-         {:ok, publication} <- Publisher.pin(opts, workspace, definition) do
-      {:ok, context |> Map.merge(validation) |> Map.merge(transfer) |> Map.merge(publication)}
+         {:ok, publication} <- Publisher.pin(opts, workspace, definition),
+         {:ok, check} <- ValidationCheck.pin(Keyword.merge(opts, Map.to_list(publication)), workspace, definition) do
+      {:ok, context |> Map.merge(validation) |> Map.merge(transfer) |> Map.merge(publication) |> Map.merge(check)}
     end
   end
 
@@ -85,7 +101,8 @@ defmodule SymphonyElixir.WorkstreamRunner do
          {:ok, workspace} <- workspace(opts, definition),
          :ok <- dedicated_clone(workspace),
          {:ok, definition} <- pin_definition_validation(opts, workspace, definition),
-         {:ok, _publication} <- Publisher.pin(opts, workspace, definition) do
+         {:ok, publication} <- Publisher.pin(opts, workspace, definition),
+         {:ok, _check} <- ValidationCheck.pin(Keyword.merge(opts, Map.to_list(publication)), workspace, definition) do
       {:ok, definition, workspace}
     end
   end
@@ -145,10 +162,10 @@ defmodule SymphonyElixir.WorkstreamRunner do
 
   def execute_stage(%{type: :check} = stage, definition, state, opts) do
     with {:ok, workspace} <- stage_workspace(state, definition, opts) do
-      if stage.gate[:evaluator] == :candidate_validation do
-        execute_candidate_validation(stage, state, workspace, opts)
-      else
-        run_executable_check(stage, state, workspace, opts)
+      case stage.gate[:evaluator] do
+        :candidate_validation -> execute_candidate_validation(stage, state, workspace, opts)
+        :github_validation -> ValidationCheck.reconcile(%{state | workspace: workspace}, stage, opts)
+        _ -> run_executable_check(stage, state, workspace, opts)
       end
     end
   end

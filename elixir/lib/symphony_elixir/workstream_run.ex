@@ -8,6 +8,7 @@ defmodule SymphonyElixir.WorkstreamRun do
 
   @executor_sources ~w(
                        orchestrator.ex
+                       recovery_inspection.ex
                        workstream_runner.ex
                        worker_operation.ex
                        workstream_cancellation.ex

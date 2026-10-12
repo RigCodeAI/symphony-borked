@@ -136,6 +136,11 @@ Named cloud/review definitions and a bounded subscription qualification command 
 available. See [worker qualification](docs/worker-qualification.md) for exact requested
 settings, readiness checks, receipts and the Daybreak verification boundary.
 
+The shipped software-change definition uses a [service-owned local commit check](docs/local-candidate-commits.md)
+after the agent edits and tests. This preserves Codex's protected Git metadata while
+preparing a real local candidate and transport bundle. Activation and publication
+remain separate verified boundaries.
+
 ## Factory boundaries
 
 - Extend the existing coordinator; keep one writer per task and reconcile before retrying.
@@ -152,6 +157,17 @@ settings, readiness checks, receipts and the Daybreak verification boundary.
 Trusted candidate validation is available locally through the pinned-policy runner and
 inline stage gates. See [trusted validation](docs/trusted-validation.md) for development/final commands, evidence and limits.
 
+DEV-238 adds a service-owned publication stage: exact trusted validation plus permanent
+archival must pass before the coordinator pushes a candidate or creates/reuses its Rig PR.
+See [trusted publication](docs/trusted-publication.md) for App permissions, replay behavior
+and the live acceptance boundary. This source increment does not claim an installed App
+or a completed Linear-to-PR deployment.
+
+DEV-241 adds opt-in idle cleanup using recorded directory ownership, fresh worker
+termination, the exact GitHub merge and a verified current archive. Legacy Linear
+terminal-state cleanup retains work. See [merged workspace cleanup](docs/merged-workspace-cleanup.md)
+for the read-only child-result proof, runtime requirements and remaining live gates.
+
 ## Upstream and license
 
 This fork builds on [OpenAI Symphony](https://github.com/openai/symphony).
@@ -159,3 +175,8 @@ The upstream [demo](https://player.vimeo.com/video/1186371009?h=5626e4b899) illu
 Symphony's original workflow; it is not evidence of this factory's readiness.
 
 Licensed under the [Apache License 2.0](LICENSE).
+
+DEV-239 adds an App-owned `factory/validation` check and current-head readiness gate.
+See [trusted GitHub validation](docs/trusted-validation-check.md) for the separate
+App, validation-only PR path and approval-gated rollout. Source tests do not prove
+that Rig branch protection or the live validation path has been enabled.

@@ -1632,6 +1632,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         *"__SYMPHONY_WORKSPACE__"*)
           printf '%s\\t%s\\t%s\\n' '__SYMPHONY_WORKSPACE__' '1' '#{workspace_path}'
           ;;
+        *"__SYMPHONY_REMOVE__"*)
+          nonce=$(printf '%s' "$*" | sed -n 's/.*removal_nonce=\\([a-f0-9]*\\).*/\\1/p')
+          printf '__SYMPHONY_REMOVE__{"status":"ok","hook":null,"nonce":"%s"}\\n' "$nonce"
+          ;;
       esac
 
       exit 0
@@ -1662,7 +1666,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert trace =~ "echo before-run"
       assert trace =~ "echo after-run"
       assert trace =~ "echo before-remove"
-      assert trace =~ "rm -rf"
+      assert trace =~ "shutil.rmtree"
+      assert trace =~ "O_NOFOLLOW"
       assert trace =~ workspace_path
     after
       File.rm_rf(test_root)

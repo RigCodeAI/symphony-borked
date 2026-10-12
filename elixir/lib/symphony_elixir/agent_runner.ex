@@ -72,6 +72,20 @@ defmodule SymphonyElixir.AgentRunner do
           :wait_coordinator_unavailable
         )
       end)
+      |> Keyword.put(:on_publication_check, fn ->
+        coordinator_call(
+          coordinator,
+          {:workstream_publication_check, run.id, run.current_attempt_id, self(), run.artifacts},
+          :publication_coordinator_unavailable
+        )
+      end)
+      |> Keyword.put(:on_publication_intent, fn intent ->
+        coordinator_call(
+          coordinator,
+          {:workstream_publication_intent, run.id, run.current_attempt_id, self(), run.artifacts, intent},
+          :publication_coordinator_unavailable
+        )
+      end)
 
     result = executor.(stage, run.definition, run, execution)
     Process.put(:symphony_workstream_result, result)

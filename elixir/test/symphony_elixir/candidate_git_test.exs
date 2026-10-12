@@ -118,6 +118,19 @@ defmodule SymphonyElixir.CandidateGitTest do
     assert {:error, :candidate_git_metadata_symlink} = CandidateGit.run(workspace, ["rev-parse", "HEAD"])
   end
 
+  test "rejects oversized metadata before copying a sparse file", %{workspace: workspace} do
+    oversized = Path.join(workspace, ".git/objects/oversized-sparse-object")
+    max_metadata_bytes = 512 * 1024 * 1024
+
+    File.open!(oversized, [:write, :binary], fn file ->
+      assert {:ok, ^max_metadata_bytes} = :file.position(file, max_metadata_bytes)
+      assert :ok = IO.binwrite(file, <<0>>)
+    end)
+
+    assert {:error, :candidate_git_metadata_limit_exceeded} =
+             CandidateGit.run(workspace, ["rev-parse", "HEAD"])
+  end
+
   test "does not inspect submodules while checking status", %{root: root, workspace: workspace} do
     submodule = Path.join(root, "submodule-source")
     create_repo(submodule)

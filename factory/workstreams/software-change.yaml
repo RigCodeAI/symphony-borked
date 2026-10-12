@@ -13,20 +13,128 @@ stages:
     agent: default-cloud
     inputs: [task]
     outputs: [candidate]
-    prompt: Implement the delegated Rig task in this dedicated clone. Run focused development checks and commit the candidate locally. Report the candidate commit and checks. Do not push, publish a PR, or merge.
-    next: inspect-candidate
-  - id: inspect-candidate
+    prompt: Implement the delegated Rig task in this dedicated clone and run focused development checks. Report the changed files, actual checks and blockers. Leave changes uncommitted for the following service-owned local-commit check; the Codex sandbox intentionally protects Git metadata. Do not change Git metadata, push, publish a PR, or merge.
+    next: local-commit
+  - id: local-commit
     type: check
     inputs: [candidate]
+    outputs: [candidate-commit]
+    gate:
+      command:
+        - /usr/bin/python3
+        - -I
+        - -c
+        - |
+          import hashlib, json, os, pathlib, re, subprocess, sys
+          try:
+              inputs = json.loads(os.environ["WORKSTREAM_INPUTS_JSON"])
+              candidate = inputs["candidate"]
+              assert isinstance(candidate, dict) and candidate.get("thread_id"), "missing candidate input"
+              digest = hashlib.sha256(json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+              marker = "Factory-Candidate: " + digest
+              root = pathlib.Path.cwd().resolve()
+              gitdir = root / ".git"
+              assert gitdir.is_dir() and not gitdir.is_symlink(), "dedicated Git required"
+              assert not any((gitdir / name).exists() for name in ("commondir", "config.worktree", "objects/info/alternates")), "shared Git forbidden"
+              assert not any(path.is_symlink() for path in gitdir.rglob("*")), "Git symlink forbidden"
+              env = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "LC_ALL": "C", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_TERMINAL_PROMPT": "0", "GIT_ATTR_NOSYSTEM": "1"}
+              argv = ["/usr/bin/git", "--no-replace-objects", "--git-dir=" + str(gitdir), "--work-tree=" + str(root), "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.attributesFile=/dev/null", "-c", "commit.gpgSign=false", "-c", "user.name=Rig Factory", "-c", "user.email=factory@rig.ai", "-c", "protocol.allow=never", "-c", "submodule.recurse=false"]
+              def git(*args):
+                  result = subprocess.run(argv + list(args), env=env, text=True, capture_output=True, timeout=25)
+                  assert result.returncode == 0, "Git command failed: " + args[0] + ": " + result.stderr.strip()
+                  return result.stdout.strip()
+              names = git("config", "--file", str(gitdir / "config"), "--no-includes", "--name-only", "--list").splitlines()
+              safe = re.compile(r"(?:core\.(?:repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|hookspath|fsmonitor)|commit\.gpgsign|user\.(?:name|email)|extensions\.objectformat|remote\..+\.(?:url|fetch|pushurl)|branch\..+\.(?:remote|merge))")
+              assert all(safe.fullmatch(name) for name in names), "unsupported Git configuration"
+              assert git("rev-parse", "--is-bare-repository") == "false", "non-bare clone required"
+              assert pathlib.Path(git("rev-parse", "--git-common-dir")).resolve() == gitdir, "shared Git directory"
+              assert pathlib.Path(git("rev-parse", "--show-toplevel")).resolve() == root, "wrong root"
+              branch = git("symbolic-ref", "--quiet", "HEAD")
+              assert branch.startswith("refs/heads/"), "local branch required"
+              prepared = marker in git("show", "--no-patch", "--format=%B", "HEAD").splitlines()
+              if git("status", "--porcelain=v1"):
+                  assert not prepared, "prepared candidate changed"
+                  git("add", "--all", "--", ".")
+                  assert git("diff", "--cached", "--name-only"), "no committable candidate changes"
+                  git("commit", "--quiet", "--no-verify", "--no-gpg-sign", "--message", "Prepare local factory candidate\n\n" + marker)
+              else:
+                  assert prepared, "no candidate changes"
+              assert not git("status", "--porcelain=v1"), "dirty candidate checkout"
+              head = git("rev-parse", "--verify", "HEAD^{commit}")
+              base = git("rev-parse", "--verify", "HEAD^1^{commit}")
+              bundle_dir = gitdir / "factory-candidates"
+              bundle_dir.mkdir(mode=0o700, exist_ok=True)
+              bundle = bundle_dir / (digest + ".bundle")
+              if not bundle.exists():
+                  git("bundle", "create", str(bundle), "HEAD", "^" + base)
+              git("bundle", "verify", str(bundle))
+              assert git("bundle", "list-heads", str(bundle)) == head + " HEAD", "bundle head mismatch"
+              data = bundle.read_bytes()
+              print(json.dumps({"candidate_commit": head, "base_commit": base, "candidate_input_sha256": digest, "branch": branch, "candidate_bundle": str(bundle.relative_to(root)), "bundle_sha256": hashlib.sha256(data).hexdigest(), "bundle_bytes": len(data)}, sort_keys=True))
+          except (AssertionError, KeyError, ValueError, OSError, subprocess.SubprocessError) as error:
+              print("LOCAL_COMMIT_FAILED: " + str(error), file=sys.stderr)
+              sys.exit(1)
+      timeout_ms: 30000
+      success: inspect-candidate
+      failure: blocked
+  - id: inspect-candidate
+    type: check
+    inputs: [candidate, candidate-commit]
     outputs: [candidate-inspection]
     gate:
       command: [sh, -c, 'git rev-parse --verify HEAD >/dev/null && test -z "$(git status --porcelain)"']
       timeout_ms: 10000
+      success: validate
+      failure: blocked
+  - id: validate
+    type: check
+    inputs: [candidate, candidate-inspection, candidate-commit]
+    outputs: [validation]
+    gate:
+      evaluator: candidate_validation
+      required:
+        - check: architecture-tests
+          assertion: exit_status
+          equals: 0
+        - check: architecture-tests
+          assertion: test_count
+          equals: 1
+      success: publish
+      failure: blocked
+  - id: publish
+    type: publish
+    inputs: [candidate, validation]
+    outputs: [publication]
+    gate:
+      validation_stage: validate
+      required:
+        - check: architecture-tests
+          assertion: exit_status
+          equals: 0
+        - check: architecture-tests
+          assertion: test_count
+          equals: 1
+      success: github-validation
+      failure: blocked
+  - id: github-validation
+    type: check
+    inputs: [publication, validation]
+    outputs: [github-validation]
+    gate:
+      evaluator: github_validation
+      validation_stage: validate
+      required:
+        - check: architecture-tests
+          assertion: exit_status
+          equals: 0
+        - check: architecture-tests
+          assertion: test_count
+          equals: 1
       success: candidate-ready
       failure: blocked
   - id: candidate-ready
     type: human_wait
-    inputs: [candidate, candidate-inspection]
+    inputs: [publication, github-validation]
     outputs: [answer]
-    prompt: The local candidate is ready for inspection. Publication is disabled. Trusted final validation and publication require their configured service gates before any PR is opened.
+    prompt: The exact validated candidate has one linked Rig PR with permanent evidence. Human merge remains in GitHub; this reply completes only the configured workstream and does not authorize merging or cleanup.
     next: complete

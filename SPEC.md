@@ -13,6 +13,19 @@ A repair agent receives the immediately preceding failed check's result and gate
 in its prompt, including when its executing attempt is already durably recorded. A
 passing check or an older failure does not add repair feedback to a later agent turn.
 
+The shipped `software-change` workstream leaves model-produced changes uncommitted.
+A pinned service-owned `local-commit` executable check runs as the unprivileged
+worker after the agent operation has terminated. It requires a dedicated clone and
+local branch, rejects unsafe Git metadata/configuration, disables hooks, signing,
+interactive authentication and network protocols, and excludes service credentials.
+It commits candidate changes locally and requires a clean checkout. A clean replay
+requires the same persisted candidate-input marker; a pristine base cannot qualify.
+Its output records the actual candidate SHA, bundle prerequisite SHA, branch and
+checksum/size of an incremental Git bundle under protected Git metadata. This is
+candidate preparation, not trusted validation or authorization to publish/merge.
+Existing runs retain their original stage definitions and commit ownership. See
+[local candidate commits](docs/local-candidate-commits.md).
+
 The existing orchestrator can own manually queued durable runs with SQLite storage.
 One coordinator holds the database write lock. Enqueue pins resolved workstream, agent,
 instruction and skill text/digests, execution context, and service policy digests. Each
@@ -168,7 +181,10 @@ matching prior/current pins; silent mutation rejects. Task and
 policy identity remain fixed. Old bundles remain immutable.
 
 Observable completed messages/tool events are allowlisted and credentials are
-redacted before persistence. Reasoning/raw protocol fields are omitted. Every
+redacted before persistence. Reasoning/raw protocol fields are omitted. The
+viewer projects retained agent messages and task input as escaped readable text,
+with stage/attempt labels and the latest gate/check status. Full run/policy/event
+details remain expandable; this presentation does not change archived bytes. Every
 viewer/artifact request requires a verified signed IAP JWT with the configured
 audience and domain/email allowlist; unsigned identity headers never authorize
 access. A root uploader validates manifests and object bytes after immutable GCS
@@ -1116,6 +1132,47 @@ Failure semantics:
 - `before_remove` failure or timeout is logged and ignored.
 
 ### 9.5 Safety Invariants
+
+Workspace removal uses the current configured workspace root as its authorization
+boundary, including for previously recorded paths. After a root change, old-root
+work is retained with an error until its recovery/cleanup is explicitly resolved.
+Removal must reject the root itself, outside paths and dangling links before
+running hooks. A genuinely absent direct path may return a successful no-op without
+running a hook or issuing a deletion; absence never authorizes recorded outside paths.
+
+The Elixir local and SSH removal paths require Python 3.11+ with Unix descriptor-relative
+operations and symlink-resistant `shutil.rmtree`. Missing or unsupported runtimes fail
+closed with an actionable error; there is no pathname-based deletion fallback. The
+guard opens ancestors without following links, checks root/ancestor/target identities
+after the hook, and deletes relative to retained directory descriptors. Hook failure
+and timeout remain logged and ignored, but path changes prevent deletion. Helper
+time and output are bounded, and hook output is not copied into removal logs.
+Mounted subtrees are retained: Linux removal checks kernel mount IDs for opened
+directories, including same-device bind mounts; macOS checks device boundaries.
+Other platforms or unavailable mount identity support fail closed. Streaming
+transport output is capped before it can accumulate beyond the response limit.
+Removal replies must match a fresh per-call nonce; static startup output cannot
+stand in for the helper's result. Hook timeout reaps ordinary process-group
+descendants, but a child escaping that group is not proof of termination.
+
+Issue-workspace cleanup returns removal/path errors and stops host fanout at the
+first failure. This does not add coordinator retries, prove worker termination,
+confirm a GitHub merge, or satisfy a permanent-archive gate.
+
+Factory managed cleanup is a separate, opt-in service action. The existing
+coordinator records directory identities before new runs execute; older unrecorded
+paths remain retained. Admission and cleanup reject overlapping owners. Idle
+reconciliation must confirm the recorded published head and real GitHub merge,
+require fresh contained termination of every external operation, persist the
+deletion intent, and verify the exact current permanent archive before deleting
+each recorded directory. A recreated path never inherits the old deletion intent.
+Failures remain pending and restart retries all gates. A Linear terminal state
+alone must not trigger automatic deletion. Cancellation stays retained until an
+approved retention and verified recovery contract exists. Parent output artifacts
+must be readable from verified immutable evidence outside the child workspace.
+A service-owned read-only merged-revision/archive proof is available independently
+of workspace deletion. Capture holds fence cleanup scheduling and its final
+ownership check. No cleanup action closes, changes or merges a GitHub PR.
 
 This is the most important portability constraint.
 
@@ -2560,3 +2617,92 @@ variable names to remove from local or SSH Codex child environments. They MUST b
 with existing exclusions, MUST NOT forward values, and MUST NOT weaken publisher/check
 credential isolation. Qualification receipts exclude raw server diagnostics, credential
 values, account IDs and reset-credit IDs; preserve bounded diagnostic codes instead.
+
+## 22. Trusted Rig candidate publication
+
+Version-1 workstreams MAY declare a fixed service-owned `publish` stage with
+`id`, `inputs`, `outputs` and an inline gate. The gate contains `validation_stage`,
+`required`, `success` and `failure: blocked`; the referenced upstream stage MUST
+use candidate validation and its output MUST be among the publication inputs.
+Definitions cannot supply publisher commands, credentials or their own verdict.
+The synchronous local runner MUST reject publication without durable ownership.
+
+Before every remote mutation, the service MUST authenticate the exact saved final
+validation receipt, recompute both inline gates against the current clean candidate
+and pinned policy, and verify immutable permanent archival for that validation attempt.
+Development, missing, failed, forged, incomplete and stale evidence MUST block.
+Later conversation events MUST NOT invalidate an already verified immutable evidence
+revision; the latest incomplete bundle does not qualify as archival proof.
+
+The coordinator MUST persist the stage operation before execution and the exact safe
+publication intent before the first remote write. It MUST recheck current task ownership
+before further writes. A stopped run MUST remain stopped while read-only reconciliation
+records any already accepted branch/PR outcome; unchanged pending observations MUST NOT
+produce repeated durable events. Publication
+identity is bound to run, stage, candidate and validation receipt; a deterministic
+task branch is preserved across retries and fixes. Pushes MUST target the exact
+validated SHA with an expected-head lease. Restart, duplicate completion and lost
+remote responses MUST reconcile the existing branch/PR rather than create a new PR.
+Closed, ambiguous or unexpectedly changed remote state MUST block. Completion MUST
+confirm the actual GitHub PR and branch SHA, not accept agent prose.
+
+For contained workers, the coordinator MUST consume only a bundle from the exact
+terminated successful service commit-preparation operation. The read-only worker RPC
+MUST derive its path from a protected operation descriptor and authenticated input
+identity, require a root-pinned producer command digest, and bound/check chunk size,
+total bytes and checksum. It MUST reject arbitrary paths, running/failed/unrelated
+operations and symlink substitution without executing candidate code as root. A
+separate coordinator-owned snapshot MUST bound metadata copying and imported tree/file
+sizes and verify candidate SHA and parent/base before
+validation or publication, preserving the worker's original clone.
+
+Publisher App/private-key credentials MUST stay outside agent and validator processes,
+mounts and cloud metadata reach. Publication uses a selected-repository GitHub App
+installation for RigCodeAI/rig; no PAT fallback, automatic review, protection changes
+or merge is authorized by this stage. Preserve the repository template and all human
+PR text outside the managed evidence section. The GitHub body API lacks atomic compare-
+and-swap: observed body changes MUST block the update, and the remaining final PATCH
+race MUST be reported as a deployment limitation.
+
+Publish a durable PR link back to the Linear conversation and evidence links in the PR.
+Human GitHub merge remains a separate boundary. Contract tests and source capability
+MUST NOT be described as live Linear/GCP/GitHub acceptance. See
+[trusted publication](docs/trusted-publication.md) for the operator plan and limits.
+
+## 23. Trusted GitHub validation checks
+
+A version-1 check stage MAY use `evaluator: github_validation` with inline
+`validation_stage`, `required`, `success`, and `failure: blocked`. The referenced
+candidate-validation stage MUST be a normal ancestor and supply a validation input.
+The coordinator MUST recompute both contracts from authenticated final evidence,
+verify permanent archival and reconcile the actual Rig PR head and current main
+base. Failed selected executable assertions MUST NOT be averaged away by scores.
+Candidate-owned definitions MUST NOT replace pinned policy.
+
+A separately configured validation App MUST publish `factory/validation`. Its
+credentials MUST be separate from publisher/worker/test credentials. Completed
+aggregates MUST use success or failure, never neutral/skipped. Unknown remote or
+archive outcomes MUST NOT qualify readiness. Check retries MUST reconcile the
+expected App/head/contract identity before creating another check. The coordinator
+MUST independently verify completion and recheck current evidence before protected
+human waits advance. It MUST reconcile enrolled published waits through restart;
+remote head/base changes invalidate qualification. Human merge remains external.
+
+Repository protection MUST require the expected App and up-to-date branches, but
+activation MUST wait until affected factory and non-factory PRs have qualified
+validation paths. The source increment provides transports, evaluator and polling;
+it does not install an App, activate protection, or prove live merge enforcement.
+See [the rollout plan](docs/trusted-validation-check.md).
+
+Validation-only service workstreams MAY start with registered candidate validation
+when their stages contain only registered candidate/GitHub validation evaluators
+and human waits. Generic executable-check entries and mixed agent/publish flows
+MUST retain the normal entry restrictions. An empty agent map is supported only
+for this validation-only case.
+
+Protected human replies MUST be persisted before queued acknowledgement and
+consumed exactly once after async current-validation verification. Stale evidence,
+changed wait/artifact identity or stopped ownership MUST retain but not consume
+the reply. Stage completion remote verification MUST run outside the coordinator;
+the coordinator authenticates the domain-separated service seal and current local
+proof, with a bounded observation age. GitHub reads MUST NOT block reply callbacks.

@@ -489,3 +489,27 @@ and approval stages require the current artifact digest. See [questions and repl
 
 Trusted candidate validation is available locally through the pinned-policy runner and
 inline stage gates. See [trusted validation](../docs/trusted-validation.md) for development/final commands, evidence and limits.
+
+The `publish` workstream stage invokes the trusted Rig publisher, with an inline gate
+referencing a prior candidate-validation stage. A configured coordinator GitHub App and
+exact permanently archived validation evidence are required; agents never receive its key
+or tokens. Durable retries reconcile the same branch and PR. The synchronous local runner
+rejects publication. See [configuration, App setup and verification limits](../docs/trusted-publication.md).
+
+Trusted coordinator startup option `merged_cleanup: true` enables idle reconciliation
+of recorded merged work. Cleanup requires exact directory identity, fresh contained
+worker termination and a verified current evidence archive. It is disabled by default;
+legacy tracker terminal states retain work. See [merged cleanup](../docs/merged-workspace-cleanup.md)
+for the read-only composition proof, retry/capture boundaries and validation limits.
+
+### Trusted GitHub validation check
+
+`github_validation` is a coordinator-owned check evaluator referencing a prior
+`candidate_validation` stage and inline required assertions. Configure a separate
+`validation_check` App reference; its keys and tokens stay outside agent/test
+processes. The coordinator rechecks current head/base, authenticated receipts and
+permanent archival before reporting success or advancing a protected human wait.
+`factory/workstreams/pr-validation.yaml` provides a validation-only pilot entry for
+an enrolled ordinary PR. Its trusted `validation_pr` execution option names the PR;
+it launches no coding agent and publishes no branch. General Rig policy and live
+App/protection rollout remain gated. See [operator plan](../docs/trusted-validation-check.md).

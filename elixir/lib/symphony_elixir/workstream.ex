@@ -62,8 +62,8 @@ defmodule SymphonyElixir.Workstream do
          {:ok, name} <- required_name(Map.get(document, "name"), :workstream_name),
          {:ok, input_names} <- names(Map.get(document, "inputs"), :workstream_inputs),
          {:ok, entry} <- required_name(Map.get(document, "entry"), :workstream_entry),
-         {:ok, agent_paths} <- validate_agent_paths(Map.get(document, "agents")),
          {:ok, stages} <- normalize_stages(Map.get(document, "stages")),
+         {:ok, agent_paths} <- validation_agent_paths(Map.get(document, "agents"), stages, entry),
          {:ok, agents, definitions} <- load_agents(agent_paths, Path.dirname(workstream_path)),
          :ok <- validate_input_values(input_names, input_values),
          :ok <- validate_agent_references(stages, agents),
@@ -173,6 +173,18 @@ defmodule SymphonyElixir.Workstream do
 
   defp names(_values, context), do: {:error, {:invalid_names, context}}
 
+  defp validation_agent_paths(paths, stages, entry) when paths == %{} do
+    if service_validation_entry?(stages, entry), do: {:ok, %{}}, else: validate_agent_paths(paths)
+  end
+
+  defp validation_agent_paths(paths, _stages, _entry), do: validate_agent_paths(paths)
+
+  defp service_validation_entry?(stages, entry) do
+    get_in(stages, [entry, :gate, :evaluator]) == :candidate_validation and
+      Enum.any?(stages, fn {_id, stage} -> get_in(stage, [:gate, :evaluator]) == :github_validation end) and
+      Enum.all?(stages, fn {_id, stage} -> stage.type == :human_wait or (stage.type == :check and stage.gate[:evaluator] in [:candidate_validation, :github_validation]) end)
+  end
+
   defp validate_agent_paths(agent_paths) when is_map(agent_paths) and map_size(agent_paths) > 0 do
     Enum.reduce_while(agent_paths, {:ok, %{}}, fn {id, path}, {:ok, acc} ->
       cond do
@@ -226,6 +238,16 @@ defmodule SymphonyElixir.Workstream do
     end
   end
 
+  defp normalize_stage(%{"type" => "publish"} = stage) do
+    with :ok <- exact_fields(stage, ~w(id type inputs outputs gate), {:stage, Map.get(stage, "id")}),
+         {:ok, id} <- required_name(Map.get(stage, "id"), :stage_id),
+         {:ok, inputs} <- names(Map.get(stage, "inputs"), {:stage_inputs, id}),
+         {:ok, outputs} <- names(Map.get(stage, "outputs"), {:stage_outputs, id}),
+         {:ok, gate} <- normalize_publish_gate(Map.get(stage, "gate"), id) do
+      {:ok, %{id: id, type: :publish, inputs: inputs, outputs: outputs, gate: gate}}
+    end
+  end
+
   defp normalize_stage(%{"type" => "human_wait"} = stage) do
     with :ok <- exact_optional_fields(stage, ~w(id type inputs outputs prompt next), ["approval"], {:stage, Map.get(stage, "id")}),
          {:ok, id} <- required_name(Map.get(stage, "id"), :stage_id),
@@ -241,6 +263,16 @@ defmodule SymphonyElixir.Workstream do
 
   defp normalize_stage(%{"type" => type}), do: {:error, {:invalid_stage_type, type}}
   defp normalize_stage(stage), do: {:error, {:invalid_stage_definition, stage}}
+
+  defp normalize_gate(%{"evaluator" => "github_validation"} = gate, stage_id) do
+    with :ok <- exact_fields(gate, ~w(evaluator validation_stage required success failure), {:gate, stage_id}),
+         {:ok, validation_stage} <- required_name(gate["validation_stage"], {:validation_stage, stage_id}),
+         {:ok, required} <- validation_required(gate["required"], stage_id),
+         {:ok, success} <- gate_success(gate["success"], stage_id),
+         :ok <- publish_gate_failure(gate["failure"], stage_id) do
+      {:ok, %{evaluator: :github_validation, validation_stage: validation_stage, required: required, success: success, failure: :blocked}}
+    end
+  end
 
   defp normalize_gate(%{"evaluator" => evaluator} = gate, stage_id) do
     with :ok <- exact_fields(gate, ~w(evaluator required success failure), {:gate, stage_id}),
@@ -269,6 +301,28 @@ defmodule SymphonyElixir.Workstream do
   end
 
   defp normalize_gate(_gate, stage_id), do: {:error, {:invalid_gate, stage_id}}
+
+  defp normalize_publish_gate(gate, stage_id) when is_map(gate) do
+    with :ok <- exact_fields(gate, ~w(validation_stage required success failure), {:publish_gate, stage_id}),
+         {:ok, validation_stage} <- required_name(Map.get(gate, "validation_stage"), {:publish_validation_stage, stage_id}),
+         # The publisher also rechecks the referenced validation stage's requirements.
+         {:ok, required} <- validation_required(Map.get(gate, "required"), stage_id),
+         {:ok, success} <- gate_success(Map.get(gate, "success"), stage_id),
+         :ok <- publish_gate_failure(Map.get(gate, "failure"), stage_id) do
+      {:ok,
+       %{
+         validation_stage: validation_stage,
+         required: required,
+         success: success,
+         failure: :blocked
+       }}
+    end
+  end
+
+  defp normalize_publish_gate(_gate, stage_id), do: {:error, {:invalid_publish_gate, stage_id}}
+
+  defp publish_gate_failure("blocked", _stage_id), do: :ok
+  defp publish_gate_failure(value, stage_id), do: {:error, {:invalid_publish_gate_failure, stage_id, value}}
 
   defp validation_evaluator("candidate_validation", _stage_id), do: :ok
 
@@ -495,11 +549,12 @@ defmodule SymphonyElixir.Workstream do
       not Map.has_key?(stages, entry) ->
         {:error, {:unknown_workstream_entry, entry}}
 
-      stages[entry].type != :agent ->
+      stages[entry].type != :agent and not service_validation_entry?(stages, entry) ->
         {:error, {:workstream_entry_must_be_agent, entry}}
 
       true ->
         with :ok <- validate_stage_transitions(stages),
+             :ok <- validate_publish_provenance(stages),
              :ok <- validate_repair_edges(stages, entry),
              {:ok, reachable} <- reachable_stages(stages, entry),
              :ok <- all_stages_reachable(stages, reachable),
@@ -546,6 +601,61 @@ defmodule SymphonyElixir.Workstream do
       :ok
     else
       {:error, {:unknown_stage_transition, id, next}}
+    end
+  end
+
+  defp validate_stage_transition(_id, %{type: :publish, gate: %{success: :complete}}, _stages),
+    do: :ok
+
+  defp validate_stage_transition(id, %{type: :publish, gate: %{success: next}}, stages)
+       when is_binary(next) do
+    if Map.has_key?(stages, next) do
+      :ok
+    else
+      {:error, {:unknown_stage_transition, id, next}}
+    end
+  end
+
+  defp validate_publish_provenance(stages) do
+    Enum.reduce_while(stages, :ok, fn
+      {id, %{type: :publish, gate: %{validation_stage: validation_stage}} = stage}, :ok ->
+        case validate_publish_provenance(id, stage, validation_stage, stages) do
+          :ok -> {:cont, :ok}
+          {:error, _} = error -> {:halt, error}
+        end
+
+      {id, %{type: :check, gate: %{evaluator: :github_validation, validation_stage: validation_stage}} = stage}, :ok ->
+        case validate_publish_provenance(id, stage, validation_stage, stages) do
+          :ok -> {:cont, :ok}
+          {:error, _} = error -> {:halt, error}
+        end
+
+      {_id, _stage}, :ok ->
+        {:cont, :ok}
+    end)
+  end
+
+  defp validate_publish_provenance(id, stage, validation_stage_id, stages) do
+    case Map.get(stages, validation_stage_id) do
+      %{type: :check, gate: %{evaluator: :candidate_validation}, outputs: validation_outputs} ->
+        {:ok, reachable} = normal_reachable_stages(stages, validation_stage_id)
+
+        cond do
+          not Map.has_key?(reachable, id) ->
+            {:error, {:publish_validation_stage_not_ancestor, id, validation_stage_id}}
+
+          not Enum.any?(stage.inputs, &(&1 in validation_outputs)) ->
+            {:error, {:publish_validation_output_not_input, id, validation_stage_id}}
+
+          true ->
+            :ok
+        end
+
+      %{type: :check} ->
+        {:error, {:publish_validation_stage_must_use_candidate_validation, id, validation_stage_id}}
+
+      _ ->
+        {:error, {:invalid_publish_validation_stage, id, validation_stage_id}}
     end
   end
 
@@ -764,6 +874,8 @@ defmodule SymphonyElixir.Workstream do
   defp stage_success_targets(%{type: :human_wait}), do: []
   defp stage_success_targets(%{type: :check, gate: %{success: success}}) when is_binary(success), do: [success]
   defp stage_success_targets(%{type: :check}), do: []
+  defp stage_success_targets(%{type: :publish, gate: %{success: success}}) when is_binary(success), do: [success]
+  defp stage_success_targets(%{type: :publish}), do: []
 
   defp stage_repair_targets(%{type: :check, gate: %{failure: %{repair: repair}}}), do: [repair]
   defp stage_repair_targets(_stage), do: []

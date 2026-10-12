@@ -1,0 +1,136 @@
+defmodule SymphonyElixir.LocalCandidateCommitTest do
+  use ExUnit.Case, async: true
+
+  alias SymphonyElixir.{Workstream, WorkstreamRun, WorkstreamRunner}
+
+  setup do
+    root = Path.join(System.tmp_dir!(), "software-change-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(Path.join(root, "workstreams"))
+    source = Path.expand("../../../factory/workstreams/software-change.yaml", __DIR__)
+    path = Path.join(root, "workstreams/software-change.yaml")
+    File.cp!(source, path)
+    on_exit(fn -> File.rm_rf!(root) end)
+    factory_root = source |> Path.dirname() |> Path.dirname()
+    Enum.each(~w(agents instructions skills), &File.cp_r!(Path.join(factory_root, &1), Path.join(root, &1)))
+    assert {:ok, definition} = Workstream.load(path, %{"task" => "DEV pilot task"})
+    workspace = Path.join(root, "clone")
+    File.mkdir_p!(workspace)
+    git(workspace, ["init", "--quiet"])
+    git(workspace, ["switch", "--quiet", "-c", "cycle/disposable"])
+    File.write!(Path.join(workspace, "candidate"), "base\n")
+    git(workspace, ["add", "candidate"])
+    git(workspace, ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "seed"])
+    git(workspace, ["remote", "add", "origin", "https://example.invalid/private.git"])
+    git(workspace, ["remote", "set-url", "--push", "origin", "DISABLED"])
+    candidate = %{thread_id: "controlled-contract-conversation"}
+    run = WorkstreamRun.new("linear/pilot", definition, workspace, workspace_root: root)
+    run = run |> WorkstreamRun.start_stage() |> WorkstreamRun.finish_stage({:ok, candidate}) |> WorkstreamRun.start_stage()
+    %{root: root, source: source, path: path, definition: definition, workspace: workspace, run: run, candidate: candidate}
+  end
+
+  test "real tracked and untracked changes commit once with a verifiable transport bundle", c do
+    base = git(c.workspace, ["rev-parse", "HEAD"])
+    config = File.read!(Path.join(c.workspace, ".git/config"))
+    receiver = Path.join(c.root, "receiver")
+    git(c.root, ["clone", "--quiet", "--no-hardlinks", c.workspace, receiver])
+    File.write!(Path.join(c.workspace, "candidate"), "changed\n")
+    File.write!(Path.join(c.workspace, "new-file"), "new candidate\n")
+    assert {:ok, %{exit_status: 0, output: output}} = execute(c)
+    result = Jason.decode!(output)
+    head = git(c.workspace, ["rev-parse", "HEAD"])
+    assert result["candidate_commit"] == head
+    assert result["base_commit"] == base
+    assert head != base
+    assert git(c.workspace, ["status", "--porcelain"]) == ""
+    assert git(c.workspace, ["rev-list", "--count", "HEAD"]) == "2"
+    assert git(c.workspace, ["branch", "--show-current"]) == "cycle/disposable"
+    assert git(c.workspace, ["remote", "get-url", "--push", "origin"]) == "DISABLED"
+    assert File.read!(Path.join(c.workspace, ".git/config")) == config
+    assert {:ok, %{exit_status: 0, output: replay}} = execute(c)
+    assert Jason.decode!(replay) == result
+    assert git(c.workspace, ["rev-list", "--count", "HEAD"]) == "2"
+    bundle = Path.join(c.workspace, result["candidate_bundle"])
+    assert result["bundle_sha256"] == :crypto.hash(:sha256, File.read!(bundle)) |> Base.encode16(case: :lower)
+    assert result["bundle_bytes"] == File.stat!(bundle).size
+    assert git(c.workspace, ["bundle", "list-heads", bundle]) == head <> " HEAD"
+    {_output, missing} = System.cmd("git", ["cat-file", "-e", head <> "^{commit}"], cd: receiver, stderr_to_stdout: true)
+    assert missing != 0
+    git(receiver, ["fetch", "--quiet", bundle, "HEAD"])
+    git(receiver, ["reset", "--hard", head])
+    assert File.read!(Path.join(receiver, "new-file")) == "new candidate\n"
+    assert git(receiver, ["status", "--porcelain"]) == ""
+    File.write!(Path.join(c.workspace, "candidate"), "changed after preparation\n")
+    assert {:ok, %{exit_status: changed_status, output: changed_output}} = execute(c)
+    assert changed_status != 0
+    assert changed_output =~ "prepared candidate changed"
+    assert git(c.workspace, ["rev-parse", "HEAD"]) == head
+    File.write!(Path.join(c.workspace, "candidate"), "changed\n")
+    assert {:ok, %{exit_status: status}} = execute(%{c | run: %{c.run | outputs: %{"candidate" => %{thread_id: "another-conversation"}}}})
+    assert status != 0
+    assert git(c.workspace, ["rev-parse", "HEAD"]) == head
+  end
+
+  test "a clean base does not become a falsely successful candidate", c do
+    head = git(c.workspace, ["rev-parse", "HEAD"])
+    assert {:ok, %{exit_status: status, output: output}} = execute(c)
+    assert status != 0
+    assert output =~ "no candidate changes"
+    run = WorkstreamRun.finish_stage(c.run, {:ok, %{exit_status: status, output: output}})
+    assert run.status == :blocked
+    assert git(c.workspace, ["rev-parse", "HEAD"]) == head
+  end
+
+  test "the fixed check does not execute commit hooks or signing programs", c do
+    sentinel = Path.join(c.root, "unsafe-executed")
+    script = Path.join(c.root, "unsafe-program")
+    File.write!(script, "#!/bin/sh\nprintf unsafe > #{sentinel}\nexit 1\n")
+    File.chmod!(script, 0o755)
+    File.cp!(script, Path.join(c.workspace, ".git/hooks/pre-commit"))
+    git(c.workspace, ["config", "core.hooksPath", Path.join(c.workspace, ".git/hooks")])
+    git(c.workspace, ["config", "commit.gpgSign", "true"])
+    File.write!(Path.join(c.workspace, "candidate"), "changed\n")
+    assert {:ok, %{exit_status: 0}} = execute(c)
+    refute File.exists?(sentinel)
+    assert git(c.workspace, ["status", "--porcelain"]) == ""
+  end
+
+  test "untrusted filter configuration blocks before staging or running candidate code", c do
+    sentinel = Path.join(c.root, "filter-executed")
+    git(c.workspace, ["config", "filter.unsafe.clean", "touch #{sentinel}"])
+    File.write!(Path.join(c.workspace, ".gitattributes"), "candidate filter=unsafe\n")
+    File.write!(Path.join(c.workspace, "candidate"), "changed\n")
+    assert {:ok, %{exit_status: status, output: output}} = execute(c)
+    assert status != 0
+    assert output =~ "unsupported Git configuration"
+    refute File.exists?(sentinel)
+    assert git(c.workspace, ["diff", "--cached", "--name-only"]) == ""
+  end
+
+  test "detached HEAD and shared metadata cannot receive service commits", c do
+    head = git(c.workspace, ["rev-parse", "HEAD"])
+    git(c.workspace, ["checkout", "--quiet", "--detach"])
+    File.write!(Path.join(c.workspace, "candidate"), "changed\n")
+    assert {:ok, %{exit_status: status}} = execute(c)
+    assert status != 0
+    assert git(c.workspace, ["rev-parse", "HEAD"]) == head
+    git(c.workspace, ["checkout", "--quiet", "cycle/disposable"])
+    File.write!(Path.join(c.workspace, ".git/commondir"), "../other-git")
+    refute match?({:ok, %{exit_status: 0}}, execute(c))
+    assert File.read!(Path.join(c.workspace, "candidate")) == "changed\n"
+  end
+
+  test "model results cannot substitute missing conversation evidence", c do
+    File.write!(Path.join(c.workspace, "candidate"), "changed\n")
+    assert {:ok, %{exit_status: status, output: output}} = execute(%{c | run: %{c.run | outputs: %{"candidate" => %{}}}})
+    assert status != 0
+    assert output =~ "missing candidate input"
+    assert git(c.workspace, ["diff", "--cached", "--name-only"]) == ""
+  end
+
+  defp execute(c), do: WorkstreamRunner.execute_stage("local-commit", c.definition, c.run, workspace_root: c.root)
+
+  defp git(workspace, args) do
+    {output, 0} = System.cmd("git", args, cd: workspace, stderr_to_stdout: true)
+    String.trim(output)
+  end
+end

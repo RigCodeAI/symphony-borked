@@ -9,7 +9,22 @@ defmodule SymphonyElixir.WorkstreamRunner do
   """
 
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{AgentReadiness, CandidateGit, Config, Evidence, PathSafety, Validation, ValidationPolicy, WorkerOperation, Workstream, WorkstreamCommand}
+
+  alias SymphonyElixir.{
+    AgentReadiness,
+    CandidateGit,
+    CandidateTransfer,
+    Config,
+    Evidence,
+    PathSafety,
+    Publisher,
+    Validation,
+    ValidationCheck,
+    ValidationPolicy,
+    WorkerOperation,
+    Workstream,
+    WorkstreamCommand
+  }
 
   @source_root Path.expand("../../..", __DIR__)
 
@@ -44,15 +59,33 @@ defmodule SymphonyElixir.WorkstreamRunner do
           {:ok, map()} | {:error, term()}
   def pin_execution_context(opts, workspace, definition) do
     context = execution_context(opts)
+    validation = if candidate_validation_stages(definition) == [], do: {:ok, %{}}, else: prepared_validation_context(opts, workspace, definition)
 
-    case candidate_validation_stages(definition) do
-      [] ->
-        {:ok, context}
+    with {:ok, validation} <- validation,
+         {:ok, transfer} <- pin_candidate_transfer(opts, definition),
+         {:ok, publication} <- Publisher.pin(opts, workspace, definition),
+         {:ok, check} <- ValidationCheck.pin(Keyword.merge(opts, Map.to_list(publication)), workspace, definition) do
+      {:ok, context |> Map.merge(validation) |> Map.merge(transfer) |> Map.merge(publication) |> Map.merge(check)}
+    end
+  end
 
-      _stages ->
-        with {:ok, validation} <- prepared_validation_context(opts, workspace, definition) do
-          {:ok, Map.merge(context, validation)}
-        end
+  defp pin_candidate_transfer(opts, definition) do
+    if opts[:worker_control] && candidate_validation_stages(definition) != [] do
+      case definition.stages["local-commit"] do
+        %{type: :check, outputs: outputs, gate: %{command: ["/usr/bin/python3", "-I", "-c", script] = command}}
+        when is_binary(script) ->
+          if "candidate-commit" in outputs do
+            digest = :crypto.hash(:sha256, Jason.encode!(command)) |> Base.encode16(case: :lower)
+            {:ok, %{candidate_producer_stage: "local-commit", candidate_producer_command_sha256: digest}}
+          else
+            {:error, :candidate_producer_not_configured}
+          end
+
+        _ ->
+          {:error, :candidate_producer_not_configured}
+      end
+    else
+      {:ok, %{}}
     end
   end
 
@@ -67,7 +100,9 @@ defmodule SymphonyElixir.WorkstreamRunner do
          {:ok, definition} <- bind_cloud_agent(definition, opts[:cloud_agent_id]),
          {:ok, workspace} <- workspace(opts, definition),
          :ok <- dedicated_clone(workspace),
-         {:ok, definition} <- pin_definition_validation(opts, workspace, definition) do
+         {:ok, definition} <- pin_definition_validation(opts, workspace, definition),
+         {:ok, publication} <- Publisher.pin(opts, workspace, definition),
+         {:ok, _check} <- ValidationCheck.pin(Keyword.merge(opts, Map.to_list(publication)), workspace, definition) do
       {:ok, definition, workspace}
     end
   end
@@ -119,12 +154,18 @@ defmodule SymphonyElixir.WorkstreamRunner do
     end
   end
 
+  def execute_stage(%{type: :publish} = stage, definition, state, opts) do
+    with {:ok, workspace} <- stage_workspace(state, definition, opts) do
+      Publisher.publish(%{state | workspace: workspace}, stage, opts)
+    end
+  end
+
   def execute_stage(%{type: :check} = stage, definition, state, opts) do
     with {:ok, workspace} <- stage_workspace(state, definition, opts) do
-      if stage.gate[:evaluator] == :candidate_validation do
-        execute_candidate_validation(stage, state, workspace, opts)
-      else
-        run_executable_check(stage, state, workspace, opts)
+      case stage.gate[:evaluator] do
+        :candidate_validation -> execute_candidate_validation(stage, state, workspace, opts)
+        :github_validation -> ValidationCheck.reconcile(%{state | workspace: workspace}, stage, opts)
+        _ -> run_executable_check(stage, state, workspace, opts)
       end
     end
   end
@@ -239,14 +280,18 @@ defmodule SymphonyElixir.WorkstreamRunner do
          {:ok, policy} <- ValidationPolicy.load(policy_path, workspace),
          {:ok, archive} <- external_path_option(opts, :validation_archive, workspace),
          {:ok, scratch} <- external_path_option(opts, :validation_scratch, workspace),
+         {:ok, candidates} <- external_path_option(Keyword.put_new(opts, :validation_candidates, archive <> "-candidates"), :validation_candidates, workspace),
          :ok <- distinct_validation_roots(archive, scratch),
-         :ok <- validation_paths_outside_definitions([archive, scratch], [policy.path | Map.keys(definition.definitions)]),
+         :ok <- distinct_validation_roots(candidates, archive),
+         :ok <- distinct_validation_roots(candidates, scratch),
+         :ok <- validation_paths_outside_definitions([archive, scratch, candidates], [policy.path | Map.keys(definition.definitions)]),
          {:ok, base_sha} <- validation_base_option(opts, workspace) do
       {:ok,
        %{
          validation_policy: policy,
          validation_archive: archive,
          validation_scratch: scratch,
+         validation_candidates: candidates,
          validation_base: base_sha
        }}
     end
@@ -357,10 +402,12 @@ defmodule SymphonyElixir.WorkstreamRunner do
         base_sha: base_sha
       }
 
-      Validation.execute(workspace, policy, context, stage.gate.required,
-        validation_archive: archive,
-        validation_scratch: scratch
-      )
+      with {:ok, candidate_workspace, _metadata} <- CandidateTransfer.sync(%{state | workspace: workspace}, stage, opts) do
+        Validation.execute(candidate_workspace, policy, context, stage.gate.required,
+          validation_archive: archive,
+          validation_scratch: scratch
+        )
+      end
     else
       {:error, :candidate_validation_context_not_pinned}
     end
@@ -416,7 +463,7 @@ defmodule SymphonyElixir.WorkstreamRunner do
     started = System.monotonic_time(:millisecond)
     attempt_id = Map.get(state, :current_attempt_id) || "local/#{stage.id}/#{length(state.attempts) + 1}"
     execution_state = state |> Map.put_new(:id, "local") |> Map.put_new(:task_id, "local") |> Map.put(:current_attempt_id, attempt_id)
-    result = execute_stage(stage, definition, execution_state, opts)
+    result = if stage.type == :publish, do: {:error, :publication_requires_durable_coordinator}, else: execute_stage(stage, definition, execution_state, opts)
 
     {result, gate, gate_detail} =
       if candidate_validation?(stage) do
@@ -465,6 +512,9 @@ defmodule SymphonyElixir.WorkstreamRunner do
           true ->
             repair_or_block(stage.gate.failure, stage.id, definition, state, opts)
         end
+
+      :publish ->
+        finish(:blocked, definition, state)
     end
   end
 
@@ -477,7 +527,7 @@ defmodule SymphonyElixir.WorkstreamRunner do
     }
 
     validation_opts = [
-      workspace: state.workspace,
+      workspace: candidate_validation_workspace(state),
       validation_archive: Keyword.get(opts, :validation_archive),
       validation_scratch: Keyword.get(opts, :validation_scratch)
     ]
@@ -499,6 +549,13 @@ defmodule SymphonyElixir.WorkstreamRunner do
     end
   rescue
     error -> {:error, {:validation_verification_failed, error}}
+  end
+
+  defp candidate_validation_workspace(state) do
+    case CandidateTransfer.workspace(state) do
+      {:ok, path} -> path
+      _ -> nil
+    end
   end
 
   defp verified_candidate_feedback({:ok, %{receipt: receipt}}, archive) do

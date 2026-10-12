@@ -98,6 +98,11 @@ The next source increment adds [held recovery inspection](docs/held-recovery-ins
 of the anchored owner capture in memory. It preserves saved pins and rejects
 dispatch until a later fencing/reconciliation release is qualified.
 
+The next prepared source adds an explicit operator recovery plan at full
+application startup, omitting Evidence and provider/intake children while held.
+Its separate cold-start qualification is pending; ordinary deployment activation
+is unchanged.
+
 DEV-235 adds [named cloud-agent routing and safe reassignment](docs/dev-235-agent-mapping.md)
 to the existing coordinator. Both additional apps are installed with DEV-only access;
 route activation and native multi-app acceptance remain pending. Existing human waits

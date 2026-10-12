@@ -4,6 +4,10 @@ For partial DEV-242 recovery, see [held local inspection](../docs/held-recovery-
 Its trusted startup option reads an anchored owner capture in memory and keeps
 dispatch held; it does not install state or authorize replacement workers.
 
+The prepared `--recovery-plan /absolute/private/plan.json` entry point selects
+held application startup before the normal children. See the same recovery
+contract for plan permissions, logs and the pending cold-start rehearsal.
+
 For the file-defined local agent → executable gate, use
 [`mix workstream.run`](../docs/local-workstreams.md). It validates version 1
 definitions and runs synchronously without starting tracker polling. The

@@ -7,12 +7,26 @@ defmodule SymphonyElixir.BackupCaptureOwnerTest do
     AgentRuntimeSupervisor,
     BackupCapture,
     Evidence,
+    RecoveryInspection,
+    WorkstreamChild,
     WorkstreamRun,
     WorkstreamRunner,
     WorkstreamStore
   }
 
   alias SymphonyElixirWeb.LinearWebhookController
+
+  @child_fixture_dir Path.expand("../fixtures/dev243_child", __DIR__)
+  @child_fixture_files [
+    "coverage-factory.yaml",
+    "software-change.yaml",
+    "researcher.yaml",
+    "implementer.yaml",
+    "researcher.md",
+    "implementer.md",
+    "skills/research/SKILL.md",
+    "skills/implementation/SKILL.md"
+  ]
 
   setup test_context do
     root = Path.join(System.tmp_dir!(), "backup-capture-owner-#{System.unique_integer([:positive])}")
@@ -158,11 +172,17 @@ defmodule SymphonyElixir.BackupCaptureOwnerTest do
     ready_run = %{context.ready_run | validation_repair_rounds: 2, review_repair_rounds: 1, transport_retries: 3}
 
     {ready_run, waiting_run} =
-      if test_context[:stale_saved_policy] do
-        policy = Map.put(WorkstreamRun.policy(), :lifecycle_sha256, String.duplicate("0", 64))
-        {Map.put(ready_run, :policy, policy), Map.put(waiting_run, :policy, policy)}
-      else
-        {ready_run, waiting_run}
+      cond do
+        test_context[:stale_saved_policy] ->
+          policy = Map.put(WorkstreamRun.policy(), :lifecycle_sha256, String.duplicate("0", 64))
+          {Map.put(ready_run, :policy, policy), Map.put(waiting_run, :policy, policy)}
+
+        test_context[:legacy_saved_policy] ->
+          policy = Map.delete(WorkstreamRun.policy(), :child_sha256)
+          {Map.put(ready_run, :policy, policy), Map.put(waiting_run, :policy, policy)}
+
+        true ->
+          {ready_run, waiting_run}
       end
 
     seed_store!(context.db, [ready_run, waiting_run])
@@ -250,6 +270,89 @@ defmodule SymphonyElixir.BackupCaptureOwnerTest do
 
     assert {:error, {:database_ownership_conflict, _, _}} = WorkstreamStore.start_link(path: c.db, owner: self())
     assert Process.alive?(store)
+  end
+
+  test "captures a linked child and keeps its wait and lineage held across recovery restarts", c do
+    capture = create_quiet_child_capture(c)
+    parent = Map.fetch!(capture.runs, capture.parent_id)
+    child = Map.fetch!(capture.runs, capture.child_id)
+    intent = parent.child_handoff
+
+    assert parent.status == :waiting_for_child
+    assert parent.phase == :waiting_for_child
+    assert parent.stage_id == "implement-gap"
+    assert parent.current_attempt_id == intent.parent_attempt_id
+    assert intent == capture.intent
+    assert %{type: :child, status: :waiting, stage: "implement-gap"} = Enum.find(parent.attempts, &(&1.id == intent.parent_attempt_id))
+    assert %{type: :child, status: :waiting_for_child, child_handoff: ^intent} = parent.operations[intent.parent_attempt_id]
+    assert child.id == intent.child_run_id
+    assert child.status == :ready
+    assert child.definition.name == "software-change"
+    assert child.definition.input_values["task"] == parent.outputs["qualified-gap"]
+    assert child.parent_run_id == parent.id
+    assert child.parent_handoff == child_lineage(intent)
+
+    config = recovery_capture_config(c, "quiet-capture", capture.manifest_sha256, WorkstreamRun.policy())
+    assert {:ok, %{runs: inspected_runs, report: inspection}} = RecoveryInspection.inspect(config)
+    assert Map.new(inspected_runs, &{&1.id, &1}) == capture.runs
+    assert inspection.status == :dispatch_held
+    assert inspection.dispatch_allowed == false
+    assert inspection.restore_ready == false
+
+    runtime = start_recovery_runtime(c, "quiet-capture", capture.manifest_sha256, WorkstreamRun.policy())
+    state = :sys.get_state(runtime.coordinator)
+    assert state.workstreams.runs == capture.runs
+    assert state.workstreams.child_proofs == %{}
+    assert state.workstreams.child_proof_timer == nil
+    assert Task.Supervisor.children(runtime.tasks) == []
+    assert {:ok, parent_report} = Orchestrator.workstream_state(runtime.coordinator, parent.id)
+    assert parent_report == capture.reports[parent.id]
+    assert {:ok, child_report} = Orchestrator.workstream_state(runtime.coordinator, child.id)
+    assert child_report == capture.reports[child.id]
+
+    stop_runtime(runtime)
+    restarted = start_recovery_runtime(c, "quiet-capture", capture.manifest_sha256, WorkstreamRun.policy())
+    restarted_state = :sys.get_state(restarted.coordinator)
+
+    assert recovery_report(restarted.coordinator).status == :dispatch_held
+    assert restarted_state.workstreams.runs == capture.runs
+    assert restarted_state.workstreams.child_proofs == %{}
+    assert restarted_state.workstreams.child_proof_timer == nil
+    assert Task.Supervisor.children(restarted.tasks) == []
+    assert Map.fetch!(restarted_state.workstreams.runs, parent.id).child_handoff == intent
+    assert Map.fetch!(restarted_state.workstreams.runs, child.id).parent_handoff == child_lineage(intent)
+  end
+
+  test "the linked-child inspector rejects a missing sibling and changed lineage", c do
+    capture = create_quiet_child_capture(c)
+    parent = Map.fetch!(capture.runs, capture.parent_id)
+    child = Map.fetch!(capture.runs, capture.child_id)
+    runs = Map.values(capture.runs)
+
+    assert :ok = WorkstreamChild.inspect_recovery_links(runs)
+    assert {:error, _reason} = WorkstreamChild.inspect_recovery_links(Enum.reject(runs, &(&1.id == child.id)))
+
+    tampered = put_in(child.parent_handoff.parent_attempt_id, "different-attempt")
+    assert {:error, _reason} = WorkstreamChild.inspect_recovery_links([parent, tampered])
+
+    before_digest = capture_files_digest(c.capture_root, "quiet-capture")
+    assert {:ok, images} = BackupCapture.read_images(c.capture_root, "quiet-capture", [c.workspace_root], capture.manifest_sha256)
+    assert {:ok, _saved} = WorkstreamStore.inspect_recovery_image(images.images["state"])
+
+    for sql <- [
+          "DELETE FROM events WHERE event_id LIKE 'child-handoff/%/child'",
+          "UPDATE events SET run_id=(SELECT run_id FROM runs WHERE run_id != events.run_id LIMIT 1) WHERE event_id LIKE 'child-handoff/%/child'",
+          "UPDATE events SET payload=(SELECT payload FROM events WHERE event_id LIKE 'child-handoff/%/parent' LIMIT 1) WHERE event_id LIKE 'child-handoff/%/child'"
+        ] do
+      path = Path.join(c.root, "mutated-child-#{System.unique_integer([:positive])}.sqlite")
+      File.write!(path, images.images["state"])
+      assert {:ok, db} = Sqlite3.open(path)
+      assert :ok = Sqlite3.execute(db, sql)
+      assert :ok = Sqlite3.close(db)
+      assert {:error, :invalid_recovery_image} = WorkstreamStore.inspect_recovery_image(File.read!(path))
+    end
+
+    assert capture_files_digest(c.capture_root, "quiet-capture") == before_digest
   end
 
   test "rejects unresolved publications, validation jobs, and cleanup-enabled coordinators", c do
@@ -628,6 +731,26 @@ defmodule SymphonyElixir.BackupCaptureOwnerTest do
     assert evidence_tree_digest(c.evidence_root) == capture.evidence_tree_digest
   end
 
+  test "cold full application boot and restart keep a linked child capture held", c do
+    capture = create_quiet_child_capture(c)
+    plan_path = write_application_recovery_plan(c, capture)
+    plan_bytes = File.read!(plan_path)
+    capture_before = capture_files_digest(c.capture_root, "quiet-capture")
+    state_before = digest_file(c.db)
+    evidence_before = evidence_tree_digest(c.evidence_root)
+
+    # The application must rely on the captured definition pins, not today's mutable file.
+    File.write!(Path.join([c.root, "dev243-child-fixture", "coverage-factory.yaml"]), "this is no longer valid workstream YAML\n")
+
+    {output, status} = run_cold_application_rehearsal(c, capture, plan_path)
+
+    assert status == 0, output
+    assert File.read!(plan_path) == plan_bytes
+    assert capture_files_digest(c.capture_root, "quiet-capture") == capture_before
+    assert digest_file(c.db) == state_before
+    assert evidence_tree_digest(c.evidence_root) == evidence_before
+  end
+
   @tag stale_saved_policy: true
   test "rejects changed or missing capture anchors and reports incompatible policy without writes", c do
     capture = create_quiet_capture(c)
@@ -693,6 +816,34 @@ defmodule SymphonyElixir.BackupCaptureOwnerTest do
     assert capture_files_digest(c.capture_root, "quiet-capture") == original
   end
 
+  @tag legacy_saved_policy: true
+  test "retains a legacy saved policy in a real held capture without upgrading its pin", c do
+    capture = create_quiet_capture(c)
+    legacy_policy = Map.delete(WorkstreamRun.policy(), :child_sha256)
+
+    assert Enum.all?(capture.runs, fn {_id, run} -> run.policy == legacy_policy end)
+
+    config = recovery_capture_config(c, "quiet-capture", capture.manifest_sha256, WorkstreamRun.policy())
+    assert {:ok, %{runs: inspected_runs, report: inspection}} = RecoveryInspection.inspect(config)
+    assert inspection.status == :dispatch_held
+    assert inspection.policy_compatible == false
+    assert inspection.incompatible_run_ids == Enum.sort(Map.keys(capture.runs))
+    assert Enum.all?(inspected_runs, fn run -> run.policy == legacy_policy end)
+
+    runtime = start_recovery_runtime(c, "quiet-capture", capture.manifest_sha256, WorkstreamRun.policy())
+    assert recovery_report(runtime.coordinator).policy_compatible == false
+    assert :sys.get_state(runtime.coordinator).workstreams.runs == capture.runs
+    assert Task.Supervisor.children(runtime.tasks) == []
+
+    stop_runtime(runtime)
+    restarted = start_recovery_runtime(c, "quiet-capture", capture.manifest_sha256, WorkstreamRun.policy())
+    restarted_state = :sys.get_state(restarted.coordinator)
+    assert recovery_report(restarted.coordinator).policy_compatible == false
+    assert restarted_state.workstreams.runs == capture.runs
+    assert Enum.all?(restarted_state.workstreams.runs, fn {_id, run} -> run.policy == legacy_policy end)
+    assert Task.Supervisor.children(restarted.tasks) == []
+  end
+
   defp create_quiet_capture(c) do
     runtime = start_capture_runtime(c)
     coordinator = runtime.coordinator
@@ -719,6 +870,121 @@ defmodule SymphonyElixir.BackupCaptureOwnerTest do
     %{manifest: manifest, manifest_sha256: manifest_sha256, runs: runs, reports: reports, evidence_tree_digest: evidence_tree_digest(c.evidence_root)}
   end
 
+  defp child_lineage(intent), do: Map.take(intent, [:handoff_id, :parent_run_id, :parent_stage_id, :parent_attempt_id, :fingerprint])
+
+  defp create_quiet_child_capture(c) do
+    fixture_root = Path.join(c.root, "dev243-child-fixture")
+
+    Enum.each(@child_fixture_files, fn relative_path ->
+      source = Path.join(@child_fixture_dir, relative_path)
+      destination = Path.join(fixture_root, relative_path)
+      File.mkdir_p!(Path.dirname(destination))
+      File.cp!(source, destination)
+    end)
+
+    parent_options = [
+      workspace: c.ready_workspace,
+      workspace_root: c.workspace_root,
+      branch: "cycle/capture-parent",
+      codex_command: "/fixture/no-codex-command"
+    ]
+
+    parent_path = Path.join(fixture_root, "coverage-factory.yaml")
+
+    assert {:ok, parent_definition, parent_workspace} =
+             WorkstreamRunner.prepare(parent_path, %{"request" => "qualify the child capture"}, parent_options)
+
+    assert {:ok, parent_execution} = WorkstreamRunner.pin_execution_context(parent_options, parent_workspace, parent_definition)
+
+    parent =
+      WorkstreamRun.new("task-capture-parent", parent_definition, parent_workspace, parent_options, parent_execution)
+      |> Map.put(:id, "run-capture-child-parent")
+      |> Map.put(:stage_id, "implement-gap")
+      |> Map.put(:outputs, %{
+        "request" => "qualify the child capture",
+        "capability-gap" => "capture a linked child safely",
+        "qualified-gap" => "capture a linked child safely"
+      })
+
+    child_stage = parent.definition.stages[parent.stage_id]
+    assert {:ok, child_inputs} = WorkstreamChild.inputs(child_stage, parent.outputs)
+    child_definition = Map.put(child_stage.child_definition, :input_values, child_inputs)
+
+    child_options = [
+      workspace: c.waiting_workspace,
+      workspace_root: c.workspace_root,
+      branch: "cycle/capture-child",
+      codex_command: "/fixture/no-codex-command"
+    ]
+
+    assert {:ok, child_execution} = WorkstreamRunner.pin_execution_context(child_options, c.waiting_workspace, child_definition)
+
+    child =
+      WorkstreamRun.new("task-capture-child", child_definition, c.waiting_workspace, child_options, child_execution)
+
+    assert {:ok, waiting_parent, linked_child, intent} = WorkstreamRun.begin_child(parent, child)
+    child_db = Path.join([c.root, "child-state", "runs.sqlite"])
+    assert {:ok, store} = WorkstreamStore.start_link(path: child_db, owner: self())
+    assert :ok = WorkstreamStore.commit(store, parent, "child-capture-parent-created", %{kind: :queued})
+
+    assert {:ok, ^waiting_parent, ^linked_child} =
+             WorkstreamStore.commit_child_handoff(store, parent, waiting_parent, linked_child, intent)
+
+    assert :ok = GenServer.stop(store)
+
+    child_context = Map.put(c, :db, child_db)
+    runtime = start_capture_runtime(child_context)
+    coordinator = runtime.coordinator
+
+    pause_evidence_flush()
+
+    assert {:ok, %{id: "quiet-capture", status: :capturing, restore_ready: false}} =
+             Orchestrator.capture_backup(coordinator, "quiet-capture")
+
+    assert {:ok, manifest} = await_capture(coordinator, "quiet-capture")
+    assert {:ok, ^manifest} = BackupCapture.verify(c.capture_root, "quiet-capture", [c.workspace_root])
+
+    state = :sys.get_state(coordinator)
+    runs = state.workstreams.runs
+    parent = Map.fetch!(runs, parent.id)
+    child = Map.fetch!(runs, linked_child.id)
+    assert parent.status == :waiting_for_child
+    assert parent.child_handoff == intent
+    assert child.status == :ready
+    assert child.parent_handoff == child_lineage(intent)
+    assert manifest["metadata"]["run_ids"] == Enum.sort([parent.id, child.id])
+
+    reports =
+      Map.new(runs, fn {run_id, _run} ->
+        assert {:ok, report} = Orchestrator.workstream_state(coordinator, run_id)
+        {run_id, report}
+      end)
+
+    manifest_sha256 = digest_file(Path.join([c.capture_root, "quiet-capture", "manifest.json"]))
+    stop_runtime(runtime)
+
+    %{
+      manifest: manifest,
+      manifest_sha256: manifest_sha256,
+      runs: runs,
+      reports: reports,
+      parent_id: parent.id,
+      child_id: child.id,
+      intent: intent
+    }
+  end
+
+  defp recovery_capture_config(c, capture_id, manifest_sha256, policy) do
+    %{
+      root: c.capture_root,
+      id: capture_id,
+      workspace_roots: [c.workspace_root],
+      manifest_sha256: manifest_sha256,
+      service_revision: String.duplicate("c", 40),
+      policy: policy
+    }
+  end
+
   defp start_recovery_runtime(c, capture_id, manifest_sha256, policy) do
     suffix = System.unique_integer([:positive])
     supervisor = Module.concat(__MODULE__, "RecoveryRuntime#{suffix}")
@@ -742,6 +1008,251 @@ defmodule SymphonyElixir.BackupCaptureOwnerTest do
     runtime = start_isolated_runtime(opts)
     assert {:ok, _report} = Orchestrator.recovery_status(coordinator)
     runtime
+  end
+
+  defp write_application_recovery_plan(c, capture) do
+    {:ok, canonical_root} = SymphonyElixir.PathSafety.canonicalize(c.root)
+    plan_dir = Path.join(canonical_root, "recovery-plan")
+    File.mkdir!(plan_dir)
+    File.chmod!(plan_dir, 0o700)
+
+    policy =
+      Map.new(WorkstreamRun.policy(), fn {key, value} ->
+        {Atom.to_string(key), value}
+      end)
+
+    plan = %{
+      "version" => 1,
+      "mode" => "held_inspection",
+      "root" => c.capture_root,
+      "id" => "quiet-capture",
+      "workspace_roots" => [c.workspace_root],
+      "manifest_sha256" => capture.manifest_sha256,
+      "service_revision" => String.duplicate("c", 40),
+      "policy" => policy
+    }
+
+    plan_path = Path.join(plan_dir, "plan.json")
+    File.write!(plan_path, Jason.encode!(plan))
+    File.chmod!(plan_path, 0o600)
+    plan_path
+  end
+
+  defp run_cold_application_rehearsal(c, capture, plan_path) do
+    script = """
+    watchdog = spawn_link(fn -> receive do :cancel -> :ok after 30_000 -> System.halt(124) end end)
+    ack = "--i-understand-that-this-will-be-running-without-the-usual-guardrails"
+    plan_path = System.fetch_env!("DEV242_PLAN")
+    workflow_path = System.fetch_env!("DEV242_WORKFLOW")
+    logs_root = System.fetch_env!("DEV242_LOGS")
+    capture_root = System.fetch_env!("DEV242_CAPTURE_ROOT")
+    expected_ids = Jason.decode!(System.fetch_env!("DEV242_EXPECTED_IDS"))
+    expected_pins = Jason.decode!(System.fetch_env!("DEV242_EXPECTED_PINS"))
+    expected_runs = Jason.decode!(System.fetch_env!("DEV242_EXPECTED_RUNS"))
+    expected_capture_files = Jason.decode!(System.fetch_env!("DEV242_CAPTURE_FILES"))
+
+    check_capture_files = fn ->
+      actual =
+        Map.new(["state.sqlite", "evidence.sqlite", "manifest.json"], fn name ->
+          path = Path.join([capture_root, "quiet-capture", name])
+          digest = path |> File.read!() |> then(fn bytes -> :crypto.hash(:sha256, bytes) end) |> Base.encode16(case: :lower)
+          {name, digest}
+        end)
+
+      true = actual == expected_capture_files
+    end
+
+    check_tree = fn ->
+      root_children = Supervisor.which_children(SymphonyElixir.Supervisor)
+      true = Enum.map(root_children, &elem(&1, 0)) == [SymphonyElixir.AgentRuntimeSupervisor]
+
+      runtime_children = Supervisor.which_children(SymphonyElixir.AgentRuntimeSupervisor)
+      runtime_child_ids = runtime_children |> Enum.map(&elem(&1, 0)) |> Enum.sort()
+      true = runtime_child_ids == Enum.sort([SymphonyElixir.TaskSupervisor, SymphonyElixir.Orchestrator])
+
+      for name <- [
+            SymphonyElixir.WorkflowStore,
+            SymphonyElixir.Evidence,
+            SymphonyElixir.Linear.OAuth,
+            SymphonyElixir.HttpServer,
+            SymphonyElixir.LinearWebhookServer,
+            SymphonyElixir.StatusDashboard,
+            SymphonyElixir.PubSub,
+            SymphonyElixirWeb.Endpoint
+          ] do
+        true = Process.whereis(name) == nil
+      end
+
+      state = :sys.get_state(SymphonyElixir.Orchestrator)
+      {:ok, report} = SymphonyElixir.Orchestrator.recovery_status(SymphonyElixir.Orchestrator)
+      true = report.status == :dispatch_held
+      true = report.dispatch_allowed == false
+      true = report.restore_ready == false
+      true = report.capture_id == "quiet-capture"
+      true = state.recovery == report
+      true = state.polling_enabled == false
+      true = state.linear == nil
+      true = state.workstreams.store == nil
+      true = state.workstreams.validation_check_timer == nil
+      true = state.workstreams.child_proofs == %{}
+      true = state.workstreams.child_proof_timer == nil
+      true = state.workstreams.cleanup.timer == nil
+      true = Enum.sort(Map.keys(state.workstreams.runs)) == expected_ids
+
+      actual_pins =
+        Map.new(state.workstreams.runs, fn {run_id, run} ->
+          pins = Map.new(run.definition.definitions, fn {path, resource} -> {path, resource.sha256} end)
+          {run_id, pins}
+        end)
+
+      actual_runs =
+        Map.new(state.workstreams.runs, fn {run_id, run} ->
+          summary = %{
+            "status" => Atom.to_string(run.status),
+            "validation_repair_rounds" => run.validation_repair_rounds,
+            "review_repair_rounds" => run.review_repair_rounds,
+            "transport_retries" => run.transport_retries,
+            "has_pending_wait" => not is_nil(run.pending_wait)
+          }
+
+          {run_id, summary}
+        end)
+
+      true = actual_pins == expected_pins
+      true = actual_runs == expected_runs
+      true = Task.Supervisor.children(SymphonyElixir.TaskSupervisor) == []
+      check_capture_files.()
+      {state, report}
+    end
+
+    :ok =
+      SymphonyElixir.CLI.evaluate([
+        ack,
+        "--recovery-plan",
+        plan_path,
+        "--logs-root",
+        logs_root,
+        workflow_path
+      ])
+
+    {:ok, _started} = Application.ensure_all_started(:symphony_elixir)
+    true = Application.get_env(:symphony_elixir, :recovery_plan_path) == plan_path
+    {initial_state, initial_report} = check_tree.()
+    Logger.flush()
+    :ok = :logger_disk_log_h.filesync(:symphony_disk_log)
+    log_text = Path.wildcard(Path.join([logs_root, "log", "symphony.log.*"])) |> Enum.map(&File.read!/1) |> IO.iodata_to_binary()
+    true = String.contains?(log_text, "recovery_dispatch_held capture_id=quiet-capture")
+    true = String.contains?(log_text, "dispatch_allowed=false restore_ready=false")
+    snapshot = SymphonyElixir.Orchestrator.snapshot(SymphonyElixir.Orchestrator, 1_000)
+    true = snapshot.recovery == initial_report
+    true = snapshot.running == [] and snapshot.retrying == [] and snapshot.blocked == []
+
+    {:error, running_cli_error} =
+      SymphonyElixir.CLI.evaluate([
+        ack,
+        "--recovery-plan",
+        plan_path,
+        "--logs-root",
+        logs_root,
+        workflow_path
+      ])
+
+    true = String.contains?(running_cli_error, "recovery_requires_cold_start")
+    true = :sys.get_state(SymphonyElixir.Orchestrator) == initial_state
+
+    true =
+      SymphonyElixir.Orchestrator.queue_workstream(
+        SymphonyElixir.Orchestrator,
+        "held-queue",
+        "held-task",
+        workflow_path,
+        %{"task" => "must not start"},
+        []
+      ) == {:error, :recovery_dispatch_held}
+
+    true = SymphonyElixir.Orchestrator.receive_linear_event(SymphonyElixir.Orchestrator, %{kind: :created}) == {:error, :recovery_dispatch_held}
+    true = SymphonyElixir.Orchestrator.reconcile_workstreams(SymphonyElixir.Orchestrator) == {:error, :recovery_dispatch_held}
+
+    for message <- [:linear_process, :advance_workstreams, :reconcile_validation_checks, {:validation_checks_tick, make_ref()}],
+        do: send(SymphonyElixir.Orchestrator, message)
+
+    :ok = GenServer.cast(SymphonyElixir.Orchestrator, {:unexpected_mutating_cast, make_ref()})
+    true = :sys.get_state(SymphonyElixir.Orchestrator) == initial_state
+    true = Task.Supervisor.children(SymphonyElixir.TaskSupervisor) == []
+    check_capture_files.()
+
+    :ok = Application.stop(:symphony_elixir)
+    {:ok, _restarted} = Application.ensure_all_started(:symphony_elixir)
+    {restarted_state, restarted_report} = check_tree.()
+    true = restarted_report == initial_report
+    true = restarted_state.workstreams.runs == initial_state.workstreams.runs
+
+    :ok = Application.stop(:symphony_elixir)
+    original_plan = File.read!(plan_path)
+    File.write!(plan_path, "not-json")
+
+    true = match?({:error, _reason}, Application.ensure_all_started(:symphony_elixir))
+    true = Process.whereis(SymphonyElixir.Supervisor) == nil
+    true = Process.whereis(SymphonyElixir.AgentRuntimeSupervisor) == nil
+
+    for name <- [
+          SymphonyElixir.WorkflowStore,
+          SymphonyElixir.Evidence,
+          SymphonyElixir.Linear.OAuth,
+          SymphonyElixir.PubSub,
+          SymphonyElixirWeb.Endpoint
+        ] do
+      true = Process.whereis(name) == nil
+    end
+
+    File.write!(plan_path, original_plan)
+    File.chmod!(plan_path, 0o600)
+    check_capture_files.()
+    send(watchdog, :cancel)
+    IO.puts(Jason.encode!(%{"status" => "passed", "capture_id" => initial_report.capture_id, "run_ids" => expected_ids}))
+    """
+
+    executable = System.find_executable("elixir") || raise "elixir executable not found for cold startup rehearsal"
+
+    code_paths = Enum.map(:code.get_path(), &List.to_string/1)
+
+    args =
+      ["--erl", "+S 1:1"] ++
+        Enum.flat_map(code_paths, fn path -> ["-pa", path] end) ++ ["-e", script]
+
+    expected_pins =
+      Map.new(capture.runs, fn {run_id, run} ->
+        pins = Map.new(run.definition.definitions, fn {path, resource} -> {path, resource.sha256} end)
+        {run_id, pins}
+      end)
+
+    expected_runs =
+      Map.new(capture.runs, fn {run_id, run} ->
+        {run_id,
+         %{
+           "status" => Atom.to_string(run.status),
+           "validation_repair_rounds" => run.validation_repair_rounds,
+           "review_repair_rounds" => run.review_repair_rounds,
+           "transport_retries" => run.transport_retries,
+           "has_pending_wait" => not is_nil(run.pending_wait)
+         }}
+      end)
+
+    System.cmd(executable, args,
+      cd: File.cwd!(),
+      stderr_to_stdout: true,
+      env: [
+        {"__BURRITO", nil},
+        {"DEV242_PLAN", plan_path},
+        {"DEV242_WORKFLOW", c.workflow_path},
+        {"DEV242_LOGS", Path.join(c.root, "cold-start-logs")},
+        {"DEV242_CAPTURE_ROOT", c.capture_root},
+        {"DEV242_EXPECTED_IDS", Jason.encode!(Enum.sort(Map.keys(capture.runs)))},
+        {"DEV242_EXPECTED_PINS", Jason.encode!(expected_pins)},
+        {"DEV242_EXPECTED_RUNS", Jason.encode!(expected_runs)},
+        {"DEV242_CAPTURE_FILES", Jason.encode!(capture_files_digest(c.capture_root, "quiet-capture"))}
+      ]
+    )
   end
 
   defp start_capture_runtime(c) do

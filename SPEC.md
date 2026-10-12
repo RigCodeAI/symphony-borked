@@ -2768,6 +2768,23 @@ This optional mode does not redefine ordinary application startup or the legacy
 cloud backup verifier. See [held recovery inspection](docs/held-recovery-inspection.md)
 for the isolated runtime-supervisor and full-service qualification boundaries.
 
+An explicit operator plan MAY select that held mode at full application startup.
+The plan MUST be private, bounded, duplicate-key checked and use fixed field
+mappings. Startup selection MUST precede normal child configuration and MUST
+omit mutable Evidence, provider credentials, web intake and normal scheduling
+children. An invalid configured plan MUST fail without normal-runtime fallback.
+CLI selection MUST reject a locally running runtime rather than imply it became
+held. Application restart MUST retain the held selection. Logs MUST identify
+held mode, compatibility and unavailable dispatch; ordinary startup without the
+plan MUST remain compatible. Deployment boot selection, external fencing and
+dispatch release remain separately qualified requirements.
+
+Held inspection MAY accept the exact legacy policy inventory without upgrading
+saved pins. Saved child definitions, parent/child lineage and paired atomic
+handoff receipts MUST be correlated in memory. Saved child completion proof
+MUST NOT authorize continuation or provider replay; proof freshness remains
+unreconciled.
+
 ## 25. Independent review and same-PR repair
 
 Version-1 check stages MAY use `review_checkout` or `review_publication` evaluators.

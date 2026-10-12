@@ -496,6 +496,12 @@ exact permanently archived validation evidence are required; agents never receiv
 or tokens. Durable retries reconcile the same branch and PR. The synchronous local runner
 rejects publication. See [configuration, App setup and verification limits](../docs/trusted-publication.md).
 
+Trusted coordinator startup option `merged_cleanup: true` enables idle reconciliation
+of recorded merged work. Cleanup requires exact directory identity, fresh contained
+worker termination and a verified current evidence archive. It is disabled by default;
+legacy tracker terminal states retain work. See [merged cleanup](../docs/merged-workspace-cleanup.md)
+for the read-only composition proof, retry/capture boundaries and validation limits.
+
 ### Trusted GitHub validation check
 
 `github_validation` is a coordinator-owned check evaluator referencing a prior

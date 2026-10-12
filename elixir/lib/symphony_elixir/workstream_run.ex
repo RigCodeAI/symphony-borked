@@ -23,6 +23,7 @@ defmodule SymphonyElixir.WorkstreamRun do
                        validation_check.ex
                        validation_github.ex
                        candidate_transfer.ex
+                       workstream_cleanup.ex
                        evidence.ex
                      )
 

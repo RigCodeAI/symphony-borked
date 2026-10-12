@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, Evidence, StatusDashboard, Tracker, Workspace, WorkstreamRun, WorkstreamRunner, WorkstreamStore}
+  alias SymphonyElixir.{AgentRunner, Config, Evidence, StatusDashboard, Tracker, WorkstreamCleanup, WorkstreamRun, WorkstreamRunner, WorkstreamStore}
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.Linear.Coordinator, as: LinearCoordinator
 
@@ -77,7 +77,7 @@ defmodule SymphonyElixir.Orchestrator do
 
         case initialized do
           {:ok, state} ->
-            state = state |> recover_workstreams() |> schedule_validation_checks_tick()
+            state = state |> recover_workstreams() |> schedule_validation_checks_tick() |> schedule_merged_cleanup()
             if state.workstreams, do: send(self(), :reconcile_validation_checks)
 
             if state.polling_enabled do
@@ -100,6 +100,14 @@ defmodule SymphonyElixir.Orchestrator do
   @impl true
   def handle_info(message, %{polling_enabled: false} = state) when message in [:tick, :run_poll_cycle], do: {:noreply, state}
   def handle_info({:tick, _token}, %{polling_enabled: false} = state), do: {:noreply, state}
+
+  def handle_info(:reconcile_merged_cleanup, state) do
+    state = if state.workstreams, do: put_in(state.workstreams.cleanup.timer, nil), else: state
+    {:noreply, state |> reconcile_merged_cleanup() |> schedule_merged_cleanup()}
+  end
+
+  def handle_info({ref, {:merged_cleanup, token, result}}, state) when is_reference(ref),
+    do: {:noreply, accept_merged_cleanup(state, ref, token, result)}
 
   def handle_info(:advance_workstreams, %{workstreams: %{opts: opts}} = state) do
     if Keyword.get(opts, :auto_advance, true), do: {:noreply, advance_workstreams(state)}, else: {:noreply, state}
@@ -217,14 +225,20 @@ defmodule SymphonyElixir.Orchestrator do
 
     case find_issue_id_for_ref(running, ref) do
       nil ->
-        case cancellation_down(state, ref) do
+        case merged_cleanup_down(state, ref) do
           {:handled, updated} ->
             {:noreply, updated}
 
           :unhandled ->
-            case LinearCoordinator.down(state, ref) do
-              :unhandled -> {:noreply, workstream_worker_down(state, ref, reason)}
-              updated -> {:noreply, updated}
+            case cancellation_down(state, ref) do
+              {:handled, updated} ->
+                {:noreply, updated}
+
+              :unhandled ->
+                case LinearCoordinator.down(state, ref) do
+                  :unhandled -> {:noreply, workstream_worker_down(state, ref, reason)}
+                  updated -> {:noreply, updated}
+                end
             end
         end
 
@@ -1233,27 +1247,10 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, release_issue_claim(state, issue_id)}
   end
 
-  defp cleanup_issue_workspace(identifier, worker_host \\ nil)
-
-  defp cleanup_issue_workspace(issue_or_identifier, metadata) when is_map(metadata) do
-    case Map.get(metadata, :workspace_path) do
-      workspace_path when is_binary(workspace_path) and workspace_path != "" ->
-        Workspace.remove_recorded(workspace_path, Map.get(metadata, :worker_host))
-
-      _ ->
-        cleanup_issue_workspace(issue_or_identifier, Map.get(metadata, :worker_host))
-    end
+  defp cleanup_issue_workspace(_issue_or_identifier, _metadata \\ nil) do
+    Logger.info("Workspace retained: durable merge and archive proof required before cleanup")
+    {:error, :merge_archive_proof_required, ""}
   end
-
-  defp cleanup_issue_workspace(%Issue{} = issue, worker_host) do
-    Workspace.remove_issue_workspaces(issue, worker_host)
-  end
-
-  defp cleanup_issue_workspace(identifier, worker_host) when is_binary(identifier) do
-    Workspace.remove_issue_workspaces(identifier, worker_host)
-  end
-
-  defp cleanup_issue_workspace(_issue_or_identifier, _worker_host), do: :ok
 
   defp run_terminal_workspace_cleanup do
     case Tracker.fetch_issues_by_states(Config.settings!().tracker.terminal_states) do
@@ -1522,6 +1519,20 @@ defmodule SymphonyElixir.Orchestrator do
   @spec reconcile_workstreams(GenServer.server()) :: :ok
   def reconcile_workstreams(server), do: GenServer.call(server, :reconcile_workstreams)
 
+  @doc "True while cleanup owns an active job or a deletion outcome remains uncertain."
+  @spec cleanup_active_or_uncertain?(map()) :: boolean()
+  def cleanup_active_or_uncertain?(%{workstreams: nil}), do: false
+
+  def cleanup_active_or_uncertain?(state) do
+    cleanup = state.workstreams[:cleanup] || %{jobs: %{}}
+
+    map_size(cleanup.jobs) > 0 or surviving_cleanup_task?(state) or
+      Enum.any?(state.workstreams.runs, fn {_id, run} ->
+        run[:cleanup][:status] == :pending and run[:cleanup][:delete_started] == true and
+          run[:cleanup][:last_error] in [nil, :cleanup_outcome_unknown, :owned_resource_removal_failed]
+      end)
+  end
+
   @impl true
   def handle_call({:linear_event, event}, _from, state) do
     case LinearCoordinator.receive_event(state, event, &stop_linear_workstream/2) do
@@ -1638,6 +1649,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_call(:reconcile_workstreams, _from, state) do
     state = state |> recover_workstreams() |> reconcile_stopped_workstreams()
+    state = reconcile_merged_cleanup(state)
     send(self(), :advance_workstreams)
     {:reply, :ok, state}
   end
@@ -1662,6 +1674,25 @@ defmodule SymphonyElixir.Orchestrator do
         SymphonyElixir.ValidationCheck.monitor?(run) && not linear_stopped?(state, run)
 
     {:reply, if(allowed, do: :ok, else: {:error, :validation_no_longer_owned}), state}
+  end
+
+  def handle_call({:workstream_cleanup_check, _token, _pid, _revision}, _from, %{workstreams: nil} = state),
+    do: {:reply, {:error, :durable_workstreams_disabled}, state}
+
+  def handle_call({:workstream_cleanup_check, token, pid, revision}, {caller, _}, state) do
+    reply =
+      with %{pid: ^pid, kind: :delete, run_id: id, fingerprint: fingerprint} <- state.workstreams.cleanup.jobs[token],
+           true <- caller == pid,
+           run when is_map(run) <- durable_run(state, id),
+           true <- WorkstreamCleanup.fingerprint(run) == fingerprint,
+           true <- cleanup_idle?(state, run, pid) and not capture_holds_cleanup?(state),
+           {:ok, %{revision: ^revision}} <- Evidence.retained(run, cleanup_evidence_server(state)) do
+        :ok
+      else
+        _ -> {:error, :cleanup_no_longer_owned}
+      end
+
+    {:reply, reply, state}
   end
 
   def handle_call({:workstream_publication_check, run_id, attempt_id, pid, artifacts}, {caller, _tag}, state) do
@@ -2325,7 +2356,19 @@ defmodule SymphonyElixir.Orchestrator do
 
             :ok = Evidence.recover!(store, runs)
             {:ok, store_path} = SymphonyElixir.PathSafety.canonicalize(path)
-            durable = %{store: store, store_path: store_path, runs: Map.new(runs, &{&1.id, &1}), workers: %{}, cancellations: %{}, publications: %{}, validation_checks: %{}, opts: opts}
+
+            durable = %{
+              store: store,
+              store_path: store_path,
+              runs: Map.new(runs, &{&1.id, &1}),
+              workers: %{},
+              cancellations: %{},
+              publications: %{},
+              validation_checks: %{},
+              cleanup: %{jobs: %{}, timer: nil},
+              opts: opts
+            }
+
             {:ok, %{state | workstreams: durable, polling_enabled: false}}
           end
         end
@@ -2334,6 +2377,139 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp durable_run(%{workstreams: nil}, _id), do: nil
   defp durable_run(state, id), do: Map.get(state.workstreams.runs, id)
+
+  defp cleanup_enabled?(%{workstreams: nil}), do: false
+  defp cleanup_enabled?(state), do: Keyword.get(state.workstreams.opts, :merged_cleanup, false) == true
+
+  defp capture_holds_cleanup?(state),
+    do: (Map.get(state, :capture_hold) || state.workstreams[:capture_hold] || state.workstreams[:capture]) not in [nil, false]
+
+  defp cleanup_evidence_server(state), do: Keyword.get(state.workstreams.opts, :cleanup_evidence_server, Evidence)
+
+  defp schedule_merged_cleanup(state) do
+    if cleanup_enabled?(state) and is_nil(state.workstreams.cleanup.timer) do
+      interval = max(Keyword.get(state.workstreams.opts, :cleanup_interval_ms, 60_000), 10)
+      timer = Process.send_after(self(), :reconcile_merged_cleanup, interval)
+      put_in(state.workstreams.cleanup.timer, timer)
+    else
+      state
+    end
+  end
+
+  defp reconcile_merged_cleanup(state) do
+    if cleanup_enabled?(state) and not capture_holds_cleanup?(state) and map_size(state.workstreams.cleanup.jobs) == 0 do
+      now = System.monotonic_time(:millisecond)
+      retries = state.workstreams.cleanup[:retry_at] || %{}
+
+      candidate =
+        Enum.find(state.workstreams.runs, fn {id, run} ->
+          WorkstreamCleanup.candidate?(run) and cleanup_idle?(state, run) and Map.get(retries, id, now) <= now
+        end)
+
+      case candidate do
+        {_id, run} -> start_merged_cleanup(state, run)
+        nil -> state
+      end
+    else
+      state
+    end
+  end
+
+  defp surviving_cleanup_task?(state) do
+    Enum.any?(Task.Supervisor.children(state.task_supervisor), fn pid ->
+      case Process.info(pid, :dictionary) do
+        {:dictionary, dictionary} -> is_map(Keyword.get(dictionary, :symphony_cleanup))
+        _ -> false
+      end
+    end)
+  end
+
+  defp cleanup_idle?(state, run, ignore_pid \\ nil) do
+    not Enum.any?(state.workstreams.runs, fn {id, other} -> id != run.id and WorkstreamCleanup.overlaps?(run.workspace, other.workspace) end) and
+      not Enum.any?(state.workstreams.workers, fn {_id, worker} -> worker.run_id == run.id end) and
+      not Enum.any?(Map.keys(run.operations), &(Map.has_key?(state.workstreams.cancellations, &1) or match?(%{pid: _}, state.workstreams.publications[&1]))) and
+      not Enum.any?(Task.Supervisor.children(state.task_supervisor), fn pid ->
+        case if(pid == ignore_pid, do: nil, else: Process.info(pid, :dictionary)) do
+          {:dictionary, dictionary} ->
+            worker = Keyword.get(dictionary, :symphony_workstream)
+            cleanup = Keyword.get(dictionary, :symphony_cleanup)
+
+            (is_nil(worker) and is_nil(cleanup)) or
+              match?(%{run_id: id} when id == run.id, worker) or
+              match?(%{run_id: id} when id == run.id, cleanup)
+
+          _ ->
+            false
+        end
+      end)
+  end
+
+  defp start_merged_cleanup(state, run) do
+    kind = if run[:cleanup][:intent], do: :delete, else: :observe
+    run = if kind == :delete and run.cleanup[:delete_started] != true, do: put_in(run.cleanup[:delete_started], true), else: run
+    state = if run != durable_run(state, run.id), do: commit_workstream(state, run, run.cleanup.intent.id <> "/cleanup-delete-claimed", %{kind: :cleanup_delete_claimed}), else: state
+    owner = self()
+    token = "cleanup-" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+
+    opts =
+      Keyword.put(state.workstreams.opts, :on_cleanup_check, fn revision ->
+        GenServer.call(owner, {:workstream_cleanup_check, token, self(), revision})
+      end)
+
+    task =
+      Task.Supervisor.async_nolink(state.task_supervisor, fn ->
+        Process.put(:symphony_cleanup, %{run_id: run.id, token: token, kind: kind, intent_id: run[:cleanup][:intent][:id]})
+
+        receive do
+          :cleanup_start ->
+            result = if kind == :delete, do: WorkstreamCleanup.delete(run, opts), else: WorkstreamCleanup.prepare(run, opts)
+            {:merged_cleanup, token, result}
+        end
+      end)
+
+    job = %{pid: task.pid, ref: task.ref, run_id: run.id, kind: kind, fingerprint: WorkstreamCleanup.fingerprint(run)}
+    state = put_in(state.workstreams.cleanup.jobs[token], job)
+    send(task.pid, :cleanup_start)
+    state
+  end
+
+  defp accept_merged_cleanup(state, ref, token, result) do
+    case state.workstreams && state.workstreams.cleanup.jobs[token] do
+      %{ref: ^ref, run_id: id, kind: kind, fingerprint: fingerprint} ->
+        Process.demonitor(ref, [:flush])
+        state = update_in(state.workstreams.cleanup.jobs, &Map.delete(&1, token))
+        delay = Keyword.get(state.workstreams.opts, :cleanup_retry_ms, 60_000)
+        state = put_in(state.workstreams.cleanup[:retry_at], Map.put(state.workstreams.cleanup[:retry_at] || %{}, id, System.monotonic_time(:millisecond) + delay))
+        run = durable_run(state, id)
+
+        if run && WorkstreamCleanup.fingerprint(run) == fingerprint do
+          updated =
+            case {kind, result} do
+              {:observe, {:ok, intent}} -> WorkstreamCleanup.plan(run, intent)
+              {:observe, {:error, reason}} -> Map.put(run, :cleanup_observation_error, reason)
+              {:delete, outcome} -> WorkstreamCleanup.result(run, outcome)
+            end
+
+          if updated == run,
+            do: state,
+            else: commit_workstream(state, updated, "#{run.id}/cleanup-result/#{WorkstreamCleanup.fingerprint(updated)}", %{kind: :cleanup_reconciled, outcome: result})
+        else
+          state
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  defp merged_cleanup_down(%{workstreams: nil}, _ref), do: :unhandled
+
+  defp merged_cleanup_down(state, ref) do
+    case Enum.find(state.workstreams.cleanup.jobs, fn {_token, job} -> job.ref == ref end) do
+      {token, _job} -> {:handled, accept_merged_cleanup(state, ref, token, {:error, :cleanup_outcome_unknown})}
+      nil -> :unhandled
+    end
+  end
 
   defp queue_durable_workstream(%{workstreams: nil}, _event_id, _task_id, _path, _inputs, _opts), do: {:error, :durable_workstreams_disabled}
 
@@ -2448,11 +2624,12 @@ defmodule SymphonyElixir.Orchestrator do
          :ok <- check_workstream_definition(definition, opts),
          :ok <- database_outside_workspace(state.workstreams.store_path, workspace),
          :ok <- evidence_outside_workspace(workspace),
-         false <- Enum.any?(state.workstreams.runs, fn {_id, run} -> run.workspace == workspace end),
+         false <- Enum.any?(state.workstreams.runs, fn {_id, run} -> WorkstreamCleanup.overlaps?(run.workspace, workspace) end),
          {:ok, root} <- SymphonyElixir.PathSafety.canonicalize(opts[:workspace_root]),
          execution_opts = Keyword.put(opts, :workspace_root, root),
          {:ok, execution} <- WorkstreamRunner.pin_execution_context(execution_opts, workspace, definition) do
-      {:ok, WorkstreamRun.new(task_id, definition, workspace, execution_opts, execution)}
+      run = WorkstreamRun.new(task_id, definition, workspace, execution_opts, execution)
+      {:ok, if(cleanup_enabled?(state), do: WorkstreamCleanup.enroll(run), else: run)}
     else
       true -> {:error, :workspace_already_owned}
       false -> {:error, :invalid_workstream_execution_options}

@@ -25,7 +25,11 @@ defmodule SymphonyElixir.PublisherGithub do
           head_branch: String.t(),
           base_branch: String.t(),
           state: String.t(),
-          body: String.t() | nil
+          body: String.t() | nil,
+          merged: boolean() | nil,
+          merge_commit_sha: String.t() | nil,
+          merged_at: String.t() | nil,
+          merged_by: map() | nil
         }
 
   @spec validate_config(config()) :: :ok | {:error, term()}
@@ -527,6 +531,7 @@ defmodule SymphonyElixir.PublisherGithub do
          true <- valid_sha?(head_sha) or {:error, :invalid_pull_request_response},
          true <- is_nil(body) or is_binary(body) or {:error, :invalid_pull_request_response},
          true <- state in ["open", "closed"] or {:error, :invalid_pull_request_response},
+         true <- raw["merged"] in [nil, true, false] or {:error, :invalid_pull_request_response},
          true <- base_branch == "main" or {:error, :invalid_pull_request_response},
          true <- get_in(base, ["repo", "full_name"]) == @repo or {:error, :invalid_pull_request_response},
          true <-
@@ -540,7 +545,11 @@ defmodule SymphonyElixir.PublisherGithub do
          head_branch: head_branch,
          base_branch: base_branch,
          state: state,
-         body: body
+         body: body,
+         merged: raw["merged"],
+         merge_commit_sha: raw["merge_commit_sha"],
+         merged_at: raw["merged_at"],
+         merged_by: normalize_merger(raw["merged_by"])
        }}
     else
       {:error, _reason} = error -> error
@@ -549,6 +558,9 @@ defmodule SymphonyElixir.PublisherGithub do
   end
 
   defp normalize_pull_request(_raw), do: {:error, :invalid_pull_request_response}
+
+  defp normalize_merger(user) when is_map(user), do: Map.take(user, ["id", "login", "type"])
+  defp normalize_merger(_user), do: nil
 
   defp valid_head_repository?(nil), do: true
   defp valid_head_repository?(@repo), do: true

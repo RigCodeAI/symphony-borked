@@ -163,6 +163,11 @@ See [trusted publication](docs/trusted-publication.md) for App permissions, repl
 and the live acceptance boundary. This source increment does not claim an installed App
 or a completed Linear-to-PR deployment.
 
+DEV-241 adds opt-in idle cleanup using recorded directory ownership, fresh worker
+termination, the exact GitHub merge and a verified current archive. Legacy Linear
+terminal-state cleanup retains work. See [merged workspace cleanup](docs/merged-workspace-cleanup.md)
+for the read-only child-result proof, runtime requirements and remaining live gates.
+
 ## Upstream and license
 
 This fork builds on [OpenAI Symphony](https://github.com/openai/symphony).

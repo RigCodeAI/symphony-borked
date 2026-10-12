@@ -29,6 +29,40 @@ defmodule SymphonyElixir.Workspace do
       return info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode)
 
 
+  def birth_identity(fd):
+      # Inode numbers can be reused after a lost deletion response. Require the
+      # original creation time as well; mutable ctime/mtime cannot identify it.
+      if sys.platform.startswith("linux"):
+          import ctypes
+          import struct
+          libc = ctypes.CDLL(None, use_errno=True)
+          statx = getattr(libc, "statx", None)
+          if statx is None:
+              raise Rejected("ownership_identity_unavailable")
+          statx.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                           ctypes.c_uint, ctypes.c_void_p]
+          statx.restype = ctypes.c_int
+          data = ctypes.create_string_buffer(256)
+          # Linux statx UAPI: AT_EMPTY_PATH, STATX_BTIME; btime starts at byte 80.
+          if statx(fd, b"", 0x1000, 0x800, ctypes.byref(data)) != 0:
+              raise Rejected("ownership_identity_unavailable")
+          if not struct.unpack_from("=I", data.raw, 0)[0] & 0x800:
+              raise Rejected("ownership_identity_unavailable")
+          seconds, nanoseconds = struct.unpack_from("=qI", data.raw, 80)
+          if seconds <= 0 or nanoseconds >= 1000000000:
+              raise Rejected("ownership_identity_unavailable")
+          return seconds * 1000000000 + nanoseconds
+      if sys.platform == "darwin":
+          info = os.fstat(fd)
+          nanos = getattr(info, "st_birthtime_ns", None)
+          if nanos is not None:
+              return nanos
+          seconds = getattr(info, "st_birthtime", None)
+          if seconds is not None:
+              return int(seconds * 1000000000)
+      raise Rejected("ownership_identity_unavailable")
+
+
   def absence(path):
       # ENOENT is a no-op only if no dangling/looping ancestor link hides the path.
       try:
@@ -92,7 +126,7 @@ defmodule SymphonyElixir.Workspace do
               (sys.platform.startswith("linux") or sys.platform == "darwin"))
 
 
-  def remove(workspace, root, hook, timeout_ms, recorded):
+  def remove(workspace, root, hook, timeout_ms, recorded, action, expected):
       if not supported_runtime():
           raise Rejected("unsupported_python")
       requested = os.path.abspath(workspace)
@@ -112,7 +146,7 @@ defmodule SymphonyElixir.Workspace do
               raise Rejected("symlink_escape", requested, parent)
       if not physical_workspace.startswith(physical_root + os.sep):
           raise Rejected("outside_root", physical_workspace, physical_root)
-      if missing:
+      if missing and expected is None:
           return None
       # A configured root may be an alias. No link below it is followed.
       for prefix in (configured, physical_root):
@@ -132,9 +166,22 @@ defmodule SymphonyElixir.Workspace do
           allowed_mount = mount_identity(root_fd)
           parent, chain = parent_fd(stack, root_fd, parts[:-1], allowed_mount)
           name = parts[-1]
-          initial = os.stat(name, dir_fd=parent, follow_symlinks=False)
+          if expected is not None:
+              if (expected.get("configured_root") != physical_root or
+                      expected.get("root") != list(root_identity) or
+                      expected.get("root_birth") != birth_identity(root_fd) or
+                      expected.get("ancestors") != [list(item) for item in chain]):
+                  raise Rejected("recorded_identity_changed", requested, physical_root)
+          try:
+              initial = os.stat(name, dir_fd=parent, follow_symlinks=False)
+          except FileNotFoundError:
+              if missing and expected is not None and action == "remove":
+                  return None
+              raise
           if stat.S_ISLNK(initial.st_mode):
               raise Rejected("symlink_escape", requested, physical_root)
+          if expected is not None and expected.get("target") != list(identity(initial)):
+              raise Rejected("recorded_identity_changed", requested, physical_root)
           hook_result = None
           if stat.S_ISDIR(initial.st_mode):
               target_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
@@ -142,7 +189,15 @@ defmodule SymphonyElixir.Workspace do
               check_mount(target_fd, allowed_mount)
               if identity(os.fstat(target_fd)) != identity(initial):
                   raise Rejected("path_changed", requested, physical_root)
+              if expected is not None and expected.get("target_birth") != birth_identity(target_fd):
+                  raise Rejected("recorded_identity_changed", requested, physical_root)
               verify_tree(target_fd, allowed_mount)
+          if action == "inspect":
+              if not stat.S_ISDIR(initial.st_mode):
+                  raise Rejected("owned_directory_required", requested, physical_root)
+              return {"configured_root": physical_root, "root": list(root_identity),
+                      "root_birth": birth_identity(root_fd), "target_birth": birth_identity(target_fd),
+                      "ancestors": [list(item) for item in chain], "target": list(identity(initial))}
           if hook and stat.S_ISDIR(initial.st_mode):
               os.fchdir(target_fd)
               process = subprocess.Popen(["sh", "-lc", hook], start_new_session=True,
@@ -198,7 +253,8 @@ defmodule SymphonyElixir.Workspace do
   result = {"status": "error"}
   result["nonce"] = nonce
   try:
-      workspace, root, hook, timeout, recorded, nonce = sys.argv[1:]
+      workspace, root, hook, timeout, recorded, action, expected_json, nonce = sys.argv[1:]
+      expected = json.loads(expected_json)
       timeout_ms = int(timeout)
       if not supported_runtime():
           raise Rejected("unsupported_python")
@@ -206,8 +262,9 @@ defmodule SymphonyElixir.Workspace do
           raise Rejected("timeout")
       signal.signal(signal.SIGALRM, deadline)
       signal.setitimer(signal.ITIMER_REAL, (timeout_ms + 5000) / 1000)
-      hook_result = remove(workspace, root, hook, timeout_ms, recorded == "true")
-      result = {"status": "ok", "hook": hook_result, "nonce": nonce}
+      value = remove(workspace, root, hook, timeout_ms, recorded == "true", action, expected)
+      result = {"status": "ok", "nonce": nonce}
+      result["identity" if action == "inspect" else "hook"] = value
   except Rejected as error:
       result.update(reason=error.reason, workspace=error.workspace, root=error.root)
   except OSError as error:
@@ -323,6 +380,28 @@ defmodule SymphonyElixir.Workspace do
 
   def remove_recorded(workspace, _worker_host), do: {:error, {:workspace_path_unreadable, workspace, :invalid}, ""}
 
+  @doc "Records the physical directory identity before service-owned work begins."
+  @spec recorded_resource(Path.t(), worker_host()) :: {:ok, map()} | {:error, term(), String.t()}
+  def recorded_resource(workspace, host) do
+    case guarded_remove(workspace, host, true, false, "inspect") do
+      {:ok, identity} when is_map(identity) ->
+        {:ok, %{path: workspace, host: host, root: identity["configured_root"], identity: identity}}
+
+      {:error, _, _} = error ->
+        error
+
+      _ ->
+        {:error, :workspace_resource_unavailable, ""}
+    end
+  end
+
+  @doc "Removes only the previously recorded directory, using the current root guard."
+  @spec remove_owned(map()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
+  def remove_owned(%{path: path, host: host, identity: identity}) when is_map(identity),
+    do: guarded_remove(path, host, true, true, "remove", identity)
+
+  def remove_owned(_resource), do: {:error, :workspace_resource_unavailable, ""}
+
   @spec remove_issue_workspaces(term()) :: :ok | {:error, term(), String.t()}
   def remove_issue_workspaces(identifier), do: remove_issue_workspaces(identifier, nil)
 
@@ -364,7 +443,7 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp guarded_remove(workspace, host, recorded, run_hook? \\ true) do
+  defp guarded_remove(workspace, host, recorded, run_hook? \\ true, action \\ "remove", expected \\ nil) do
     settings = Config.settings!()
     root = if is_nil(host), do: Config.local_workspace_root(), else: settings.workspace.root
     hook = if run_hook?, do: settings.hooks.before_remove || "", else: ""
@@ -373,8 +452,8 @@ defmodule SymphonyElixir.Workspace do
 
     with :ok <- validate_removal_input(workspace),
          :ok <- validate_removal_input(root),
-         {:ok, {output, status}} <- run_remove_helper(workspace, root, hook, timeout, recorded, nonce, host) do
-      removal_result(output, status, workspace, host, nonce)
+         {:ok, {output, status}} <- run_remove_helper(workspace, root, hook, timeout, recorded, action, expected, nonce, host) do
+      removal_result(output, status, workspace, host, nonce, action)
     else
       {:error, reason} -> {:error, reason, ""}
     end
@@ -390,13 +469,13 @@ defmodule SymphonyElixir.Workspace do
 
   defp validate_removal_input(path), do: {:error, {:workspace_path_unreadable, path, :invalid}}
 
-  defp run_remove_helper(workspace, root, hook, timeout, recorded, nonce, nil) do
+  defp run_remove_helper(workspace, root, hook, timeout, recorded, action, expected, nonce, nil) do
     case System.find_executable("python3") do
       nil ->
         {:error, {:workspace_remove_unavailable, :python3_not_found}}
 
       python ->
-        args = ["-c", @remove_script, workspace, root, hook, to_string(timeout), to_string(recorded), nonce]
+        args = ["-c", @remove_script, workspace, root, hook, to_string(timeout), to_string(recorded), action, Jason.encode!(expected), nonce]
         port = Port.open({:spawn_executable, String.to_charlist(python)}, [:binary, :exit_status, :stderr_to_stdout, args: Enum.map(args, &String.to_charlist/1)])
         collect_removal_output(port, "", System.monotonic_time(:millisecond) + timeout + 6_000)
     end
@@ -404,7 +483,7 @@ defmodule SymphonyElixir.Workspace do
     _error in [ArgumentError, ErlangError] -> {:error, {:workspace_remove_unavailable, :python3_spawn_failed}}
   end
 
-  defp run_remove_helper(workspace, root, hook, timeout, recorded, nonce, host) when is_binary(host) do
+  defp run_remove_helper(workspace, root, hook, timeout, recorded, action, expected, nonce, host) when is_binary(host) do
     missing = @remove_marker <> Jason.encode!(%{status: "error", reason: "python3_not_found", nonce: nonce})
 
     script =
@@ -413,7 +492,7 @@ defmodule SymphonyElixir.Workspace do
         remote_shell_assign("workspace", workspace),
         remote_shell_assign("workspace_root", root),
         "command -v python3 >/dev/null 2>&1 || { printf '%s\\n' #{shell_escape(missing)}; exit 1; }",
-        "python3 -c #{shell_escape(@remove_script)} \"$workspace\" \"$workspace_root\" #{shell_escape(hook)} #{timeout} #{recorded} #{nonce}"
+        "python3 -c #{shell_escape(@remove_script)} \"$workspace\" \"$workspace_root\" #{shell_escape(hook)} #{timeout} #{recorded} #{shell_escape(action)} #{shell_escape(Jason.encode!(expected))} #{nonce}"
       ]
       |> Enum.join("\n")
 
@@ -451,7 +530,7 @@ defmodule SymphonyElixir.Workspace do
     ArgumentError -> :ok
   end
 
-  defp removal_result(output, status, workspace, host, nonce) do
+  defp removal_result(output, status, workspace, host, nonce, action) do
     results =
       if byte_size(output) <= 65_536 do
         Enum.flat_map(String.split(output, "\n"), fn line ->
@@ -469,6 +548,9 @@ defmodule SymphonyElixir.Workspace do
       end
 
     case results do
+      [%{"status" => "ok", "identity" => identity}] when status == 0 and action == "inspect" and is_map(identity) ->
+        {:ok, identity}
+
       [%{"status" => "ok"} = result] when status == 0 ->
         log_removal_hook(result["hook"], workspace, host)
         {:ok, []}

@@ -10,7 +10,7 @@ defmodule SymphonyElixir.WorkstreamStore do
   use GenServer
 
   alias Exqlite.Sqlite3
-  alias SymphonyElixir.{Config, Evidence}
+  alias SymphonyElixir.{BackupCapture, Config, Evidence}
 
   @busy_timeout_ms 100
   @directory_mode 0o700
@@ -67,7 +67,7 @@ defmodule SymphonyElixir.WorkstreamStore do
 
   defmodule State do
     @moduledoc false
-    defstruct [:path, :db, :owner, :owner_ref]
+    defstruct [:path, :db, :owner, :owner_ref, capture: nil]
   end
 
   @type run_map :: map()
@@ -189,6 +189,25 @@ defmodule SymphonyElixir.WorkstreamStore do
     end
   end
 
+  @doc "Common write predicate; check inside the same store callback as every mutation."
+  @spec capture_write_allowed?(map()) :: boolean()
+  def capture_write_allowed?(%State{capture: nil}), do: true
+  def capture_write_allowed?(_state), do: false
+
+  @doc "Holds all writes for an owner-authorized local capture worker."
+  @spec begin_capture(GenServer.server(), reference(), pid(), Path.t()) :: :ok | {:error, term()}
+  def begin_capture(server, token, worker, destination),
+    do: safe_call(server, {:capture_begin, token, worker, destination})
+
+  @spec snapshot_capture(GenServer.server(), reference()) :: {:ok, map()} | {:error, term()}
+  def snapshot_capture(server, token), do: GenServer.call(server, {:capture_snapshot, token}, :infinity)
+
+  @spec capture_inventory(GenServer.server(), reference()) :: {:ok, map()} | {:error, term()}
+  def capture_inventory(server, token), do: safe_call(server, {:capture_inventory, token})
+
+  @spec end_capture(GenServer.server(), reference()) :: :ok | {:error, term()}
+  def end_capture(server, token), do: GenServer.call(server, {:capture_end, token}, :infinity)
+
   @impl true
   def init(opts) do
     with {:ok, path} <- normalized_path(Keyword.fetch!(opts, :path)),
@@ -205,6 +224,48 @@ defmodule SymphonyElixir.WorkstreamStore do
   end
 
   @impl true
+  def handle_call({:capture_begin, token, worker, destination}, {caller, _}, %State{owner: caller, capture: nil} = state)
+      when is_reference(token) and is_pid(worker) and is_binary(destination) do
+    case query(state.db, "SELECT COUNT(*) FROM evidence_outbox") do
+      {:ok, [[0]]} -> {:reply, :ok, %{state | capture: %{token: token, worker: worker, destination: destination}}}
+      {:ok, _} -> {:reply, {:error, :capture_outbox_pending}, state}
+      _ -> {:reply, {:error, :capture_store_unavailable}, state}
+    end
+  end
+
+  def handle_call({:capture_begin, _token, _worker, _destination}, _from, state),
+    do: {:reply, {:error, :capture_not_authorized}, state}
+
+  def handle_call({:capture_snapshot, token}, {caller, _}, %State{capture: %{token: token, worker: caller, destination: path}} = state),
+    do: {:reply, BackupCapture.snapshot(state.db, path), state}
+
+  def handle_call({:capture_snapshot, _token}, _from, state), do: {:reply, {:error, :capture_not_authorized}, state}
+
+  def handle_call({:capture_inventory, token}, {caller, _}, %State{owner: caller, capture: %{token: token}} = state) do
+    reply =
+      with {:ok, runs} <- capture_ids(state.db, "SELECT run_id FROM runs ORDER BY run_id LIMIT 10001"),
+           {:ok, operations} <- capture_ids(state.db, "SELECT operation_id FROM operations ORDER BY operation_id LIMIT 10001"),
+           {:ok, deliveries} <- capture_ids(state.db, "SELECT delivery_id FROM linear_events ORDER BY delivery_id LIMIT 10001") do
+        {:ok, %{run_ids: runs, operation_ids: operations, linear_delivery_ids: deliveries}}
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:capture_inventory, _token}, _from, state), do: {:reply, {:error, :capture_not_authorized}, state}
+
+  def handle_call({:capture_end, token}, {caller, _}, %State{owner: caller, capture: %{token: token}} = state),
+    do: {:reply, :ok, %{state | capture: nil}}
+
+  def handle_call({:capture_end, _token}, _from, state), do: {:reply, {:error, :capture_not_authorized}, state}
+
+  # This guard is also required on future child-run commits. A separate client-side
+  # capture check cannot fence a write queued behind begin_capture.
+  def handle_call(message, _from, %State{capture: capture} = state)
+      when not is_nil(capture) and is_tuple(message) and
+             elem(message, 0) in [:commit, :linear_receive, :linear_commit, :linear_reassign, :linear_task, :acknowledge_evidence],
+      do: {:reply, {:error, :capture_in_progress}, state}
+
   def handle_call(:load, _from, %State{db: db} = state) do
     reply =
       with {:ok, rows} <- query(db, "SELECT payload FROM runs ORDER BY run_id"),
@@ -367,6 +428,14 @@ defmodule SymphonyElixir.WorkstreamStore do
   end
 
   @impl true
+  def handle_cast({:capture_settle, token}, %State{capture: %{token: token}, owner: owner} = state) do
+    send(owner, {:backup_capture_settled, token, :store, self()})
+    {:noreply, state}
+  end
+
+  def handle_cast(_message, state), do: {:noreply, state}
+
+  @impl true
   def handle_info({:DOWN, owner_ref, :process, owner, reason}, %State{owner_ref: owner_ref, owner: owner} = state) do
     {:stop, {:owner_down, reason}, state}
   end
@@ -402,6 +471,14 @@ defmodule SymphonyElixir.WorkstreamStore do
       end
     else
       {:error, :invalid_start_options}
+    end
+  end
+
+  defp capture_ids(db, sql) do
+    case query(db, sql) do
+      {:ok, rows} when length(rows) <= 10_000 -> {:ok, Enum.map(rows, fn [id] -> id end)}
+      {:ok, _} -> {:error, :capture_inventory_limit}
+      _ -> {:error, :capture_store_unavailable}
     end
   end
 

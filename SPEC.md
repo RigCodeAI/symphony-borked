@@ -2653,3 +2653,34 @@ Publish a durable PR link back to the Linear conversation and evidence links in 
 Human GitHub merge remains a separate boundary. Contract tests and source capability
 MUST NOT be described as live Linear/GCP/GitHub acceptance. See
 [trusted publication](docs/trusted-publication.md) for the operator plan and limits.
+
+## 23. Optional local owner capture
+
+The durable manual coordinator MAY expose a service-owned local capture action
+through trusted startup options. It MUST NOT expose capture to candidate code or
+treat it as restoration, publication, worker fencing or a gate verdict.
+
+Admission MUST reject active or unresolved workers, outgoing publication,
+cancellation, Linear activity and validation-check work. Terminal status alone
+does not prove an external operation settled. Cleanup-enabled capture MUST remain
+unavailable until its owner supplies the active/uncertain-job admission contract.
+
+The coordinator MUST hold advancement and reject new mutating calls without
+acknowledging unpersisted input. Both SQLite owners MUST enforce the same hold on
+their write handlers, including direct evidence producers and future child-run
+commits. The evidence outbox MUST be empty and the Evidence snapshots MUST match
+the saved runs before capture starts. The original exclusive Store owner MUST
+retain its connection and lock throughout capture.
+
+Snapshots MUST come from those existing connections into fixed private files
+outside issue workspaces. Completion MUST verify both standalone copies and
+record their digests, schema versions, included identities and evidence watermark
+before writing the local manifest last. Partial or altered captures MUST reject;
+an ID MUST NOT be reused for a different boundary. Stale tokens and caller timeout
+MUST NOT release a newer hold or an outstanding SQLite operation.
+
+The local manifest MUST say `restore_ready: false`. A release revision supplied
+by the operator MUST be identified as an operator pin, not proof of the deployed
+binary. Provider reconciliation, remote archival, old-writer fencing, compatible
+payload validation and a dispatch-held restore remain separate requirements.
+See [the capture source and qualification boundary](docs/dev-242-capture-barrier.md).

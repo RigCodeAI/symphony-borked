@@ -430,6 +430,12 @@ This project is licensed under the [Apache License 2.0](../LICENSE).
 
 ## Durable local workstreams
 
+The optional [local owner capture](../docs/dev-242-capture-barrier.md) is selected
+through trusted startup options, holds both database owners and rejects new
+mutations while copying. Its source passed compilation and 85 focused tests; its local
+manifest always reports `restore_ready: false`. No deployed capture/restore is
+configured by this increment.
+
 The existing orchestrator supports manually queued SQLite-backed local runs and human
 waits without tracker polling. Run the controlled recovery smoke from this directory:
 

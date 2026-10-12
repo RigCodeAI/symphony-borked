@@ -53,6 +53,32 @@ defmodule SymphonyElixir.WorkstreamStoreTest do
     assert [["same-event", "run-1"]] = database_rows(context.path, "SELECT event_id, run_id FROM events")
   end
 
+  test "owner capture holds every write, preserves rows and keeps exclusive ownership", context do
+    assert {:ok, store} = start_store(context.path)
+    snapshot_dir = Path.join(context.root, "capture")
+    File.mkdir!(snapshot_dir)
+    File.chmod!(snapshot_dir, 0o700)
+    target = Path.join(snapshot_dir, "state.sqlite")
+    original = run("run-1", "task-1")
+    assert :ok = WorkstreamStore.commit(store, original, "initial", %{kind: :queued})
+    token = make_ref()
+    assert :ok = WorkstreamStore.begin_capture(store, token, self(), target)
+    refute WorkstreamStore.capture_write_allowed?(:sys.get_state(store))
+    assert {:error, :capture_in_progress} = WorkstreamStore.commit(store, original, "later", %{kind: :queued})
+    assert {:error, :capture_in_progress} = WorkstreamStore.linear_receive(store, "delivery", %{kind: :created})
+    assert {:error, :capture_in_progress} = WorkstreamStore.linear_task(store, %{issue_id: "issue"})
+    assert {:error, :capture_in_progress} = WorkstreamStore.acknowledge_evidence(store, "initial")
+    assert {:error, :capture_not_authorized} = WorkstreamStore.end_capture(store, make_ref())
+    assert {:ok, %{schema: %{"user_version" => 3}}} = WorkstreamStore.snapshot_capture(store, token)
+    assert [["initial"]] = database_rows(target, "SELECT event_id FROM events")
+    assert {:error, {:database_ownership_conflict, _, _}} = start_store(context.path)
+    assert :ok = WorkstreamStore.end_capture(store, token)
+    assert WorkstreamStore.capture_write_allowed?(:sys.get_state(store))
+    assert :ok = WorkstreamStore.commit(store, original, "later", %{kind: :queued})
+    assert [["initial"]] = database_rows(target, "SELECT event_id FROM events")
+    assert :ok = GenServer.stop(store)
+  end
+
   test "loading a legacy run adds empty reply state without replacing pinned state", context do
     expected =
       run("run-1", "task-1")

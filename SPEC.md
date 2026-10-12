@@ -2747,3 +2747,43 @@ by the operator MUST be identified as an operator pin, not proof of the deployed
 binary. Provider reconciliation, remote archival, old-writer fencing, compatible
 payload validation and a dispatch-held restore remain separate requirements.
 See [the capture source and qualification boundary](docs/dev-242-capture-barrier.md).
+
+## 25. Independent review and same-PR repair
+
+Version-1 check stages MAY use `review_checkout` or `review_publication` evaluators.
+Both MUST reference an ancestor `github_validation` stage. A review agent MUST
+declare its `review_checkout_stage`; checkout, agent and publication references
+MUST form one normal success chain. Bounded review repair MAY return through the
+normal validation/publication path to a distinct Cloud Agent, with at most three
+completed unsuccessful review-fix rounds. Generic gate repair restrictions remain.
+
+The service MUST pin current PR/base/head and the exact rubric before creating a
+separate standalone reviewer checkout. It MUST start a separate conversation and
+retain its session independently from the Cloud Agent. Exact rubric JSON MUST be
+validated in full against the committed head-side diff. Malformed, stale or any
+unplaceable finding MUST block; no finding may be discarded to produce approval.
+
+A separate selected-repository review App MUST submit reviews with verified bot
+identity distinct from the PR author. Correct/no findings maps to APPROVE,
+incorrect maps to REQUEST_CHANGES, and correct/with findings maps to COMMENT.
+Actionable findings under any event MAY authorize repair. The service MUST verify
+the submitted head/verdict/body/author and every inline comment, with current trusted
+validation before and after submission. Replayed deliveries MUST reuse the stable
+review identity or block ambiguity. They MUST NOT create concurrent fixes.
+
+Review-authorized repair MUST retain the same run, PR, branch, original Cloud Agent
+definition and real publication history. The coordinator MUST append a sealed
+immutable candidate context and link each new attempt to it; previous execution
+pins, attempts and receipts MUST NOT be rewritten. The context MUST bind verified
+prior publication/review attempts, exact PR identity, trusted current-main validation
+base and the separate prior published head used for direct-parent transfer lineage.
+Signed validation identities MUST bind the new context. Cross-context receipts,
+context tampering or any main advance invalidate readiness; ancestry alone MUST NOT
+requalify a receipt for an old base. Legacy receipt identity shape remains unchanged.
+
+Only completed fix attempts consume review rounds. Transport retry, duplicate delivery,
+restart and model changes MUST NOT reset them. Disagreement, the three-round limit
+or invalid evidence MUST retain receipts and escalate to a human. Review approval,
+quality score and Linear replies MUST NOT authorize merge. Rig feedback ownership
+MUST be released as one coordinated cutover so one system owns factory branch fixes.
+See [the source contract and unqualified live boundaries](docs/review-repair.md).

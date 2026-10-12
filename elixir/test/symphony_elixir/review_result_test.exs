@@ -61,6 +61,18 @@ defmodule SymphonyElixir.ReviewResultTest do
     assert length(validated.locations) == 2
   end
 
+  test "validates remote reviewer paths against independently imported commits", %{workspace: workspace, base_sha: base_sha} do
+    head_sha = change_literal_file(workspace, "third changed\n")
+    reviewer_workspace = "/worker/reviews/one"
+    result = review_result([finding(Path.join(reviewer_workspace, @literal_path))])
+
+    assert {:ok, validated} = ReviewResult.validate(Jason.encode!(result), recorded_revision(base_sha, head_sha), revision(base_sha, head_sha), workspace, reviewer_workspace)
+    assert validated.locations == [%{path: @literal_path, start_line: 3, end_line: 3, side: :right}]
+
+    assert {:error, {:invalid_review_location, 0, :review_path_outside_workspace}} =
+             ReviewResult.validate(Jason.encode!(result), recorded_revision(base_sha, head_sha), revision(base_sha, head_sha), workspace, "/worker/reviews/two")
+  end
+
   test "accepts a clean result without changing its verdict", %{workspace: workspace, base_sha: base_sha} do
     result = review_result([], %{"overall_correctness" => "patch is incorrect"})
 

@@ -297,6 +297,7 @@ defmodule SymphonyElixir.Config.Schema do
     field(:evidence, :map, default: %{})
     field(:publisher, :map, default: %{})
     field(:validation_check, :map, default: %{})
+    field(:review, :map, default: %{})
     embeds_one(:tracker, Tracker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:polling, Polling, on_replace: :update, defaults_to_struct: true)
     embeds_one(:workspace, Workspace, on_replace: :update, defaults_to_struct: true)
@@ -390,7 +391,7 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp changeset(attrs) do
     %__MODULE__{}
-    |> cast(attrs, [:linear_delegation, :evidence, :publisher, :validation_check])
+    |> cast(attrs, [:linear_delegation, :evidence, :publisher, :validation_check, :review])
     |> cast_embed(:tracker, with: &Tracker.changeset/2)
     |> cast_embed(:polling, with: &Polling.changeset/2)
     |> cast_embed(:workspace, with: &Workspace.changeset/2)

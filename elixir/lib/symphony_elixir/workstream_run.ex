@@ -26,6 +26,11 @@ defmodule SymphonyElixir.WorkstreamRun do
                        workstream_cleanup.ex
                        service_check_completion.ex
                        workstream_outputs.ex
+                       candidate_context.ex
+                       review.ex
+                       review_github.ex
+                       review_workspace.ex
+                       review_result.ex
                        evidence.ex
                      )
 
@@ -100,6 +105,10 @@ defmodule SymphonyElixir.WorkstreamRun do
       continuation: nil,
       validation_repair_rounds: 0,
       review_repair_rounds: 0,
+      candidate_contexts: %{},
+      current_candidate_context_id: nil,
+      review_fix_completions: %{},
+      reviewer_sessions: %{},
       transport_retries: 0,
       retry_operation_id: nil,
       pending_wait: nil,
@@ -121,7 +130,8 @@ defmodule SymphonyElixir.WorkstreamRun do
       status: :executing,
       result: nil,
       gate: nil,
-      gate_detail: nil
+      gate_detail: nil,
+      candidate_context_id: Map.get(run, :current_candidate_context_id)
     }
 
     if stage.type == :human_wait do
@@ -143,8 +153,9 @@ defmodule SymphonyElixir.WorkstreamRun do
 
       %{run | status: :waiting_for_answer, phase: :waiting_for_answer, current_attempt_id: id, attempts: run.attempts ++ [%{attempt | status: :waiting}], pending_wait: wait}
     else
-      {inbox, inbox_messages} = if stage.type == :agent, do: assign_inbox(run.inbox, id), else: {run.inbox, []}
-      continuation = if stage.type == :agent, do: assign_continuation(run, id, inbox_messages), else: nil
+      cloud_agent = stage.type == :agent and not SymphonyElixir.Review.reviewer?(stage)
+      {inbox, inbox_messages} = if cloud_agent, do: assign_inbox(run.inbox, id), else: {run.inbox, []}
+      continuation = if cloud_agent, do: assign_continuation(run, id, inbox_messages), else: nil
       questions = if continuation, do: activate_continuation_questions(run.questions, stage.id, run.artifacts, id), else: run.questions
 
       attempt =
@@ -169,7 +180,7 @@ defmodule SymphonyElixir.WorkstreamRun do
       %{
         run
         | status: :executing,
-          phase: stage_phase(stage.type),
+          phase: review_phase(run, stage),
           current_attempt_id: id,
           attempts: run.attempts ++ [attempt],
           operations: Map.put(run.operations, id, operation),
@@ -205,23 +216,32 @@ defmodule SymphonyElixir.WorkstreamRun do
 
     case {stage.type, result} do
       {:agent, {:ok, value}} when is_map(value) ->
-        run = put_session(run, value)
-
-        if pending_inbox?(run) do
-          queue_inbox_continuation(run, value, stage.id)
+        if SymphonyElixir.Review.reviewer?(stage) do
+          sessions = Map.put(Map.get(run, :reviewer_sessions, %{}), run.current_attempt_id, Map.take(value, [:thread_id, :session_id, :workspace]))
+          run |> Map.put(:reviewer_sessions, sessions) |> put_outputs(stage, value) |> advance(stage.next)
         else
-          run |> put_outputs(stage, value) |> advance(stage.next)
+          run = run |> put_session(value) |> SymphonyElixir.CandidateContext.complete_fix(run.current_attempt_id)
+
+          cond do
+            value[:review_disagreement] == true or value["review_disagreement"] == true -> run |> put_outputs(stage, value) |> review_escalation(:cloud_agent_disagreement)
+            pending_inbox?(run) -> queue_inbox_continuation(run, value, stage.id)
+            true -> run |> put_outputs(stage, value) |> advance(stage.next)
+          end
         end
 
       {:check, _} ->
-        if gate == :passed do
-          {:ok, value} = result
-          run |> put_outputs(stage, value) |> advance(stage.gate.success)
+        if stage.gate[:evaluator] == :review_publication do
+          finish_review(run, stage, result, gate)
         else
-          if candidate_validation?(stage) do
-            candidate_validation_failure(run, stage)
+          if gate == :passed do
+            {:ok, value} = result
+            run |> put_outputs(stage, value) |> advance(stage.gate.success)
           else
-            repair_or_block(run, stage)
+            if candidate_validation?(stage) do
+              candidate_validation_failure(run, stage)
+            else
+              repair_or_block(run, stage)
+            end
           end
         end
 
@@ -235,6 +255,34 @@ defmodule SymphonyElixir.WorkstreamRun do
         advance(run, :blocked)
     end
   end
+
+  defp finish_review(run, stage, {:ok, review}, :passed) do
+    run = put_outputs(run, stage, review)
+
+    cond do
+      review["disagreement"] == true ->
+        review_escalation(run, :review_disagreement)
+
+      review["actionable"] == true and is_map(stage.gate.failure) ->
+        if run.review_repair_rounds < stage.gate.failure.max_attempts do
+          case SymphonyElixir.CandidateContext.authorize_repair(run, review) do
+            {:ok, authorized} -> authorized |> advance(stage.gate.failure.repair) |> Map.put(:phase, :fixing)
+            {:error, reason} -> review_escalation(run, reason)
+          end
+        else
+          review_escalation(run, :review_repair_limit_reached)
+        end
+
+      review["actionable"] == true or review["event"] == "REQUEST_CHANGES" ->
+        review_escalation(run, :review_requires_human)
+
+      true ->
+        advance(run, stage.gate.success)
+    end
+  end
+
+  defp finish_review(run, _stage, _result, _gate), do: review_escalation(run, :review_not_verified)
+  defp review_escalation(run, reason), do: run |> Map.put(:review_escalation, reason) |> advance(:blocked)
 
   @spec wait_answer(map(), String.t(), map()) :: {:ok, map()} | {:error, term()}
   def wait_answer(%{status: :waiting_for_answer, pending_wait: %{id: id}} = run, id, reply) when is_map(reply) do
@@ -991,6 +1039,28 @@ defmodule SymphonyElixir.WorkstreamRun do
   defp stage_phase(:publish), do: :publishing
   defp stage_phase(_type), do: :validating
 
+  defp review_phase(run, stage) do
+    cond do
+      SymphonyElixir.Review.reviewer?(stage) or SymphonyElixir.Review.service_stage?(stage) -> :reviewing
+      stage.type == :agent and Map.get(run, :current_candidate_context_id) -> :fixing
+      true -> stage_phase(stage.type)
+    end
+  end
+
+  defp finish_gate(run, %{type: :check, gate: %{evaluator: :review_checkout}} = stage, result) do
+    case SymphonyElixir.Review.verify_checkout(run, stage, result) do
+      :ok -> {result, :passed, %{verdict: :passed, verified: true}}
+      {:error, reason} -> {{:error, reason}, :failed, %{verdict: :failed, verified: false}}
+    end
+  end
+
+  defp finish_gate(run, %{type: :check, gate: %{evaluator: :review_publication}} = stage, result) do
+    case SymphonyElixir.Review.verify_completion(run, stage, result) do
+      :ok -> {result, :passed, %{verdict: :passed, verified: true}}
+      {:error, reason} -> {{:error, reason}, :failed, %{verdict: :failed, verified: false}}
+    end
+  end
+
   defp finish_gate(run, %{type: :check, gate: %{evaluator: :github_validation}} = stage, result) do
     case SymphonyElixir.ValidationCheck.verify_attested_completion(run, stage, result) do
       :ok -> {result, :passed, %{verdict: :passed, verified: true}}
@@ -1051,13 +1121,15 @@ defmodule SymphonyElixir.WorkstreamRun do
   end
 
   defp verify_candidate_result(run, stage, result) do
-    context = %{
-      task_id: run.task_id || "local",
-      run_id: run.id || "local",
-      attempt_id: run.current_attempt_id || "local",
-      base_sha: run.execution[:validation_base]
-    }
+    with {:ok, view} <- SymphonyElixir.CandidateContext.view(run, run.current_attempt_id),
+         {:ok, context} <- SymphonyElixir.CandidateContext.validation_context(run, run.current_attempt_id) do
+      verify_candidate_result(view, stage, result, context)
+    else
+      {:error, reason} -> failed_validation_result(result, reason)
+    end
+  end
 
+  defp verify_candidate_result(run, stage, result, context) do
     opts = [
       workspace: validation_workspace(run),
       validation_archive: run.execution[:validation_archive],

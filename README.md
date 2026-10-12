@@ -187,3 +187,8 @@ DEV-239 adds an App-owned `factory/validation` check and current-head readiness 
 See [trusted GitHub validation](docs/trusted-validation-check.md) for the separate
 App, validation-only PR path and approval-gated rollout. Source tests do not prove
 that Rig branch protection or the live validation path has been enabled.
+
+DEV-240's [review and repair source stages](docs/review-repair.md) use a separate
+checkout, conversation and App, with exact inline-result checks and append-only
+repair contexts on the same PR. App setup, live review quality and the Rig feedback
+ownership cutover still need qualification before deployment.

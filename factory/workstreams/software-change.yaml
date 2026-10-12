@@ -130,11 +130,41 @@ stages:
         - check: architecture-tests
           assertion: test_count
           equals: 1
-      success: candidate-ready
+      success: prepare-review
       failure: blocked
+  - id: prepare-review
+    type: check
+    inputs: [publication, github-validation]
+    outputs: [review-checkout]
+    gate:
+      evaluator: review_checkout
+      validation_stage: github-validation
+      success: review
+      failure: blocked
+  - id: review
+    type: agent
+    agent: default-review
+    review_checkout_stage: prepare-review
+    inputs: [review-checkout]
+    outputs: [review-result]
+    prompt: Review the recorded committed PR diff in this separate checkout. Follow the pinned rubric exactly and return only its JSON as one final message. Do not edit, fix, publish, or merge. Review approval cannot replace executable validation.
+    next: submit-review
+  - id: submit-review
+    type: check
+    inputs: [review-checkout, review-result, publication, github-validation]
+    outputs: [review-publication]
+    gate:
+      evaluator: review_publication
+      validation_stage: github-validation
+      checkout_stage: prepare-review
+      review_stage: review
+      success: candidate-ready
+      failure:
+        repair: implement
+        max_attempts: 3
   - id: candidate-ready
     type: human_wait
-    inputs: [publication, github-validation]
+    inputs: [publication, github-validation, review-publication]
     outputs: [answer]
-    prompt: The exact validated candidate has one linked Rig PR with permanent evidence. Human merge remains in GitHub; this reply completes only the configured workstream and does not authorize merging or cleanup.
+    prompt: The exact validated candidate has one linked Rig PR, permanent evidence, and a submitted review for its current head. Human merge remains in GitHub; this reply completes only the configured workstream and does not authorize merging or cleanup.
     next: complete

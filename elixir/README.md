@@ -521,3 +521,12 @@ permanent archival before reporting success or advancing a protected human wait.
 an enrolled ordinary PR. Its trusted `validation_pr` execution option names the PR;
 it launches no coding agent and publishes no branch. General Rig policy and live
 App/protection rollout remain gated. See [operator plan](../docs/trusted-validation-check.md).
+
+### Independent review and repair
+
+`review_checkout` and `review_publication` are service-owned check evaluators.
+The intervening agent declares `review_checkout_stage` and runs in the sealed
+separate checkout with a fresh conversation. Configure a distinct trusted `review`
+App reference outside workspace roots. Submitted findings authorize append-only
+same-run repair contexts; exact-head validation, three review rounds and human merge
+remain service boundaries. See [the source contract and live choices](../docs/review-repair.md).

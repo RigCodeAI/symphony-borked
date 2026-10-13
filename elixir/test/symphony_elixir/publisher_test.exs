@@ -29,6 +29,68 @@ defmodule SymphonyElixir.PublisherTest do
     end
   end
 
+  test "a missing pull request template uses a concise linked factory body with managed evidence" do
+    c = fixture(template: nil)
+    remote = start_remote()
+    Process.put(:publisher_test_remote, remote)
+
+    try do
+      assert {:ok, result} = Publisher.publish(c.run, c.publish_stage)
+      assert String.starts_with?(result.pr.body, "Linear: [DEV-238](https://linear.app/rigai/issue/DEV-238)")
+      assert result.pr.body =~ "<!-- factory-evidence:start -->"
+      assert result.pr.body =~ "| Required check | Result | Tested commit | Evidence |"
+      assert result.pr.body =~ "[open](https://evidence.example.test/tasks/fixture)"
+      assert %{pushes: 1, creates: 1, updates: 0} = Agent.get(remote, & &1)
+    after
+      Process.delete(:publisher_test_remote)
+      Agent.stop(remote)
+    end
+  end
+
+  test "an existing pull request template is retained in the created body" do
+    c = fixture()
+    remote = start_remote()
+    Process.put(:publisher_test_remote, remote)
+
+    try do
+      assert {:ok, result} = Publisher.publish(c.run, c.publish_stage)
+      assert String.starts_with?(result.pr.body, "Review notes\n\nLinear: [DEV-238](https://linear.app/rigai/issue/DEV-238)")
+      assert result.pr.body =~ "<!-- factory-evidence:start -->"
+      assert %{pushes: 1, creates: 1, updates: 0} = Agent.get(remote, & &1)
+    after
+      Process.delete(:publisher_test_remote)
+      Agent.stop(remote)
+    end
+  end
+
+  test "a real Git error reading a pinned pull request template is not treated as absence" do
+    c = fixture(remove_candidate_template: true)
+    blob_sha = git!(c.workspace, ["rev-parse", c.base_sha <> ":.github/pull_request_template.md"])
+
+    object_path =
+      Path.join([
+        c.workspace,
+        ".git",
+        "objects",
+        binary_part(blob_sha, 0, 2),
+        binary_part(blob_sha, 2, byte_size(blob_sha) - 2)
+      ])
+
+    assert :ok = File.rm(object_path)
+
+    remote = start_remote()
+    Process.put(:publisher_test_remote, remote)
+
+    try do
+      assert {:error, {:candidate_git_command_failed, "show", 128, message}} = Publisher.publish(c.run, c.publish_stage)
+      assert message =~ "bad object"
+      assert %{pushes: 1, creates: 0, updates: 0} = Agent.get(remote, & &1)
+    after
+      Process.delete(:publisher_test_remote)
+      Agent.stop(remote)
+    end
+  end
+
   test "a pending evidence upload blocks before branch or pull request mutations" do
     c = fixture(verified_upload: false)
     remote = start_remote()
@@ -711,8 +773,12 @@ defmodule SymphonyElixir.PublisherTest do
     git!(seed, ["init", "--quiet"])
     git!(seed, ["config", "user.name", "Candidate"])
     git!(seed, ["config", "user.email", "candidate@example.test"])
-    File.mkdir_p!(Path.join(seed, ".github"))
-    File.write!(Path.join(seed, ".github/pull_request_template.md"), "Review notes\n")
+
+    if is_binary(Keyword.get(opts, :template, "Review notes\n")) do
+      File.mkdir_p!(Path.join(seed, ".github"))
+      File.write!(Path.join(seed, ".github/pull_request_template.md"), Keyword.get(opts, :template, "Review notes\n"))
+    end
+
     File.write!(Path.join(seed, "README.md"), "base\n")
     git!(seed, ["add", "."])
     git!(seed, ["commit", "--quiet", "-m", "base"])
@@ -721,13 +787,20 @@ defmodule SymphonyElixir.PublisherTest do
     git!(root, ["clone", "--quiet", "--local", seed, workspace])
     git!(workspace, ["config", "user.name", "Candidate"])
     git!(workspace, ["config", "user.email", "candidate@example.test"])
+
+    if Keyword.get(opts, :remove_candidate_template, false) do
+      File.rm!(Path.join(workspace, ".github/pull_request_template.md"))
+      git!(workspace, ["add", "-A"])
+      git!(workspace, ["commit", "--quiet", "-m", "remove pull request template"])
+    end
+
     File.write!(Path.join(workspace, "README.md"), "candidate\n")
     git!(workspace, ["add", "README.md"])
     git!(workspace, ["commit", "--quiet", "-m", "candidate"])
     candidate_sha = git!(workspace, ["rev-parse", "HEAD"])
 
     policy_path = Path.join(root, "validation-policy.yaml")
-    File.write!(policy_path, policy_yaml())
+    File.write!(policy_path, policy_yaml(opts))
     assert {:ok, policy} = ValidationPolicy.load(policy_path, workspace)
     validation_archive = Path.join(root, "validation-archive")
     validation_scratch = Path.join(root, "validation-scratch")
@@ -986,7 +1059,12 @@ defmodule SymphonyElixir.PublisherTest do
     |> digest()
   end
 
-  defp policy_yaml do
+  defp policy_yaml(opts) do
+    paths =
+      if Keyword.get(opts, :remove_candidate_template, false),
+        do: "[README.md, .github/pull_request_template.md]",
+        else: "[README.md]"
+
     """
     version: 1
     revision: synthetic-publisher-contract-v1
@@ -998,7 +1076,7 @@ defmodule SymphonyElixir.PublisherTest do
         adapter: command
         command: [python3, -c, "pass"]
         timeout_ms: 5000
-        paths: [README.md]
+        paths: #{paths}
         result_format: exit_status
     """
   end

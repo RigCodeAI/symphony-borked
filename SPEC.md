@@ -170,6 +170,37 @@ fields only on the successor task; the old stopped run, task stop receipt, attem
 policy and other history remain intact. This exception MUST NOT admit native stop, undelegation,
 reassignment, stale retry, or any other stopped run.
 
+The specific DEV-259 follow-up MAY use `publisher_template_recovery` only after the qualified
+Publisher handles both supported pull-request-template paths as empty when neither exists at the
+pinned base commit. This transition is separate from the PublisherGit recovery above: it requires
+the original run8-to-run9 recovery lineage, an exact fresh signed retry for run9's failed
+`publish/16`, run9's own successful candidate-producer and validation attempts, a fresh terminated
+receipt for run8's exact worker operation, permanent archive verification, and an authenticated
+GitHub branch observation showing the exact candidate SHA with no pull request. The helper MUST
+verify that both template paths are absent at the pinned base; Git read errors or ambiguous
+template results MUST block.
+
+If this template-recovery run was stopped by the scope-check bug after a retry was rejected, it MAY
+proceed only when the task tombstone is the exact original handled `created` event for the same
+session and issue, at scope revision 3, with no assignment history or pending reassignment. The
+helper MUST reject any native stop, undelegation, issue update, reassignment or other task lifecycle
+event, then recheck the current signed route, delegation, assignee and session. The fresh exact-body
+retry must be persisted as `reply_rejected` and timestamped after both the original stop receipt and
+the earlier retry. Apply MUST preserve run9's stop receipt and history, clearing tombstone fields
+only in the successor task binding.
+
+Apply MUST leave runs8 and9, their policies, definitions, attempts, operations and receipts intact
+except for stopping run9 and linking it to one new successor. The new run MUST use the exact
+qualified current policy and the same task, issue, workspace, branch, candidate lineage, thread,
+session, controlled-review definition and repair counters. It starts with fresh attempt and
+operation collections at the local candidate-producer check, which MUST run again before normal
+validation and publication. The task binding and both successor journal events MUST change in the
+same Store transaction. Extra or unknown runs for the task, stale retry activity, changed remote
+head, existing pull request, live or unknown worker, missing evidence, or any other source or policy
+change MUST reject without writes. Stable activity-derived event IDs MUST replay the same
+successor after restart. This transition does not publish, start another coding agent, or rewrite
+either historical run's policy or evidence identity.
+
 DEV-235 extends native intake with optional `cloud_agents` entries for the two additional
 named cloud apps, sharing the backend, worker pool and workstream. Each identity has an
 exact organization/app-user/client tuple and a distinct signing secret; a valid signature

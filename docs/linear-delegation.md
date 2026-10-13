@@ -301,6 +301,49 @@ Restart the coordinator after apply. Stable activity-derived IDs make a repeated
 the same successor, including after it advances. The original Linear reply remains rejected;
 the new run continues through ordinary readiness and stage-authorization checks.
 
+## Missing pull-request-template recovery for DEV-259
+
+`SymphonyElixir.WorkstreamPublisherTemplateRecovery` is a separate one-shot transition for the
+qualified template failure on run `run-9b54a568bc22f61fca60a2b9327e44f8`. It requires a fresh
+persisted, authenticated retry for that run's failed `publish/16`. The helper verifies the full
+run8-to-run9 recovery journal, the exact terminated worker operation from run8, run9's own
+successful candidate-producer and validation evidence, the permanent archive, and authenticated
+GitHub state. The remote branch must still point to candidate
+`97219444e808b3bb55dc6717ddcb29cdeb687c04`, with no pull request. It also confirms that neither
+supported pull-request-template path exists at the pinned base commit. Missing Git data, another
+head, an existing pull request, a live or unknown worker, or stale Linear scope blocks the helper.
+If a scope check stopped run9 after the earlier retry was rejected, recovery is allowed only from
+the exact original handled `created` event preserved in the stopped task's tombstone. The helper
+requires scope revision 3, no reassignment or native lifecycle event, and a fresh `reply_rejected`
+retry timestamped after the stop receipt and earlier retry. It rechecks the current signed route,
+delegation, assignee and session. The old run and its stop receipt remain intact; only the successor
+task binding clears the tombstone.
+
+Stop the coordinator before plan and apply, and run under `factory-coordinator` with its protected
+service environment, loaded workflow and `Linear.OAuth` started. Use the newly persisted activity
+ID from the exact retry prompt; do not reuse the earlier run8 retry activity. The plan is read-only.
+Apply atomically stops run9, retains its history and policy, creates one successor under the
+qualified current policy, and updates the same Linear task binding. The successor keeps the task,
+issue, branch, workspace, thread, session, candidate lineage, controlled-review definition and
+repair counters. It starts at `local-commit`, with new attempt and operation history, so the
+candidate producer and validation run again. This action does not publish or start a coding agent.
+
+```elixir
+{:ok, config} = SymphonyElixir.Config.linear_delegation()
+
+request = [
+  store_path: config["store_path"],
+  linear_config: config,
+  run_id: "run-9b54a568bc22f61fca60a2b9327e44f8",
+  attempt_id: "run-9b54a568bc22f61fca60a2b9327e44f8/publish/16",
+  activity_id: "<fresh persisted rejected Linear activity UUID>",
+  operator: "<operator audit label>"
+]
+
+SymphonyElixir.WorkstreamPublisherTemplateRecovery.run(Keyword.put(request, :mode, :plan))
+SymphonyElixir.WorkstreamPublisherTemplateRecovery.run(Keyword.put(request, :mode, :apply))
+```
+
 ## Event and recovery behavior
 
 - `AgentSessionEvent` created: validate current ownership/session and routing, queue one run,

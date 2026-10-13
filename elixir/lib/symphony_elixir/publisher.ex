@@ -9,6 +9,7 @@ defmodule SymphonyElixir.Publisher do
 
   @begin "<!-- factory-evidence:start -->"
   @section_end "<!-- factory-evidence:end -->"
+  @pull_request_template_paths [".github/pull_request_template.md", ".github/PULL_REQUEST_TEMPLATE.md"]
 
   @doc "Pins non-secret publisher references outside candidate control."
   @spec pin(keyword(), Path.t(), map()) :: {:ok, map()} | {:error, term()}
@@ -332,9 +333,10 @@ defmodule SymphonyElixir.Publisher do
   defp push_unless_present(transport, config, workspace, sha, branch, remote_sha), do: transport.push(config, workspace, sha, branch, remote_sha)
 
   defp create_or_update(transport, config, run, stage, proof, nil, _opts) do
-    with {:ok, template} <- CandidateGit.run(proof.workspace, ["show", proof.manifest["base_sha"] <> ":.github/pull_request_template.md"]),
+    with {:ok, template} <- pull_request_template(proof.workspace, proof.manifest["base_sha"]),
          {:ok, section} <- summary(run, stage, proof),
-         {:ok, body} <- managed_body(template <> "\n\n" <> task_link(run), section) do
+         base_body = if(is_nil(template), do: task_link(run), else: template <> "\n\n" <> task_link(run)),
+         {:ok, body} <- managed_body(base_body, section) do
       transport.create_pr(config, branch(run), title(run), body)
     end
   end
@@ -343,6 +345,28 @@ defmodule SymphonyElixir.Publisher do
     with {:ok, section} <- summary(run, stage, proof),
          {:ok, body} <- managed_body(current.body, section) do
       if current.body == body, do: {:ok, current}, else: transport.update_pr(config, current.number, body, current.body)
+    end
+  end
+
+  defp pull_request_template(workspace, base_sha) do
+    with {:ok, paths} <-
+           CandidateGit.run(
+             workspace,
+             ["ls-tree", "-z", "--full-tree", "--name-only", base_sha, "--" | @pull_request_template_paths]
+           ),
+         {:ok, path} <- listed_pull_request_template(paths) do
+      case path do
+        nil -> {:ok, nil}
+        path -> CandidateGit.run(workspace, ["show", base_sha <> ":" <> path])
+      end
+    end
+  end
+
+  defp listed_pull_request_template(paths) do
+    case String.split(paths, <<0>>, trim: true) do
+      [] -> {:ok, nil}
+      [path] when path in @pull_request_template_paths -> {:ok, path}
+      _ -> {:error, :ambiguous_pull_request_template}
     end
   end
 

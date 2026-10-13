@@ -231,10 +231,21 @@ defmodule SymphonyElixir.WorkstreamPublisherTemplateRecovery do
 
           {%{id: id, stage: "publish", type: :publish, ordinal: 16, status: :completed, gate: :failed, gate_detail: %{"verdict" => "failed", "verified" => false}},
            %{id: operation_id, attempt_id: operation_attempt_id, stage: "publish", type: :publish, status: :completed} = operation, 16} ->
+            intent = operation[:publication_intent]
+            publication_id = if is_map(intent), do: intent[:publication_id], else: nil
+
+            observation = %{
+              status: :pending,
+              branch: @branch,
+              candidate_sha: @candidate_sha,
+              remote_sha: @candidate_sha,
+              pr: nil,
+              publication_id: publication_id
+            }
+
             id == operation_id and id == operation_attempt_id and id == @attempt_id and publication_failure?(attempt.result) and
-              is_map(operation[:publication_intent]) and
-              operation[:publication_observation]["remote_sha"] == @candidate_sha and
-              operation[:publication_observation]["pr"] == nil
+              is_map(intent) and intent[:branch] == @branch and intent[:candidate_sha] == @candidate_sha and
+              valid_digest?(publication_id) and operation[:publication_observation] === observation
 
           _ ->
             false

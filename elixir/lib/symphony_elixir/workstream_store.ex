@@ -2258,8 +2258,22 @@ defmodule SymphonyElixir.WorkstreamStore do
 
           {%{id: ^failed_id, stage: "publish", type: :publish, ordinal: 16, status: :completed, gate: :failed},
            %{id: ^failed_id, attempt_id: ^failed_id, stage: "publish", type: :publish, status: :completed} = operation, 16} ->
-            operation[:publication_intent] == intent and operation[:publication_observation]["remote_sha"] == intent[:candidate_sha] and
-              operation[:publication_observation]["pr"] == nil and operation[:publication_observation]["branch"] == intent[:branch]
+            publication_id = if is_map(intent), do: intent[:publication_id], else: nil
+
+            expected_observation =
+              if is_map(intent) do
+                %{
+                  status: :pending,
+                  branch: intent[:branch],
+                  candidate_sha: intent[:candidate_sha],
+                  remote_sha: intent[:candidate_sha],
+                  pr: nil,
+                  publication_id: publication_id
+                }
+              end
+
+            operation[:publication_intent] == intent and is_map(intent) and valid_digest?(publication_id) and
+              operation[:publication_observation] === expected_observation
 
           _ ->
             false

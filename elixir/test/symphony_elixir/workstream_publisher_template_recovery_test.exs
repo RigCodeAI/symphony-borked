@@ -272,6 +272,39 @@ defmodule SymphonyElixir.WorkstreamPublisherTemplateRecoveryTest do
     assert {:ok, %{run_id: ^successor_id}} = event(c.path, template_event_id(@stopped_activity_id, "successor"))
   end
 
+  test "rejects string-keyed or mismatched stopped-publication observations without writes", c do
+    for {variant, transform} <- [
+          {"string-keys", fn observation -> Map.new(observation, fn {key, value} -> {Atom.to_string(key), value} end) end},
+          {"missing-pr", &Map.delete(&1, :pr)},
+          {"changed-publication-id", &Map.put(&1, :publication_id, String.duplicate("9", 64))},
+          {"changed-branch", &Map.put(&1, :branch, "cycle/other")},
+          {"changed-status", &Map.put(&1, :status, :observed)}
+        ] do
+      activity_id = "template-observation-#{variant}"
+      c = eligible_context(c, activity_id: activity_id)
+      valid_observation = c.run.operations[@attempt_id].publication_observation
+      forged_observation = transform.(valid_observation)
+      forged_run = put_in(c.run, [:operations, @attempt_id, :publication_observation], forged_observation)
+
+      {:ok, store} = start_store(c.path)
+      assert :ok = WorkstreamStore.commit(store, forged_run, "forged-observation-#{variant}", %{kind: :fixture})
+      assert :ok = GenServer.stop(store)
+
+      before = File.read!(c.path)
+
+      assert {:error, :publisher_template_recovery_run_not_eligible} =
+               WorkstreamPublisherTemplateRecovery.run_with_probes(
+                 eligible_request(c, :plan),
+                 eligible_probes(c)
+               )
+
+      assert File.read!(c.path) == before
+      assert {:ok, unchanged_run} = fetch(c.path, @run_id)
+      assert unchanged_run == forged_run
+      assert :not_found = event(c.path, template_event_id(activity_id, "origin"))
+    end
+  end
+
   test "a native stop or changed original stop receipt blocks stopped-origin recovery", c do
     c = eligible_context(c, stopped: true, activity_id: @stopped_activity_id, retry_timestamp: @stopped_retry_timestamp)
     changed_event = Map.put(c.task.event, :timestamp, c.task.stop_timestamp + 1)
@@ -666,7 +699,14 @@ defmodule SymphonyElixir.WorkstreamPublisherTemplateRecoveryTest do
       |> Map.merge(%{
         status: :completed,
         publication_intent: intent,
-        publication_observation: %{"branch" => @branch, "remote_sha" => @candidate_sha, "pr" => nil}
+        publication_observation: %{
+          status: :pending,
+          branch: @branch,
+          candidate_sha: @candidate_sha,
+          remote_sha: @candidate_sha,
+          pr: nil,
+          publication_id: intent.publication_id
+        }
       })
 
     failed

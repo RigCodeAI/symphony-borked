@@ -214,6 +214,21 @@ defmodule SymphonyElixir.WorkstreamPublisherPortRecoveryTest do
     assert tasks[@issue_id].run_id == @run_id
   end
 
+  test "an unknown archive wait reason blocks recovery", c do
+    operation_id = @run_id <> "/publish/10"
+    unknown_reason_run = put_in(c.run, [:operations, operation_id, :reconciliation], ":unrecognized_archive_wait")
+    replace_run(c, unknown_reason_run)
+
+    assert {:error, :publisher_port_recovery_run_not_eligible} =
+             WorkstreamPublisherPortRecovery.run_with_probes(request(c, :plan), probes(c))
+
+    assert {:ok, unchanged} = fetch(c.path, @run_id)
+    assert unchanged == unknown_reason_run
+    assert :not_found = event(c.path, event_id(@activity_id, "origin"))
+    assert {:ok, %{tasks: tasks}} = linear(c.path)
+    assert tasks[@issue_id].run_id == @run_id
+  end
+
   test "active coordinator ownership prevents the maintenance helper from opening the store", c do
     {:ok, store} = start_store(c.path)
     bytes = File.read!(c.path)
@@ -346,7 +361,17 @@ defmodule SymphonyElixir.WorkstreamPublisherPortRecoveryTest do
 
         {
           %{id: id, stage: "publish", type: :publish, ordinal: ordinal, status: :interrupted, result: nil, gate: nil, gate_detail: nil, candidate_context_id: nil},
-          {id, %{id: id, attempt_id: id, stage: "publish", type: :publish, status: :not_applied, transport_retries: 0}}
+          {id,
+           %{
+             id: id,
+             attempt_id: id,
+             stage: "publish",
+             type: :publish,
+             ordinal: ordinal,
+             status: :not_applied,
+             reconciliation: ":validation_not_permanently_archived",
+             transport_retries: ordinal - 5
+           }}
         }
       end)
 

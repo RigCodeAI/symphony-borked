@@ -194,8 +194,10 @@ defmodule SymphonyElixir.WorkstreamPublisherPortRecovery do
           when operation_stage == attempt_stage and operation_type == attempt_type ->
             is_nil(operation[:reconciliation])
 
-          {%{id: ^id, status: :not_applied, attempt_id: ^id, type: :publish}, %{id: ^id, stage: "publish", type: :publish, status: :interrupted}} ->
-            is_nil(operation[:reconciliation]) and is_nil(operation[:publication_intent]) and
+          {%{id: ^id, status: :not_applied, attempt_id: ^id, type: :publish, ordinal: ordinal}, %{id: ^id, stage: "publish", type: :publish, status: :interrupted, ordinal: ordinal}}
+          when ordinal in 6..15 ->
+            operation[:reconciliation] == ":validation_not_permanently_archived" and
+              operation[:transport_retries] == ordinal - 5 and is_nil(operation[:publication_intent]) and
               is_nil(operation[:external_process])
 
           _ ->

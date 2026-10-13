@@ -194,9 +194,10 @@ defmodule SymphonyElixir.WorkstreamPublisherPortRecovery do
           when operation_stage == attempt_stage and operation_type == attempt_type ->
             is_nil(operation[:reconciliation])
 
-          {%{id: ^id, status: :not_applied, attempt_id: ^id, type: :publish, ordinal: ordinal}, %{id: ^id, stage: "publish", type: :publish, status: :interrupted, ordinal: ordinal}}
+          {%{id: ^id, status: :not_applied, attempt_id: ^id, stage: "publish", type: :publish}, %{id: ^id, stage: "publish", type: :publish, status: :interrupted, ordinal: ordinal}}
           when ordinal in 6..15 ->
-            operation[:reconciliation] == ":validation_not_permanently_archived" and
+            id == "#{run.id}/publish/#{ordinal}" and
+              operation[:reconciliation] == ":validation_not_permanently_archived" and
               operation[:transport_retries] == ordinal - 5 and is_nil(operation[:publication_intent]) and
               is_nil(operation[:external_process])
 
@@ -473,13 +474,13 @@ defmodule SymphonyElixir.WorkstreamPublisherPortRecovery do
 
       _ ->
         with {:ok, config} <- Config.evidence(),
-             %{uid: uid} <- File.stat!(config["root"]),
              %{snapshot: snapshot} <- Evidence.journal(run, %{}),
              {:reply, {:ok, archive}, _state} <-
                Evidence.handle_call(
                  {:publication_revision, snapshot, validation.attempt.id, validation.receipt, intent.evidence_revision},
                  nil,
-                 %{root: Path.expand(config["root"]), receipt_uid: uid}
+                 # Evidence receipts are issued by the root uploader (UID 0), regardless of root directory owner.
+                 %{root: Path.expand(config["root"]), receipt_uid: 0}
                ),
              true <- archive.revision == intent.evidence_revision and archive.validation_attempt_id == validation.attempt.id do
           {:ok, archive}

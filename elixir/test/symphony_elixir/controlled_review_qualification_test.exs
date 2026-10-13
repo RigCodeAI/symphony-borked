@@ -2,6 +2,7 @@ defmodule SymphonyElixir.ControlledReviewQualificationTest do
   use ExUnit.Case, async: true
 
   alias SymphonyElixir.{ControlledReviewQualification, Workstream}
+  alias SymphonyElixir.Linear.AgentMapping
 
   @repo_root Path.expand("../../..", __DIR__)
   @source_yaml Path.join(@repo_root, "factory/workstreams/software-change.yaml")
@@ -47,6 +48,33 @@ defmodule SymphonyElixir.ControlledReviewQualificationTest do
     assert {:ok, successor, _proof} = ControlledReviewQualification.successor_definition(old, new_path)
     assert ControlledReviewQualification.equivalent?(old, successor)
     assert old.agents == successor.agents
+  end
+
+  test "reconstructs an existing native cloud-agent binding", context do
+    assert {:ok, old} = AgentMapping.bind(load_old!(context.source_path), "default-cloud")
+    new_path = write_successor!(context, old)
+
+    assert {:ok, successor, proof} = ControlledReviewQualification.successor_definition(old, new_path)
+    assert successor.agent_selection == old.agent_selection
+    assert successor.stages[successor.entry].agent == "default-cloud"
+    assert successor.stages["implement"].agent == "default-cloud"
+    assert successor.stages["review"].agent == "default-review"
+    restored_stages = Map.update!(successor.stages, "review", &Map.put(&1, :prompt, old.stages["review"].prompt))
+    assert restored_stages == old.stages
+    assert ControlledReviewQualification.valid_transition?(old, successor, proof)
+  end
+
+  test "rejects a different or forged native cloud-agent binding", context do
+    assert {:ok, old} = AgentMapping.bind(load_old!(context.source_path), "high-effort-cloud")
+    new_path = write_successor!(context, old)
+    assert {:ok, parsed} = Workstream.load(new_path, old.input_values)
+    assert {:ok, differently_bound} = AgentMapping.bind(parsed, "daybreak-cloud")
+    refute ControlledReviewQualification.equivalent?(old, differently_bound)
+
+    forged_old = put_in(old.agent_selection.agent_id, "daybreak-cloud")
+
+    assert {:error, :invalid_controlled_review_binding} =
+             ControlledReviewQualification.successor_definition(forged_old, new_path)
   end
 
   test "rejects a parsed gate change even when the prompt append is exact", context do

@@ -4,6 +4,7 @@ defmodule SymphonyElixir.ControlledReviewQualification do
   loaded workstream setting and pinned resource unchanged.
   """
 
+  alias SymphonyElixir.Linear.AgentMapping
   alias SymphonyElixir.Workstream
 
   @instruction_path Path.expand("../../../factory/qualification/controlled-review-alpha-v1.md", __DIR__)
@@ -37,7 +38,8 @@ defmodule SymphonyElixir.ControlledReviewQualification do
   def successor_definition(old_definition, path) when is_map(old_definition) and is_binary(path) do
     with {:ok, _expected_path} <- source_path(old_definition),
          inputs when is_map(inputs) <- Map.get(old_definition, :input_values),
-         {:ok, new_definition} <- Workstream.load(path, inputs),
+         {:ok, parsed_definition} <- Workstream.load(path, inputs),
+         {:ok, new_definition} <- preserve_agent_selection(old_definition, parsed_definition),
          true <- equivalent?(old_definition, new_definition),
          {:ok, provenance} <- provenance(old_definition, new_definition) do
       {:ok, new_definition, provenance}
@@ -51,6 +53,24 @@ defmodule SymphonyElixir.ControlledReviewQualification do
   end
 
   def successor_definition(_old_definition, _path), do: {:error, :invalid_controlled_review_definition}
+
+  defp preserve_agent_selection(old_definition, parsed_definition) do
+    case Map.fetch(old_definition, :agent_selection) do
+      :error ->
+        {:ok, parsed_definition}
+
+      {:ok, %{agent_id: agent_id} = selection} when is_binary(agent_id) ->
+        with {:ok, bound_definition} <- AgentMapping.bind(parsed_definition, agent_id),
+             true <- bound_definition.agent_selection == selection do
+          {:ok, bound_definition}
+        else
+          _ -> {:error, :invalid_controlled_review_binding}
+        end
+
+      _ ->
+        {:error, :invalid_controlled_review_binding}
+    end
+  end
 
   @doc "Checks the exact prompt-only transition using loaded definitions and source receipts."
   @spec equivalent?(map(), map()) :: boolean()

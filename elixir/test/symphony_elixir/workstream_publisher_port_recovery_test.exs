@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.WorkstreamPublisherPortRecoveryTest do
   use ExUnit.Case, async: false
 
-  alias SymphonyElixir.{ControlledReviewQualification, Publisher, Workstream, WorkstreamRun, WorkstreamRunner, WorkstreamStore, WorkstreamPublisherPortRecovery}
+  alias SymphonyElixir.{ControlledReviewQualification, Evidence, Publisher, Workstream, WorkstreamRun, WorkstreamRunner, WorkstreamStore, WorkstreamPublisherPortRecovery}
 
   @issue_id "linear-issue-259"
   @activity_id "retry-publish-activity-259"
@@ -229,6 +229,30 @@ defmodule SymphonyElixir.WorkstreamPublisherPortRecoveryTest do
     assert tasks[@issue_id].run_id == @run_id
   end
 
+  test "Evidence validates root-owned publication receipts independently of the evidence-root owner", c do
+    {root, snapshot, attempt_id, validation_receipt, revision} = archived_validation_fixture!(c)
+    receipt_path = Path.join([root, "receipts", revision <> ".json"])
+    receipt_uid = File.stat!(receipt_path).uid
+
+    default_root = Path.join(c.root, "evidence-default")
+    default_config = %{"root" => default_root}
+    {:ok, evidence} = Evidence.start_link(config: {:ok, default_config}, name: nil)
+    assert :sys.get_state(evidence).receipt_uid == 0
+    assert :ok = GenServer.stop(evidence)
+
+    assert {:reply, {:ok, archive}, _state} =
+             Evidence.handle_call(
+               {:publication_revision, snapshot, attempt_id, validation_receipt, revision},
+               nil,
+               %{root: root, receipt_uid: receipt_uid}
+             )
+
+    assert archive.revision == revision
+    assert archive.validation_attempt_id == attempt_id
+    assert archive.manifest_sha256 == validation_receipt["manifest_sha256"]
+    if receipt_uid == 0, do: assert(File.stat!(root).uid != receipt_uid)
+  end
+
   test "active coordinator ownership prevents the maintenance helper from opening the store", c do
     {:ok, store} = start_store(c.path)
     bytes = File.read!(c.path)
@@ -355,26 +379,6 @@ defmodule SymphonyElixir.WorkstreamPublisherPortRecoveryTest do
 
     validation_receipt = %{"id" => String.duplicate("1", 64), "manifest_sha256" => String.duplicate("2", 64)}
 
-    interrupted_publications =
-      Enum.map(6..15, fn ordinal ->
-        id = @run_id <> "/publish/" <> Integer.to_string(ordinal)
-
-        {
-          %{id: id, stage: "publish", type: :publish, ordinal: ordinal, status: :interrupted, result: nil, gate: nil, gate_detail: nil, candidate_context_id: nil},
-          {id,
-           %{
-             id: id,
-             attempt_id: id,
-             stage: "publish",
-             type: :publish,
-             ordinal: ordinal,
-             status: :not_applied,
-             reconciliation: ":validation_not_permanently_archived",
-             transport_retries: ordinal - 5
-           }}
-        }
-      end)
-
     attempts =
       [
         %{
@@ -411,21 +415,7 @@ defmodule SymphonyElixir.WorkstreamPublisherPortRecoveryTest do
           gate: :passed,
           gate_detail: %{"verdict" => "passed"},
           candidate_context_id: nil
-        },
-        Enum.map(interrupted_publications, &elem(&1, 0)) ++
-          [
-            %{
-              id: @failed_attempt_id,
-              stage: "publish",
-              type: :publish,
-              ordinal: 16,
-              status: :completed,
-              result: %{status: :error, reason: "{:publication_completion_not_verified, :publication_completion_not_verified}"},
-              gate: :failed,
-              gate_detail: %{"verdict" => "failed", "verified" => false},
-              candidate_context_id: nil
-            }
-          ]
+        }
       ]
       |> List.flatten()
 
@@ -443,12 +433,126 @@ defmodule SymphonyElixir.WorkstreamPublisherPortRecoveryTest do
         },
         producer_id => %{id: producer_id, attempt_id: producer_id, stage: "local-commit", type: :check, status: :completed, transport_retries: 0},
         inspect_id => %{id: inspect_id, attempt_id: inspect_id, stage: "inspect-candidate", type: :check, status: :completed, transport_retries: 0},
-        validation_id => %{id: validation_id, attempt_id: validation_id, stage: "validate", type: :check, status: :completed, transport_retries: 0},
-        @failed_attempt_id => %{id: @failed_attempt_id, attempt_id: @failed_attempt_id, stage: "publish", type: :publish, status: :completed, transport_retries: 0, publication_intent: intent}
+        validation_id => %{id: validation_id, attempt_id: validation_id, stage: "validate", type: :check, status: :completed, transport_retries: 0}
       }
-      |> Map.merge(Map.new(interrupted_publications, &elem(&1, 1)))
 
-    %{run | attempts: attempts, operations: operations}
+    retry_base = %{
+      run
+      | status: :ready,
+        phase: :queued,
+        stage_id: "publish",
+        current_attempt_id: nil,
+        attempts: attempts,
+        operations: operations
+    }
+
+    retry_history =
+      Enum.reduce(6..15, retry_base, fn _ordinal, current ->
+        current
+        |> WorkstreamRun.start_stage()
+        |> WorkstreamRun.uncertain(:validation_not_permanently_archived)
+        |> WorkstreamRun.retry_transport()
+      end)
+
+    terminal_run = WorkstreamRun.start_stage(retry_history)
+
+    terminal_attempt = %{
+      id: @failed_attempt_id,
+      stage: "publish",
+      type: :publish,
+      ordinal: 16,
+      status: :completed,
+      result: %{status: :error, reason: "{:publication_completion_not_verified, :publication_completion_not_verified}"},
+      gate: :failed,
+      gate_detail: %{"verdict" => "failed", "verified" => false},
+      candidate_context_id: nil
+    }
+
+    attempts = Enum.map(terminal_run.attempts, fn attempt -> if attempt.id == @failed_attempt_id, do: Map.merge(attempt, terminal_attempt), else: attempt end)
+    terminal_operation = Map.merge(terminal_run.operations[@failed_attempt_id], %{status: :completed, publication_intent: intent})
+    operations = Map.put(terminal_run.operations, @failed_attempt_id, terminal_operation)
+
+    %{
+      terminal_run
+      | status: :blocked,
+        phase: :blocked,
+        stage_id: :blocked,
+        current_attempt_id: nil,
+        attempts: attempts,
+        operations: operations
+    }
+  end
+
+  defp archived_validation_fixture!(c) do
+    root = Path.join(c.root, "evidence-archive")
+    File.mkdir_p!(root)
+    File.chmod!(root, 0o777)
+
+    if File.stat!(root).uid == 0 do
+      assert :ok = File.chown(root, 1000)
+    end
+
+    attempt_id = @run_id <> "/validate/5"
+    payload = "archived validation manifest"
+    manifest_sha = digest(payload)
+    validation_receipt = %{"id" => "validation-upload-259", "manifest_sha256" => manifest_sha}
+
+    run =
+      Map.update!(c.run, :attempts, fn attempts ->
+        Enum.map(attempts, fn attempt ->
+          if attempt.id == attempt_id do
+            put_in(attempt, [:result, :evidence, "receipt"], validation_receipt)
+          else
+            attempt
+          end
+        end)
+      end)
+
+    snapshot = Evidence.journal(run, %{}).snapshot
+    artifact_name = "artifact-#{manifest_sha}.txt"
+
+    events = [
+      %{"kind" => "validation_imported", "attempt_id" => attempt_id, "manifest_sha256" => manifest_sha},
+      %{
+        "kind" => "artifact",
+        "attempt_id" => attempt_id,
+        "label" => "validation/#{attempt_id}/manifest.json",
+        "source_sha256" => manifest_sha,
+        "name" => artifact_name
+      }
+    ]
+
+    files = [
+      {"snapshot.json", Jason.encode!(snapshot)},
+      {"events.jsonl", Enum.map_join(events, "\n", &Jason.encode!/1) <> "\n"},
+      {"transcript.txt", "archived validation evidence"},
+      {artifact_name, payload}
+    ]
+
+    artifacts = Enum.map(files, fn {name, bytes} -> %{"name" => name, "sha256" => digest(bytes), "bytes" => byte_size(bytes)} end)
+    manifest = %{"version" => 1, "task_id" => snapshot["task_id"], "run_id" => snapshot["id"], "artifacts" => artifacts}
+    manifest_bytes = Jason.encode!(manifest)
+    revision = digest(manifest_bytes)
+    bundle = Path.join([root, "bundles", revision])
+    File.mkdir_p!(bundle)
+    Enum.each(files, fn {name, bytes} -> File.write!(Path.join(bundle, name), bytes) end)
+    File.write!(Path.join(bundle, "manifest.json"), manifest_bytes)
+
+    receipt = %{
+      "version" => 1,
+      "status" => "verified",
+      "run_id" => snapshot["id"],
+      "revision" => revision,
+      "manifest_sha256" => revision,
+      "artifacts" => artifacts
+    }
+
+    receipt_dir = Path.join(root, "receipts")
+    File.mkdir_p!(receipt_dir)
+    File.write!(Path.join(receipt_dir, revision <> ".json"), Jason.encode!(receipt))
+    File.chmod!(Path.join(receipt_dir, revision <> ".json"), 0o640)
+
+    {root, snapshot, attempt_id, validation_receipt, revision}
   end
 
   defp workstream_definitions(root) do

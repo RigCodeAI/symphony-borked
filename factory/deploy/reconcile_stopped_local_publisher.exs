@@ -10,6 +10,7 @@ defmodule SymphonyElixir.Factory.ReconcileStoppedLocalPublisher do
   @unit "factory-coordinator.service"
   @user "factory-coordinator"
   @executor "ec8ae546aeb408243529f96a1a7048c92d4a61bbe268eee6decbccfb169f4c22"
+  @publisher_port_fix_executor "30c942265ee1c5b9e40f6ff36ee6dab2bbdb11b398c11bf11aae2ae27f5177c1"
   @legacy_executor "505e0686567846995558b576a12f5e63a1edf2cfdd0e2a285e890683a9d15179"
   @policy %{
     version: 1,
@@ -25,7 +26,7 @@ defmodule SymphonyElixir.Factory.ReconcileStoppedLocalPublisher do
   def reconcile(store, expected, opts \\ []) do
     probe = Keyword.get(opts, :probe, &probe_host/1)
 
-    with true <- WorkstreamRun.policy() == Map.put(@policy, :executor_sha256, @executor),
+    with true <- supported_source_policy?(WorkstreamRun.policy()),
          {:ok, _} <- Config.evidence(),
          {:ok, run} <- WorkstreamStore.fetch(store, expected.run_id),
          :ok <- target_matches(run, expected),
@@ -46,6 +47,15 @@ defmodule SymphonyElixir.Factory.ReconcileStoppedLocalPublisher do
   rescue
     _ -> {:error, :local_publisher_reconciliation_failed}
   end
+
+  @doc false
+  @spec supported_source_policy?(map()) :: boolean()
+  def supported_source_policy?(policy) when is_map(policy) do
+    policy == Map.put(@policy, :executor_sha256, @executor) or
+      policy == Map.put(@policy, :executor_sha256, @publisher_port_fix_executor)
+  end
+
+  def supported_source_policy?(_policy), do: false
 
   defp target_matches(run, expected) do
     operation = run.operations[run.current_attempt_id]

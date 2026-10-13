@@ -5,7 +5,8 @@ defmodule SymphonyElixir.StoppedLocalPublisherTest do
   alias SymphonyElixir.{AgentRuntimeSupervisor, WorkstreamRun, WorkstreamRunner, WorkstreamStore}
   alias SymphonyElixir.Factory.ReconcileStoppedLocalPublisher, as: Maintenance
 
-  @executor "ec8ae546aeb408243529f96a1a7048c92d4a61bbe268eee6decbccfb169f4c22"
+  @old_executor "ec8ae546aeb408243529f96a1a7048c92d4a61bbe268eee6decbccfb169f4c22"
+  @current_executor "30c942265ee1c5b9e40f6ff36ee6dab2bbdb11b398c11bf11aae2ae27f5177c1"
   @legacy_executor "505e0686567846995558b576a12f5e63a1edf2cfdd0e2a285e890683a9d15179"
   @definition Path.expand("../fixtures/workstream_capacity/without-wait.yaml", __DIR__)
 
@@ -87,7 +88,8 @@ defmodule SymphonyElixir.StoppedLocalPublisherTest do
   end
 
   test "a live original publisher reserves the only slot; confirmed termination admits the same queued run", c do
-    assert WorkstreamRun.policy().executor_sha256 == @executor
+    assert WorkstreamRun.policy().executor_sha256 == @current_executor
+    assert Maintenance.supported_source_policy?(WorkstreamRun.policy())
     runtime = runtime(c)
     assert {:ok, %{status: :ready, attempts: []}} = Orchestrator.workstream_state(runtime.coordinator, c.queued.id)
     refute_receive {:admitted, _, _, _}, 150
@@ -120,6 +122,17 @@ defmodule SymphonyElixir.StoppedLocalPublisherTest do
     assert {:ok, %{status: :stopped, cancellation: %{termination: :terminated}}} = Orchestrator.workstream_state(runtime.coordinator, c.stopped.id)
     refute_receive {:publisher_write, _}, 100
     refute_receive {:admitted, _, _, _}, 100
+  end
+
+  test "runtime policy compatibility admits only the two exact reviewed source maps" do
+    current = WorkstreamRun.policy()
+    old = Map.put(current, :executor_sha256, @old_executor)
+
+    assert Maintenance.supported_source_policy?(old)
+    assert Maintenance.supported_source_policy?(current)
+    refute Maintenance.supported_source_policy?(Map.put(current, :executor_sha256, String.duplicate("0", 64)))
+    refute Maintenance.supported_source_policy?(Map.put(current, :lifecycle_sha256, String.duplicate("1", 64)))
+    refute Maintenance.supported_source_policy?(Map.put(current, :unexpected, true))
   end
 
   test "duplicate offline confirmation survives store restart with one event and outbox record", c do

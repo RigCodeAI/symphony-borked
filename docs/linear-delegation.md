@@ -249,6 +249,15 @@ terminated `implement/2` worker operation, the unchanged candidate commit, prior
 gates, permanent validation evidence, GitHub App access, and the absence of a remote branch
 and pull request. It fails closed if any proof is missing, stale or different.
 
+For this same run only, the helper also accepts a fresh prompt recorded as `ignored_after_stop`
+when a service scope-check stopped the task after an earlier rejected retry. The stop tombstone
+must point to the task's exact initial handled `created` event, with the original scope revision
+and no assignment history. Any persisted native stop, undelegation, issue update or other
+assignment event rejects recovery. The new activity and delivery IDs must be distinct, and its
+timestamp must be later than the stop and every earlier matching retry. The helper repeats the
+live route, delegation, assignee, session and publisher proof checks. Apply clears stop fields
+only on the successor task; the original stop receipt, old run, and history remain preserved.
+
 Stop the coordinator before both plan and apply. Run as `factory-coordinator` with the
 protected service environment and current workflow loaded. A standalone `mix run --no-start`
 process must start the required OTP applications, load the Symphony modules and workflow, and

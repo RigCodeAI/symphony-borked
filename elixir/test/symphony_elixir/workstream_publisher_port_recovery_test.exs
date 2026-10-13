@@ -5,6 +5,7 @@ defmodule SymphonyElixir.WorkstreamPublisherPortRecoveryTest do
 
   @issue_id "linear-issue-259"
   @activity_id "retry-publish-activity-259"
+  @fresh_activity_id "retry-publish-activity-259-after-stop"
   @run_id "run-259-publisher"
   @failed_attempt_id @run_id <> "/publish/16"
   @app_user_id "linear-app-user-1"
@@ -199,6 +200,115 @@ defmodule SymphonyElixir.WorkstreamPublisherPortRecoveryTest do
              WorkstreamPublisherPortRecovery.run_with_probes(request(c, :plan), probes(c))
   end
 
+  test "a fresh post-stop retry queues one successor and clears only the successor tombstone", c do
+    c = stopped_context(c)
+    probes = probes(c)
+    request = request_for_activity(c, :plan, @fresh_activity_id)
+
+    assert {:ok, %{status: :planned, stage: "local-commit"}} =
+             WorkstreamPublisherPortRecovery.run_with_probes(request, probes)
+
+    assert {:ok, %{status: :queued, successor_run_id: successor_id}} =
+             WorkstreamPublisherPortRecovery.run_with_probes(Keyword.put(request, :mode, :apply), probes)
+
+    assert {:ok, old_after} = fetch(c.path, @run_id)
+    assert old_after.status == :stopped
+    assert old_after.phase == :stopped
+    assert old_after.stage_id == :blocked
+    assert old_after.policy == @old_policy
+    assert old_after.attempts == c.run.attempts
+    assert old_after.operations == c.run.operations
+    assert old_after.recovery_successor_run_id == successor_id
+
+    assert {:ok, successor} = fetch(c.path, successor_id)
+    assert successor.status == :ready
+    assert successor.stage_id == "local-commit"
+
+    assert {:ok, %{tasks: tasks, events: events}} = linear(c.path)
+    successor_task = tasks[@issue_id]
+    assert successor_task.run_id == successor_id
+    assert successor_task.status == :acknowledged
+    assert successor_task.scope_revision == 2
+    assert is_nil(successor_task.stop_event_id)
+    assert is_nil(successor_task.stop_timestamp)
+    assert successor_task.event == c.task.event
+    assert events[c.source_record.id] == c.source_record
+    assert events[c.record.id] == c.record
+    assert events[c.fresh_record.id] == c.fresh_record
+
+    assert {:ok, %{run_id: @run_id, event: origin}} = event(c.path, event_id(@fresh_activity_id, "origin"))
+    assert origin.service_stop_provenance.event_id == c.source_record.id
+    assert origin.service_stop_provenance.timestamp == c.task.stop_timestamp
+
+    assert {:ok, %{status: :already_applied, successor_run_id: ^successor_id}} =
+             WorkstreamPublisherPortRecovery.run_with_probes(Keyword.put(request, :mode, :apply), %{linear_scope: fn _, _ -> {:error, :stale} end})
+  end
+
+  test "stopped-origin recovery rejects the old activity and a retry not newer than its receipt", c do
+    c = stopped_context(c, "stale-retry")
+
+    assert {:error, :publisher_port_recovery_not_authorized} =
+             WorkstreamPublisherPortRecovery.run_with_probes(request(c, :plan), probes(c))
+
+    same_timestamp = stopped_context(c, "same-timestamp", fresh_timestamp: c.record.event.timestamp)
+
+    assert {:error, :publisher_port_recovery_not_authorized} =
+             WorkstreamPublisherPortRecovery.run_with_probes(
+               request_for_activity(same_timestamp, :plan, @fresh_activity_id),
+               probes(same_timestamp)
+             )
+  end
+
+  test "stopped-origin recovery rejects native stop, undelegation, issue update, and reassignment evidence", c do
+    events = [
+      %{
+        id: "native-stop-delivery",
+        kind: :stop,
+        reason: :stop_signal,
+        issue_id: @issue_id,
+        session_id: "linear-session-259",
+        timestamp: 1_800_000_003_000
+      },
+      %{
+        id: "undelegation-delivery",
+        kind: :stop,
+        reason: :undelegated,
+        issue_id: @issue_id,
+        session_id: nil,
+        timestamp: 1_800_000_004_000
+      },
+      %{
+        id: "issue-update-delivery",
+        kind: :issue_updated,
+        issue_id: @issue_id,
+        session_id: nil,
+        timestamp: 1_800_000_005_000
+      },
+      %{
+        id: "reassignment-delivery",
+        kind: :created,
+        issue_id: @issue_id,
+        session_id: "new-session-259",
+        timestamp: 1_800_000_006_000
+      }
+    ]
+
+    for {lifecycle_event, index} <- Enum.with_index(events) do
+      c = stopped_context(c, "lifecycle-#{index}")
+      persist_lifecycle_event(c, lifecycle_event)
+
+      assert {:error, :publisher_port_recovery_not_authorized} =
+               WorkstreamPublisherPortRecovery.run_with_probes(
+                 request_for_activity(c, :plan, @fresh_activity_id),
+                 probes(c)
+               )
+
+      assert {:ok, unchanged} = fetch(c.path, @run_id)
+      assert unchanged == c.run
+      assert :not_found = event(c.path, event_id(@fresh_activity_id, "origin"))
+    end
+  end
+
   test "an unknown earlier publication operation blocks recovery", c do
     operation_id = @run_id <> "/publish/10"
     unknown_run = put_in(c.run, [:operations, operation_id, :status], :unknown)
@@ -315,6 +425,90 @@ defmodule SymphonyElixir.WorkstreamPublisherPortRecoveryTest do
     assert :ok = WorkstreamStore.commit(store, c.run, "initial-run", %{kind: :fixture_run})
     assert :ok = WorkstreamStore.linear_receive(store, c.record.id, c.record.event)
     assert :ok = WorkstreamStore.linear_commit(store, c.record, c.task)
+    assert :ok = GenServer.stop(store)
+  end
+
+  defp stopped_context(c, suffix \\ "stopped", opts \\ []) do
+    path = Path.join([c.root, "stopped-cases", suffix, "state.sqlite3"])
+    File.mkdir_p!(Path.dirname(path))
+    config = Map.put(c.config, "store_path", path)
+
+    source_event = %{
+      id: "created-assignment-#{suffix}",
+      kind: :created,
+      issue_id: @issue_id,
+      session_id: "linear-session-259",
+      verified_app_user_id: @app_user_id,
+      app_user_id: @app_user_id,
+      oauth_client_id: @oauth_client_id,
+      organization_id: @organization_id,
+      activity_id: nil,
+      timestamp: 1_799_000_000_000
+    }
+
+    source_record = %{id: source_event.id, event: source_event, status: :handled}
+    stopped_run = %{c.run | status: :stopped, phase: :stopped, stage_id: :blocked}
+
+    stopped_task =
+      Map.merge(c.task, %{
+        status: :stopped,
+        event: source_event,
+        app_user_id: @app_user_id,
+        oauth_client_id: @oauth_client_id,
+        stop_event_id: source_event.id,
+        stop_timestamp: source_event.timestamp,
+        scope_revision: 1,
+        assignment_history: [],
+        pending_reassignment: nil,
+        blocked_reassignment: nil
+      })
+
+    stale_record = Map.put(c.record, :status, :reply_rejected)
+    fresh_timestamp = Keyword.get(opts, :fresh_timestamp, 1_800_000_002_000)
+
+    fresh_event =
+      Map.merge(c.record.event, %{
+        id: "fresh-retry-delivery-#{suffix}",
+        timestamp: fresh_timestamp,
+        activity_id: @fresh_activity_id,
+        signal: nil
+      })
+
+    fresh_record = %{id: fresh_event.id, event: fresh_event, status: :ignored_after_stop}
+
+    context =
+      Map.merge(c, %{
+        path: path,
+        config: config,
+        run: stopped_run,
+        task: stopped_task,
+        record: stale_record,
+        source_record: source_record,
+        fresh_record: fresh_record
+      })
+
+    seed_stopped(context)
+    context
+  end
+
+  defp seed_stopped(c) do
+    {:ok, store} = start_store(c.path)
+    assert :ok = WorkstreamStore.commit(store, c.run, "stopped-origin-#{System.unique_integer([:positive])}", %{kind: :fixture_stopped_run})
+    persist_linear_record(store, c.source_record, c.task)
+    persist_linear_record(store, c.record, nil)
+    persist_linear_record(store, c.fresh_record, nil)
+    assert :ok = GenServer.stop(store)
+  end
+
+  defp persist_linear_record(store, record, task) do
+    assert :ok = WorkstreamStore.linear_receive(store, record.id, record.event)
+    assert :ok = WorkstreamStore.linear_commit(store, record, task)
+  end
+
+  defp persist_lifecycle_event(c, event) do
+    record = %{id: event.id, event: event, status: :handled}
+    {:ok, store} = start_store(c.path)
+    persist_linear_record(store, record, nil)
     assert :ok = GenServer.stop(store)
   end
 
@@ -654,13 +848,17 @@ defmodule SymphonyElixir.WorkstreamPublisherPortRecoveryTest do
   end
 
   defp request(c, mode) do
+    request_for_activity(c, mode, @activity_id)
+  end
+
+  defp request_for_activity(c, mode, activity_id) do
     [
       mode: mode,
       store_path: c.path,
       linear_config: c.config,
       run_id: @run_id,
       attempt_id: @failed_attempt_id,
-      activity_id: @activity_id,
+      activity_id: activity_id,
       operator: "adam"
     ]
   end

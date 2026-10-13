@@ -153,9 +153,13 @@ defmodule SymphonyElixir.WorkstreamPublisherPortRecovery do
     expected_attempt_id = run.id <> "/publish/16"
     policy_source = publisher_source_sha256()
 
+    valid_origin_state =
+      {run.status, run.phase} in [{:blocked, :blocked}, {:stopped, :stopped}] and
+        (run.status != :stopped or is_nil(run[:recovery_successor_run_id]))
+
     eligible =
       args.attempt_id == expected_attempt_id and run.id == args.run_id and
-        run.status == :blocked and run.phase == :blocked and run.stage_id == :blocked and
+        valid_origin_state and run.stage_id == :blocked and
         is_nil(run.current_attempt_id) and is_nil(run.retry_operation_id) and
         run.policy == @old_policy and WorkstreamRun.policy() == @new_policy and
         policy_source == @new_publisher_git_sha256 and
@@ -259,10 +263,10 @@ defmodule SymphonyElixir.WorkstreamPublisherPortRecovery do
   end
 
   defp authorize(records, run, args, probes) do
-    with {:ok, record} <- rejected_activity(records.events, args),
-         {:ok, task} <- current_task(records.tasks, run),
+    with {:ok, task, stop_record} <- current_task(records, run, args.linear_config),
+         {:ok, record} <- authorized_activity(records.events, run, task, stop_record, args),
          {:ok, route, issue} <- current_linear_scope(record.event, task, args.linear_config, probes) do
-      {:ok, %{record: record, task: task, route: route, issue: issue}}
+      {:ok, %{record: record, task: task, stop_record: stop_record, route: route, issue: issue}}
     else
       {:error, _} = error -> error
       _ -> {:error, :publisher_port_recovery_not_authorized}
@@ -290,16 +294,127 @@ defmodule SymphonyElixir.WorkstreamPublisherPortRecovery do
     end
   end
 
-  defp current_task(tasks, run) do
-    case Enum.find_value(tasks, fn {_issue_id, task} -> if task[:run_id] == run.id, do: task end) do
-      %{status: :acknowledged} = task ->
-        if task.issue_id == run.issue_id and run.task_id == "linear/" <> task.issue_id and
-             is_binary(task.session_id) and is_binary(task.assignee_id) and
-             is_nil(task[:pending_reassignment]) and is_nil(task[:stop_event_id]) do
-          {:ok, task}
+  defp authorized_activity(events, %{status: :blocked}, _task, nil, args), do: rejected_activity(events, args)
+
+  defp authorized_activity(events, %{status: :stopped}, task, stop_record, args),
+    do: fresh_stopped_activity(events, task, stop_record, args)
+
+  defp authorized_activity(_events, _run, _task, _stop_record, _args),
+    do: {:error, :publisher_port_recovery_not_authorized}
+
+  defp current_task(records, run, config) do
+    task = Enum.find_value(records.tasks, fn {_issue_id, task} -> if task[:run_id] == run.id, do: task end)
+
+    case {run.status, task} do
+      {:blocked, %{status: :acknowledged} = task} ->
+        if base_task_matches?(task, run) and is_nil(task[:pending_reassignment]) and is_nil(task[:stop_event_id]) do
+          {:ok, task, nil}
         else
           {:error, :publisher_port_recovery_not_authorized}
         end
+
+      {:stopped, %{status: :stopped} = task} ->
+        with true <- base_task_matches?(task, run),
+             {:ok, stop_record} <- service_created_stop(records.events, task, config) do
+          {:ok, task, stop_record}
+        else
+          _ -> {:error, :publisher_port_recovery_not_authorized}
+        end
+
+      _ ->
+        {:error, :publisher_port_recovery_not_authorized}
+    end
+  end
+
+  defp base_task_matches?(task, run) do
+    task.issue_id == run.issue_id and run.task_id == "linear/" <> task.issue_id and
+      is_binary(task.session_id) and is_binary(task.assignee_id) and
+      is_nil(task[:pending_reassignment])
+  end
+
+  defp service_created_stop(events, task, config) do
+    stop_id = task[:stop_event_id]
+    source_event = task[:event]
+
+    with true <- is_binary(stop_id) and is_map(source_event),
+         true <- stop_id == source_event[:id],
+         %{id: ^stop_id, status: :handled, event: ^source_event} = stop_record <- events[stop_id],
+         true <- source_event[:kind] == :created and is_nil(source_event[:activity_id]),
+         true <- is_integer(source_event[:timestamp]) and source_event.timestamp == task[:stop_timestamp],
+         true <- source_event[:issue_id] == task.issue_id and source_event[:session_id] == task.session_id,
+         true <- is_nil(task[:pending_reassignment]) and is_nil(task[:blocked_reassignment]),
+         true <- task[:assignment_history] == [] and task[:scope_revision] == 1,
+         true <- no_conflicting_lifecycle_for_task?(events, task),
+         {:ok, route} <- AgentMapping.select(source_event, config),
+         true <-
+           route_identity(route) == task[:route] and route["agent_id"] == task.agent_id and
+             route["app_user_id"] == task[:app_user_id] and route["oauth_client_id"] == task[:oauth_client_id] and
+             source_event[:verified_app_user_id] == route["app_user_id"] do
+      {:ok, stop_record}
+    else
+      _ -> {:error, :publisher_port_recovery_not_authorized}
+    end
+  rescue
+    _ -> {:error, :publisher_port_recovery_not_authorized}
+  end
+
+  defp no_conflicting_lifecycle_for_task?(events, task) do
+    Enum.all?(events, fn {_id, record} ->
+      event = record[:event]
+
+      case {event[:kind], event[:issue_id], event[:session_id]} do
+        {:stop, issue_id, _session_id} when issue_id == task.issue_id ->
+          false
+
+        {:issue_updated, issue_id, _session_id} when issue_id == task.issue_id ->
+          false
+
+        {:created, issue_id, _session_id} when issue_id == task.issue_id ->
+          event[:id] == task.event[:id]
+
+        _ ->
+          true
+      end
+    end)
+  end
+
+  defp fresh_stopped_activity(events, task, stop_record, args) do
+    matches =
+      events
+      |> Map.values()
+      |> Enum.filter(fn record -> get_in(record, [:event, :activity_id]) == args.activity_id end)
+
+    case matches do
+      [%{id: delivery_id, status: :ignored_after_stop, event: event} = record] ->
+        prior_records =
+          events
+          |> Map.values()
+          |> Enum.filter(fn prior ->
+            prior_event = prior[:event]
+
+            prior_event[:kind] == :prompted and prior_event[:issue_id] == task.issue_id and
+              prior_event[:session_id] == task.session_id and prior_event[:body] == "retry #{args.run_id} #{args.attempt_id}"
+          end)
+          |> Enum.reject(&(&1.id == delivery_id))
+
+        prior_timestamps = Enum.map(prior_records, &get_in(&1, [:event, :timestamp]))
+
+        has_prior_rejected_retry =
+          Enum.any?(prior_records, fn prior ->
+            prior.status == :reply_rejected and is_integer(get_in(prior, [:event, :timestamp]))
+          end)
+
+        valid =
+          delivery_id == event[:id] and delivery_id != stop_record.id and
+            event[:kind] == :prompted and event[:signal] in [nil, "continue"] and
+            event[:body] == "retry #{args.run_id} #{args.attempt_id}" and
+            event[:issue_id] == task.issue_id and event[:session_id] == task.session_id and
+            is_binary(event[:activity_id]) and is_integer(event[:timestamp]) and
+            event.timestamp > task.stop_timestamp and
+            has_prior_rejected_retry and
+            Enum.all?(prior_timestamps, &(is_integer(&1) and &1 < event.timestamp))
+
+        if valid, do: {:ok, record}, else: {:error, :publisher_port_recovery_not_authorized}
 
       _ ->
         {:error, :publisher_port_recovery_not_authorized}
@@ -570,12 +685,30 @@ defmodule SymphonyElixir.WorkstreamPublisherPortRecovery do
     successor_task =
       Map.merge(authorization.task, %{
         run_id: successor_id,
+        status: :acknowledged,
         authorized_stage: nil,
         authorized_until: 0,
         owned_child_grant: nil,
         check_at: 0,
-        scope_revision: (authorization.task[:scope_revision] || 0) + 1
+        scope_revision: (authorization.task[:scope_revision] || 0) + 1,
+        stop_event_id: nil,
+        stop_timestamp: nil
       })
+
+    service_stop_provenance =
+      case authorization.stop_record do
+        %{id: id, event: event} ->
+          %{
+            version: 1,
+            event_id: id,
+            event_sha256: digest(:erlang.term_to_binary(event, [:deterministic])),
+            timestamp: event.timestamp,
+            scope_revision: authorization.task.scope_revision
+          }
+
+        nil ->
+          nil
+      end
 
     provenance = %{
       version: @version,
@@ -608,6 +741,7 @@ defmodule SymphonyElixir.WorkstreamPublisherPortRecovery do
       archive_revision: proof.archive.revision,
       remote_branch_absent: proof.remote.branch_sha == nil,
       remote_pr_absent: proof.remote.pull_request == nil,
+      service_stop_provenance: service_stop_provenance,
       old_policy: old_run.policy,
       new_policy: @new_policy,
       old_publisher_git_sha256: @old_publisher_git_sha256,
@@ -632,6 +766,7 @@ defmodule SymphonyElixir.WorkstreamPublisherPortRecovery do
        qualification: qualification,
        expected_task: authorization.task,
        successor_task: successor_task,
+       stop_record: authorization.stop_record,
        reply_record: authorization.record,
        origin_event_id: origin_event_id,
        origin_event: origin_event,

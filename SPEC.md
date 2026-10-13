@@ -156,6 +156,20 @@ advances. The rejected Linear reply remains rejected, and normal readiness and s
 authorization gate all work after the local producer check. No publication write is part of
 this transition.
 
+If a service scope-check stopped this same run after an earlier retry was rejected, a separate
+stopped-origin variant MAY proceed only from the exact initial handled `created` event recorded
+as the task's stop tombstone. The stopped task MUST still have its initial scope revision, no
+assignment history or pending/blocked reassignment, and no persisted native stop, undelegation,
+issue update or other assignment event for that task. The operator must provide a distinct,
+authenticated exact-body retry activity persisted as `ignored_after_stop`; its delivery and
+activity IDs MUST be unique and its timestamp MUST be later than the stop and every earlier
+matching retry receipt. The helper MUST recheck the live app route, delegation, assignee and
+session, as well as every publisher-port proof above. Apply MUST compare-and-swap the stopped
+run and tombstoned task in the same transaction that creates the successor. It clears the stop
+fields only on the successor task; the old stopped run, task stop receipt, attempts, operations,
+policy and other history remain intact. This exception MUST NOT admit native stop, undelegation,
+reassignment, stale retry, or any other stopped run.
+
 DEV-235 extends native intake with optional `cloud_agents` entries for the two additional
 named cloud apps, sharing the backend, worker pool and workstream. Each identity has an
 exact organization/app-user/client tuple and a distinct signing secret; a valid signature

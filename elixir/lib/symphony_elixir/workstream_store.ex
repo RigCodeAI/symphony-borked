@@ -141,7 +141,7 @@ defmodule SymphonyElixir.WorkstreamStore do
     end
   end
 
-  @doc "Atomically links a blocked publication run to a fresh same-task successor."
+  @doc "Atomically links an eligible publication run to a fresh same-task successor."
   @spec commit_publisher_port_recovery_successor(GenServer.server(), map()) ::
           {:ok, %{stopped_run: run_map(), successor_run: run_map()}}
           | {:duplicate, %{stopped_run: run_map(), successor_run: run_map()}}
@@ -886,10 +886,11 @@ defmodule SymphonyElixir.WorkstreamStore do
 
     with :ok <- ensure_expected_run(db, expected_run),
          :ok <- ensure_expected_linear_task(db, expected_task),
+         :ok <- ensure_expected_recovery_stop_record(db, expected_task, field(recovery, :stop_record)),
          :ok <- ensure_single_active_task_run(db, expected_run),
          :not_found <- fetch_stored_run(db, successor_run.id),
          :ok <- ensure_recovery_events_absent(db, origin_event_id, successor_event_id),
-         :ok <- ensure_rejected_reply_record(db, reply_record),
+         :ok <- ensure_recovery_reply_record(db, reply_record, expected_task),
          :ok <- persist_commit(db, stopped_run, origin_event_id, field(recovery, :origin_event)),
          :ok <- persist_commit(db, successor_run, successor_event_id, field(recovery, :successor_event)),
          :ok <- persist_linear_commit(db, reply_record, successor_task) do
@@ -935,10 +936,12 @@ defmodule SymphonyElixir.WorkstreamStore do
     end
   end
 
-  defp ensure_rejected_reply_record(db, expected_record) do
+  defp ensure_recovery_reply_record(db, expected_record, expected_task) do
+    expected_status = if field(expected_task, :status) == :stopped, do: :ignored_after_stop, else: :reply_rejected
+
     with {:ok, record} <- fetch_linear_event(db, field(expected_record, :id)),
          true <- record === expected_record,
-         true <- field(record, :status) == :reply_rejected do
+         true <- field(record, :status) == expected_status do
       :ok
     else
       false -> {:error, :linear_event_assignment_conflict}
@@ -946,6 +949,24 @@ defmodule SymphonyElixir.WorkstreamStore do
       _ -> {:error, :linear_event_assignment_conflict}
     end
   end
+
+  defp ensure_expected_recovery_stop_record(_db, %{status: :acknowledged}, nil), do: :ok
+
+  defp ensure_expected_recovery_stop_record(db, %{status: :stopped, stop_event_id: stop_id}, record)
+       when is_binary(stop_id) and is_map(record) do
+    with true <- field(record, :id) == stop_id,
+         {:ok, stored} <- fetch_linear_event(db, stop_id),
+         true <- stored === record do
+      :ok
+    else
+      false -> {:error, :linear_event_assignment_conflict}
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :linear_event_assignment_conflict}
+    end
+  end
+
+  defp ensure_expected_recovery_stop_record(_db, _task, _record),
+    do: {:error, :invalid_publisher_port_recovery_stop}
 
   defp commit_child_handoff_transaction(db, expected_parent, waiting_parent, linked_child, intent) do
     case transaction(db, "BEGIN IMMEDIATE", fn ->
@@ -1713,6 +1734,7 @@ defmodule SymphonyElixir.WorkstreamStore do
     successor_run = field(recovery, :successor_run)
     expected_task = field(recovery, :expected_task)
     successor_task = field(recovery, :successor_task)
+    stop_record = field(recovery, :stop_record)
     reply_record = field(recovery, :reply_record)
     origin_event_id = field(recovery, :origin_event_id)
     successor_event_id = field(recovery, :successor_event_id)
@@ -1725,9 +1747,10 @@ defmodule SymphonyElixir.WorkstreamStore do
          :ok <- validate_commit(successor_run, successor_event_id, successor_event),
          :ok <- validate_linear_commit(reply_record, successor_task),
          :ok <- validate_recovery_run_pair(expected_run, stopped_run, successor_run, field(origin_event, :controlled_review_provenance)),
+         :ok <- validate_recovery_stop(expected_run, expected_task, stop_record, field(origin_event, :service_stop_provenance)),
          :ok <- validate_recovery_task_pair(expected_run, successor_run, expected_task, successor_task),
          :ok <- validate_recovery_events(expected_run, successor_run, origin_event_id, successor_event_id, origin_event, successor_event),
-         true <- field(reply_record, :status) == :reply_rejected do
+         true <- field(reply_record, :status) == if(field(expected_task, :status) == :stopped, do: :ignored_after_stop, else: :reply_rejected) do
       :ok
     else
       _ -> {:error, :invalid_publisher_port_recovery}
@@ -1773,8 +1796,11 @@ defmodule SymphonyElixir.WorkstreamStore do
         field(successor_run, :operations) == %{} and
         field(successor_run, :stage_id) == get_in(successor_run, [:execution, :candidate_producer_stage])
 
-    if is_binary(old_id) and is_binary(new_id) and old_id != new_id and
-         field(expected_run, :status) == :blocked and field(expected_run, :phase) == :blocked and
+    valid_origin =
+      {field(expected_run, :status), field(expected_run, :phase)} in [{:blocked, :blocked}, {:stopped, :stopped}] and
+        is_nil(field(expected_run, :recovery_successor_run_id))
+
+    if is_binary(old_id) and is_binary(new_id) and old_id != new_id and valid_origin and
          field(expected_run, :stage_id) == :blocked and stopped_run === stopped_expected and valid_successor do
       :ok
     else
@@ -1789,22 +1815,72 @@ defmodule SymphonyElixir.WorkstreamStore do
       expected_task
       |> Map.merge(%{
         run_id: field(successor_run, :id),
+        status: :acknowledged,
         authorized_stage: nil,
         authorized_until: 0,
         owned_child_grant: nil,
         check_at: 0,
-        scope_revision: revision + 1
+        scope_revision: revision + 1,
+        stop_event_id: nil,
+        stop_timestamp: nil
       })
 
     if field(expected_task, :run_id) == field(expected_run, :id) and
          field(expected_task, :issue_id) == field(expected_run, :issue_id) and
-         field(expected_task, :status) == :acknowledged and
+         {field(expected_run, :status), field(expected_task, :status)} in [{:blocked, :acknowledged}, {:stopped, :stopped}] and
          is_integer(revision) and revision >= 0 and successor_task === expected_successor_task do
       :ok
     else
       {:error, :invalid_publisher_port_recovery_task}
     end
   end
+
+  defp validate_recovery_stop(expected_run, expected_task, nil, nil) do
+    if field(expected_run, :status) == :blocked and field(expected_task, :status) == :acknowledged,
+      do: :ok,
+      else: {:error, :invalid_publisher_port_recovery_stop}
+  end
+
+  defp validate_recovery_stop(expected_run, expected_task, stop_record, provenance)
+       when is_map(stop_record) and is_map(provenance) do
+    event = field(stop_record, :event)
+    event_id = field(stop_record, :id)
+    route = field(expected_task, :route)
+
+    event_sha256 =
+      if is_map(event),
+        do: :crypto.hash(:sha256, :erlang.term_to_binary(event, [:deterministic])) |> Base.encode16(case: :lower),
+        else: nil
+
+    valid =
+      field(expected_run, :status) == :stopped and field(expected_task, :status) == :stopped and
+        field(stop_record, :status) == :handled and is_map(event) and is_map(route) and
+        event_id == field(expected_task, :stop_event_id) and event_id == field(event, :id) and
+        event == field(expected_task, :event) and field(event, :kind) == :created and
+        is_nil(field(event, :activity_id)) and field(event, :issue_id) == field(expected_task, :issue_id) and
+        field(event, :session_id) == field(expected_task, :session_id) and
+        is_integer(field(event, :timestamp)) and field(event, :timestamp) == field(expected_task, :stop_timestamp) and
+        field(event, :verified_app_user_id) == field(expected_task, :app_user_id) and
+        Map.get(route, "app_user_id") == field(expected_task, :app_user_id) and
+        Map.get(route, "oauth_client_id") == field(expected_task, :oauth_client_id) and
+        Map.get(route, "agent_id") == field(expected_task, :agent_id) and
+        field(event, :organization_id) == Map.get(route, "organization_id") and
+        field(event, :oauth_client_id) == field(expected_task, :oauth_client_id) and
+        field(expected_task, :scope_revision) == 1 and field(expected_task, :assignment_history) == [] and
+        is_nil(field(expected_task, :pending_reassignment)) and is_nil(field(expected_task, :blocked_reassignment)) and
+        provenance == %{
+          version: 1,
+          event_id: event_id,
+          event_sha256: event_sha256,
+          timestamp: field(event, :timestamp),
+          scope_revision: field(expected_task, :scope_revision)
+        }
+
+    if valid, do: :ok, else: {:error, :invalid_publisher_port_recovery_stop}
+  end
+
+  defp validate_recovery_stop(_expected_run, _expected_task, _stop_record, _provenance),
+    do: {:error, :invalid_publisher_port_recovery_stop}
 
   defp validate_recovery_events(old_run, new_run, origin_id, successor_id, origin_event, successor_event) do
     if field(origin_event, :kind) == :publisher_port_recovery_origin_stopped and
@@ -1815,6 +1891,7 @@ defmodule SymphonyElixir.WorkstreamStore do
          field(successor_event, :event_id) == successor_id and
          field(successor_event, :old_run_id) == field(old_run, :id) and
          field(successor_event, :successor_run_id) == field(new_run, :id) and
+         field(successor_event, :service_stop_provenance) == field(origin_event, :service_stop_provenance) and
          field(successor_event, :controlled_review_provenance) == field(origin_event, :controlled_review_provenance) and
          field(successor_event, :candidate_handoff) == field(origin_event, :candidate_handoff) and
          valid_candidate_handoff?(old_run, field(origin_event, :candidate_handoff)) do

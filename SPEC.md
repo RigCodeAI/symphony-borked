@@ -107,6 +107,22 @@ an unknown outcome remains visible and reserves capacity. Local controlled tests
 that a remote process tree stopped or that a Linear app is installed. See
 [configuration and live acceptance limits](docs/linear-delegation.md).
 
+An operator-only retry MAY requeue one blocked native run when its sole completed attempt is
+the pinned entry agent and failed with `agent_execution_failed` before creating an agent thread,
+agent session or candidate. The operator must provide the exact activity ID of a persisted,
+authenticated prompted activity (with no signal or the `continue` signal) whose body is
+`retry <run-id> <attempt-id>` and whose ordinary
+reply was rejected. Before applying, a one-shot maintenance helper MUST own the SQLite store,
+recheck the current Linear issue, delegation, assignee and active session, and verify fresh
+termination proof for the exact registered worker operation using that run's pinned worker
+configuration. Missing, live, unknown, malformed, stopped, undelegated or policy-incompatible
+state MUST fail closed. The retry uses a stable activity-derived event ID and atomically queues
+the same run; prior attempts, receipts, definition, policy, worker release, branch, workspace
+and repair counters remain unchanged. The stable event MUST include the maintenance helper
+version and source SHA-256. Replays MUST NOT add another attempt. The original
+Linear reply remains rejected. Normal readiness and stage authorization still gate dispatch;
+this maintenance action does not launch a worker or weaken those gates.
+
 DEV-235 extends native intake with optional `cloud_agents` entries for the two additional
 named cloud apps, sharing the backend, worker pool and workstream. Each identity has an
 exact organization/app-user/client tuple and a distinct signing secret; a valid signature
@@ -2613,6 +2629,15 @@ model, reasoning effort, access program and any explicit usage pause. Missing ca
 or unsupported settings MUST block without switching models, efforts or authentication.
 Set provider model fallback false; reject mismatched thread configuration and model reroutes.
 Legacy unnamed `WORKFLOW.md` sessions keep their protocol behavior.
+
+The App Server account field `ordinaryUsageAllowed` reports permission for ordinary
+included usage; `false` alone MUST NOT be treated as proof that explicit Codex credits are
+unavailable. A credit-based ordinary-use path requires a fresh exact Codex rate-limit record,
+`credits.hasCredits: true`, an explicit boolean `credits.unlimited` value, a `credits.balance`
+that is null or a valid positive amount, and `spendControlReached: false`. Missing or
+malformed fields, an unknown or malformed balance, an explicit zero balance, or missing,
+malformed or true spend-control state MUST block. This does not authorize another
+authentication mode or API billing.
 
 Normal named dispatch MUST reject Daybreak until effective execution is separately
 observable and verified. An operator-only qualification probe may request an advertised

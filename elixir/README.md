@@ -495,6 +495,12 @@ intake and rejects every dashboard/API path. The GCP configuration uses `0.0.0.0
 this listener and keeps the dashboard on port 8080 behind IAP. Both listeners require restart
 after configuration changes. See [coordinator deployment](../docs/linear-delegation.md#gcp-coordinator-deployment).
 
+App Server readiness distinguishes included-use permission from explicit Codex credit
+eligibility and blocks incomplete or exhausted rate-limit data. Source also supports a narrow
+offline retry for a pre-code blocked run; it requires fresh Linear scope and confirmed worker
+termination, and operators must verify the protected release contains it. See [account
+readiness](../docs/linear-delegation.md#app-server-account-readiness) and [the retry contract](../docs/linear-delegation.md#operator-retry-for-a-pre-code-failure).
+
 The scoped DEV-233 native acceptance passed with DEV-248: the same live worker survived a
 coordinator restart, native undelegation stopped it, and the durable audit reconciled all four
 retained runs. See the [restart repair acceptance record](../docs/evidence/dev-233/restart-repair-acceptance.md).

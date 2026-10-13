@@ -138,6 +138,17 @@ Git clone beneath `workspace_root`. No clone is created implicitly. The definiti
 named `software-change`, with an agent entry using `default-cloud`; its instruction, skill
 and agent references must resolve. A qualified `AgentReadiness.dispatch/1` implementation is
 required for production dispatch. Its absence fails closed with `worker_readiness_unavailable`.
+
+### App Server account readiness
+
+For App Server account readiness, `ordinaryUsageAllowed` is the backend's permission for
+ordinary included usage. A false value alone does not mean explicit Codex credits are
+unavailable. A credit-based ordinary-use path must observe a fresh exact Codex rate-limit
+record with `credits.hasCredits: true`, an explicit boolean `credits.unlimited`, a
+`credits.balance` that is null or a valid positive amount, and `spendControlReached: false`.
+Missing or malformed fields, an unknown or malformed balance, an explicit zero balance, or
+missing, malformed or true spend-control state blocks. This does not authorize a different
+authentication mode or API billing.
 The shipped [software-change definition](../factory/workstreams/software-change.yaml) references
 DEV-231's `factory/agents/default-cloud.yaml`. It implements a local candidate, checks that
 HEAD exists and the working tree is clean, then pauses at a durable human wait. This local
@@ -156,6 +167,58 @@ it made no model turn and stopped with exact termination proof. See the [restart
 acceptance record](evidence/dev-233/restart-repair-acceptance.md), [deployment checkpoint](evidence/dev-233/transport-deployment.md)
 and [contained worker operations](contained-worker-operations.md). Controlled test callbacks
 cannot enable production control.
+
+## Operator retry for a pre-code failure
+
+`SymphonyElixir.WorkstreamRetryMaintenance` supports one narrow retry for a blocked native
+Linear run whose only completed attempt is the entry agent and whose result is
+`agent_execution_failed`. The run must have no agent thread, agent session, candidate or
+candidate context. It does not reopen arbitrary blocked or stopped runs.
+
+The operator first posts `retry <run-id> <attempt-id>` as a normal prompt (with no signal or
+the `continue` signal) in the current Linear agent session. The ordinary reply is expected to
+be rejected because the run is blocked. The helper requires that exact persisted activity ID and rejected reply receipt,
+then rechecks the current delegated issue, human assignee and active Linear session. It also
+asks the pinned worker broker for fresh termination proof for the exact registered operation.
+An unknown or live operation, changed policy, stopped/undelegated task, missing activity or
+stale Linear scope blocks the retry.
+
+Run the helper from the protected service release with the current configuration returned by
+`Config.linear_delegation()`. Stop the coordinator before either mode because even `:plan`
+opens the store with exclusive ownership. First use `mode: :plan`; it makes the same Linear
+and worker-status reads but does not change the run. Review the plan, then invoke it with
+`mode: :apply` while the coordinator remains stopped:
+
+Run as `factory-coordinator` with the current protected service environment. A standalone
+`mix run --no-start` invocation must start the required OTP applications (including `:req`,
+`:yaml_elixir`, `:jason` and `:exqlite`), load the Symphony app modules and workflow, and start
+`Linear.OAuth` before calling the helper so its current issue and session checks can run.
+Credentials stay in the service environment and are not helper arguments.
+
+```elixir
+{:ok, config} = SymphonyElixir.Config.linear_delegation()
+
+request = [
+  store_path: config["store_path"],
+  linear_config: config,
+  run_id: "run-...",
+  attempt_id: "run-.../implement/1",
+  activity_id: "<persisted Linear activity UUID>",
+  operator: "<operator audit label>"
+]
+
+SymphonyElixir.WorkstreamRetryMaintenance.run(Keyword.put(request, :mode, :plan))
+SymphonyElixir.WorkstreamRetryMaintenance.run(Keyword.put(request, :mode, :apply))
+```
+
+The helper commits a stable activity-keyed event, including its source SHA-256, and queues the
+same run atomically. It keeps the original attempt receipt, definition, policy, worker release,
+branch, workspace and repair counters. Repeating the same apply returns `already_applied` and
+cannot add another attempt.
+The original Linear reply remains recorded as rejected. Restart the coordinator afterward;
+normal readiness and stage-authorization checks still gate worker launch. The `operator` value
+is an audit label; the signed Linear activity and fresh current assignment checks authorize the
+scope. This maintenance path does not make a model turn or switch authentication or billing.
 
 From `elixir/`, start the configured workflow with:
 

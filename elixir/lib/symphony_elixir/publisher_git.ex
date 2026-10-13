@@ -198,7 +198,7 @@ defmodule SymphonyElixir.PublisherGit do
 
   defp port_environment(env) do
     inherited_keys = System.get_env() |> Map.keys() |> Enum.uniq()
-    clear = Enum.map(inherited_keys, &{String.to_charlist(&1), nil})
+    clear = Enum.map(inherited_keys, &{String.to_charlist(&1), false})
     configured = Enum.map(env, fn {key, value} -> {String.to_charlist(key), String.to_charlist(value)} end)
     clear ++ configured
   end

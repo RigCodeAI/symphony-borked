@@ -13,7 +13,7 @@ defmodule SymphonyElixir.WorkstreamStore do
   use GenServer
 
   alias Exqlite.Sqlite3
-  alias SymphonyElixir.{BackupCapture, Config, Evidence, WorkstreamChild}
+  alias SymphonyElixir.{BackupCapture, Config, ControlledReviewQualification, Evidence, WorkstreamChild, WorkstreamRun}
 
   @busy_timeout_ms 100
   @directory_mode 0o700
@@ -28,6 +28,7 @@ defmodule SymphonyElixir.WorkstreamStore do
   @recovery_term_nodes_limit 100_000
   @recovery_run_limit 128
   @recovery_row_limit 10_000
+  @publisher_port_old_executor_sha256 "ec8ae546aeb408243529f96a1a7048c92d4a61bbe268eee6decbccfb169f4c22"
 
   @migration_v1 """
   CREATE TABLE runs (
@@ -139,6 +140,20 @@ defmodule SymphonyElixir.WorkstreamStore do
       {:error, _reason} = error -> error
     end
   end
+
+  @doc "Atomically links a blocked publication run to a fresh same-task successor."
+  @spec commit_publisher_port_recovery_successor(GenServer.server(), map()) ::
+          {:ok, %{stopped_run: run_map(), successor_run: run_map()}}
+          | {:duplicate, %{stopped_run: run_map(), successor_run: run_map()}}
+          | {:error, term()}
+  def commit_publisher_port_recovery_successor(server, recovery) when is_map(recovery) do
+    case validate_publisher_port_recovery(recovery) do
+      :ok -> safe_call(server, {:publisher_port_recovery_successor, recovery})
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def commit_publisher_port_recovery_successor(_server, _recovery), do: {:error, :invalid_publisher_port_recovery}
 
   @doc "Atomically stores a waiting parent and its linked child before either is dispatched."
   @spec commit_child_handoff(GenServer.server(), run_map(), run_map(), run_map(), map()) ::
@@ -314,7 +329,15 @@ defmodule SymphonyElixir.WorkstreamStore do
   # capture check cannot fence a write queued behind begin_capture.
   def handle_call(message, _from, %State{capture: capture} = state)
       when not is_nil(capture) and is_tuple(message) and
-             elem(message, 0) in [:commit, :linear_receive, :linear_commit, :linear_reassign, :linear_task, :acknowledge_evidence],
+             elem(message, 0) in [
+               :commit,
+               :publisher_port_recovery_successor,
+               :linear_receive,
+               :linear_commit,
+               :linear_reassign,
+               :linear_task,
+               :acknowledge_evidence
+             ],
       do: {:reply, {:error, :capture_in_progress}, state}
 
   def handle_call(:load, _from, %State{db: db} = state) do
@@ -473,6 +496,22 @@ defmodule SymphonyElixir.WorkstreamStore do
         commit_transaction(db, run_map, event_id, event_map)
       else
         {:error, :not_owner}
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:publisher_port_recovery_successor, recovery}, {caller, _tag}, %State{db: db, owner: owner} = state) do
+    reply =
+      cond do
+        caller != owner ->
+          {:error, :not_owner}
+
+        not __MODULE__.capture_write_allowed?(state) ->
+          {:error, :capture_in_progress}
+
+        true ->
+          commit_publisher_port_recovery_successor_transaction(db, recovery)
       end
 
     {:reply, reply, state}
@@ -780,6 +819,131 @@ defmodule SymphonyElixir.WorkstreamStore do
       {:committed, :ok} -> :ok
       {:rolled_back, {:duplicate, existing_run_id}} -> {:duplicate, existing_run_id}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp commit_publisher_port_recovery_successor_transaction(db, recovery) do
+    case transaction(db, "BEGIN IMMEDIATE", fn ->
+           case publisher_port_recovery_replay(db, recovery) do
+             {:ok, stopped_run, successor_run} ->
+               {:rollback, {:duplicate, %{stopped_run: stopped_run, successor_run: successor_run}}}
+
+             :not_a_replay ->
+               commit_new_publisher_port_recovery_successor(db, recovery)
+
+             {:error, reason} ->
+               {:error, reason}
+           end
+         end) do
+      {:committed, result} -> {:ok, result}
+      {:rolled_back, {:duplicate, result}} -> {:duplicate, result}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp publisher_port_recovery_replay(db, recovery) do
+    origin_id = field(recovery, :origin_event_id)
+    successor_id = field(recovery, :successor_event_id)
+
+    with {:ok, origin} <- fetch_stored_event(db, origin_id),
+         {:ok, successor} <- fetch_stored_event(db, successor_id) do
+      expected_origin = %{run_id: field(recovery, :stopped_run).id, event: field(recovery, :origin_event)}
+      expected_successor = %{run_id: field(recovery, :successor_run).id, event: field(recovery, :successor_event)}
+
+      if origin === expected_origin and successor === expected_successor do
+        with {:ok, stopped_run} <- fetch_stored_run(db, field(recovery, :stopped_run).id),
+             {:ok, successor_run} <- fetch_stored_run(db, field(recovery, :successor_run).id),
+             {:ok, task} <- fetch_linear_task(db, field(recovery, :successor_task).issue_id),
+             {:ok, reply} <- fetch_linear_event(db, field(recovery, :reply_record).id),
+             true <- stopped_run === field(recovery, :stopped_run),
+             true <- successor_run === field(recovery, :successor_run),
+             true <- task === field(recovery, :successor_task),
+             true <- reply === field(recovery, :reply_record) do
+          {:ok, stopped_run, successor_run}
+        else
+          false -> {:error, :publisher_port_recovery_conflict}
+          :not_found -> {:error, :publisher_port_recovery_conflict}
+          {:error, reason} -> {:error, reason}
+        end
+      else
+        {:error, :publisher_port_recovery_conflict}
+      end
+    else
+      :not_found -> :not_a_replay
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp commit_new_publisher_port_recovery_successor(db, recovery) do
+    expected_run = field(recovery, :expected_run)
+    stopped_run = field(recovery, :stopped_run)
+    successor_run = field(recovery, :successor_run)
+    expected_task = field(recovery, :expected_task)
+    successor_task = field(recovery, :successor_task)
+    reply_record = field(recovery, :reply_record)
+    origin_event_id = field(recovery, :origin_event_id)
+    successor_event_id = field(recovery, :successor_event_id)
+
+    with :ok <- ensure_expected_run(db, expected_run),
+         :ok <- ensure_expected_linear_task(db, expected_task),
+         :ok <- ensure_single_active_task_run(db, expected_run),
+         :not_found <- fetch_stored_run(db, successor_run.id),
+         :ok <- ensure_recovery_events_absent(db, origin_event_id, successor_event_id),
+         :ok <- ensure_rejected_reply_record(db, reply_record),
+         :ok <- persist_commit(db, stopped_run, origin_event_id, field(recovery, :origin_event)),
+         :ok <- persist_commit(db, successor_run, successor_event_id, field(recovery, :successor_event)),
+         :ok <- persist_linear_commit(db, reply_record, successor_task) do
+      {:commit, %{stopped_run: stopped_run, successor_run: successor_run}}
+    else
+      {:ok, _run} -> {:error, :publisher_port_recovery_conflict}
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :publisher_port_recovery_conflict}
+    end
+  end
+
+  defp ensure_single_active_task_run(db, expected_run) do
+    task_id = field(expected_run, :task_id)
+
+    case query(db, "SELECT run_id, payload FROM runs WHERE task_id = ?1 ORDER BY run_id", [task_id]) do
+      {:ok, [[run_id, payload]]} when run_id == expected_run.id ->
+        case decode_run(payload) do
+          {:ok, ^expected_run} -> :ok
+          {:ok, _run} -> {:error, :run_assignment_conflict}
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:ok, []} ->
+        {:error, :run_not_found}
+
+      {:ok, _rows} ->
+        {:error, :active_task_run_conflict}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp ensure_recovery_events_absent(db, origin_event_id, successor_event_id) do
+    with {:ok, nil} <- existing_event_run(db, origin_event_id),
+         {:ok, nil} <- existing_event_run(db, successor_event_id),
+         :ok <- ensure_evidence_event_absent(db, origin_event_id),
+         :ok <- ensure_evidence_event_absent(db, successor_event_id) do
+      :ok
+    else
+      {:ok, _run_id} -> {:error, :publisher_port_recovery_conflict}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp ensure_rejected_reply_record(db, expected_record) do
+    with {:ok, record} <- fetch_linear_event(db, field(expected_record, :id)),
+         true <- record === expected_record,
+         true <- field(record, :status) == :reply_rejected do
+      :ok
+    else
+      false -> {:error, :linear_event_assignment_conflict}
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :linear_event_assignment_conflict}
     end
   end
 
@@ -1147,6 +1311,15 @@ defmodule SymphonyElixir.WorkstreamStore do
          :ok <- upsert_linear_event(db, delivery_id, event_payload),
          :ok <- maybe_upsert_linear_task(db, task_record_or_nil) do
       :ok
+    end
+  end
+
+  defp fetch_linear_task(db, issue_id) do
+    case query(db, "SELECT payload FROM linear_tasks WHERE issue_id = ?1", [issue_id]) do
+      {:ok, [[payload]]} -> decode_linear_task(payload, issue_id)
+      {:ok, []} -> :not_found
+      {:ok, _rows} -> {:error, :invalid_linear_task_row}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -1533,6 +1706,155 @@ defmodule SymphonyElixir.WorkstreamStore do
   end
 
   defp validate_commit(_run_map, _event_id, _event_map), do: {:error, :invalid_commit}
+
+  defp validate_publisher_port_recovery(recovery) do
+    expected_run = field(recovery, :expected_run)
+    stopped_run = field(recovery, :stopped_run)
+    successor_run = field(recovery, :successor_run)
+    expected_task = field(recovery, :expected_task)
+    successor_task = field(recovery, :successor_task)
+    reply_record = field(recovery, :reply_record)
+    origin_event_id = field(recovery, :origin_event_id)
+    successor_event_id = field(recovery, :successor_event_id)
+    origin_event = field(recovery, :origin_event)
+    successor_event = field(recovery, :successor_event)
+
+    with true <- Enum.all?([expected_run, stopped_run, successor_run, expected_task, successor_task, reply_record, origin_event, successor_event], &is_map/1),
+         true <- valid_event_id?(origin_event_id) and valid_event_id?(successor_event_id) and origin_event_id != successor_event_id,
+         :ok <- validate_commit(stopped_run, origin_event_id, origin_event),
+         :ok <- validate_commit(successor_run, successor_event_id, successor_event),
+         :ok <- validate_linear_commit(reply_record, successor_task),
+         :ok <- validate_recovery_run_pair(expected_run, stopped_run, successor_run, field(origin_event, :controlled_review_provenance)),
+         :ok <- validate_recovery_task_pair(expected_run, successor_run, expected_task, successor_task),
+         :ok <- validate_recovery_events(expected_run, successor_run, origin_event_id, successor_event_id, origin_event, successor_event),
+         true <- field(reply_record, :status) == :reply_rejected do
+      :ok
+    else
+      _ -> {:error, :invalid_publisher_port_recovery}
+    end
+  rescue
+    _ -> {:error, :invalid_publisher_port_recovery}
+  end
+
+  defp validate_recovery_run_pair(expected_run, stopped_run, successor_run, qualification_provenance) do
+    old_id = field(expected_run, :id)
+    new_id = field(successor_run, :id)
+    current_policy = WorkstreamRun.policy()
+    expected_old_policy = Map.put(current_policy, :executor_sha256, @publisher_port_old_executor_sha256)
+
+    stopped_expected =
+      expected_run
+      |> Map.merge(%{
+        status: :stopped,
+        phase: :stopped,
+        recovery_successor_run_id: new_id
+      })
+
+    valid_successor =
+      field(successor_run, :task_id) == field(expected_run, :task_id) and
+        field(successor_run, :issue_id) == field(expected_run, :issue_id) and
+        field(successor_run, :branch) == field(expected_run, :branch) and
+        field(successor_run, :workspace) == field(expected_run, :workspace) and
+        get_in(successor_run, [:outputs, "candidate"]) == get_in(expected_run, [:outputs, "candidate"]) and
+        ControlledReviewQualification.valid_transition?(
+          field(expected_run, :definition),
+          field(successor_run, :definition),
+          qualification_provenance
+        ) and
+        field(successor_run, :execution) == field(expected_run, :execution) and
+        field(successor_run, :thread_id) == field(expected_run, :thread_id) and
+        field(successor_run, :session_id) == field(expected_run, :session_id) and
+        field(expected_run, :policy) == expected_old_policy and
+        field(successor_run, :policy) == current_policy and
+        field(successor_run, :recovery_parent_run_id) == old_id and
+        is_nil(field(successor_run, :parent_run_id)) and
+        field(successor_run, :status) == :ready and field(successor_run, :phase) == :queued and
+        field(successor_run, :current_attempt_id) == nil and field(successor_run, :attempts) == [] and
+        field(successor_run, :operations) == %{} and
+        field(successor_run, :stage_id) == get_in(successor_run, [:execution, :candidate_producer_stage])
+
+    if is_binary(old_id) and is_binary(new_id) and old_id != new_id and
+         field(expected_run, :status) == :blocked and field(expected_run, :phase) == :blocked and
+         field(expected_run, :stage_id) == :blocked and stopped_run === stopped_expected and valid_successor do
+      :ok
+    else
+      {:error, :invalid_publisher_port_recovery_runs}
+    end
+  end
+
+  defp validate_recovery_task_pair(expected_run, successor_run, expected_task, successor_task) do
+    revision = field(expected_task, :scope_revision) || 0
+
+    expected_successor_task =
+      expected_task
+      |> Map.merge(%{
+        run_id: field(successor_run, :id),
+        authorized_stage: nil,
+        authorized_until: 0,
+        owned_child_grant: nil,
+        check_at: 0,
+        scope_revision: revision + 1
+      })
+
+    if field(expected_task, :run_id) == field(expected_run, :id) and
+         field(expected_task, :issue_id) == field(expected_run, :issue_id) and
+         field(expected_task, :status) == :acknowledged and
+         is_integer(revision) and revision >= 0 and successor_task === expected_successor_task do
+      :ok
+    else
+      {:error, :invalid_publisher_port_recovery_task}
+    end
+  end
+
+  defp validate_recovery_events(old_run, new_run, origin_id, successor_id, origin_event, successor_event) do
+    if field(origin_event, :kind) == :publisher_port_recovery_origin_stopped and
+         field(origin_event, :event_id) == origin_id and
+         field(origin_event, :old_run_id) == field(old_run, :id) and
+         field(origin_event, :successor_run_id) == field(new_run, :id) and
+         field(successor_event, :kind) == :publisher_port_recovery_successor_queued and
+         field(successor_event, :event_id) == successor_id and
+         field(successor_event, :old_run_id) == field(old_run, :id) and
+         field(successor_event, :successor_run_id) == field(new_run, :id) and
+         field(successor_event, :controlled_review_provenance) == field(origin_event, :controlled_review_provenance) and
+         field(successor_event, :candidate_handoff) == field(origin_event, :candidate_handoff) and
+         valid_candidate_handoff?(old_run, field(origin_event, :candidate_handoff)) do
+      :ok
+    else
+      {:error, :invalid_publisher_port_recovery_events}
+    end
+  end
+
+  defp valid_candidate_handoff?(old_run, handoff) when is_map(handoff) do
+    attempt_id = field(old_run, :id) <> "/implement/2"
+    attempt = Enum.find(field(old_run, :attempts), &(field(&1, :id) == attempt_id))
+    operation = get_in(old_run, [:operations, attempt_id])
+    output = get_in(old_run, [:outputs, "candidate"])
+    artifact = get_in(old_run, [:artifacts, "candidate"])
+    intent = get_in(old_run, [:operations, field(old_run, :id) <> "/publish/16", :publication_intent])
+    output_sha256 = :crypto.hash(:sha256, :erlang.term_to_binary(output)) |> Base.encode16(case: :lower)
+
+    expected = %{
+      version: 1,
+      parent_run_id: field(old_run, :id),
+      producer_attempt_id: attempt_id,
+      candidate_output_id: artifact,
+      candidate_output_sha256: output_sha256,
+      candidate_sha: field(intent, :candidate_sha)
+    }
+
+    is_map(output) and is_map(artifact) and artifact[:run_id] == field(old_run, :id) and
+      artifact[:attempt_id] == attempt_id and artifact[:sha256] == output_sha256 and
+      match?(%{stage: "implement", type: :agent, status: :completed, result: %{status: :ok, evidence: ^output}}, attempt) and
+      is_map(operation) and operation[:type] == :agent and operation[:status] == :completed and
+      is_map(intent) and handoff === expected
+  rescue
+    _ -> false
+  end
+
+  defp valid_candidate_handoff?(_old_run, _handoff), do: false
+
+  defp valid_event_id?(value),
+    do: is_binary(value) and byte_size(value) in 1..@evidence_event_id_limit
 
   defp valid_attempt?(attempt) when is_map(attempt) do
     attempt_id = field(attempt, :id)

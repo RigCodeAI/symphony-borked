@@ -238,6 +238,60 @@ issue and session through the app token. Eligible issues have the configured DEV
 `DEV-` identifier, `factory:rig` label, app delegate and Backlog, Todo or In Progress status.
 Completed/canceled state types reject. Project membership never dispatches work.
 
+## Publisher-port recovery with a controlled review
+
+`SymphonyElixir.WorkstreamPublisherPortRecovery` is a one-shot successor transition for the
+specific PublisherGit unset-environment failure recorded by the blocked `publish/16` attempt.
+The operator first posts the exact normal prompt `retry <run-id> <run-id>/publish/16` in the
+current Linear agent session and supplies that persisted activity ID. The ordinary reply must
+be recorded as rejected. The helper rechecks the active delegation and assignee, the exact
+terminated `implement/2` worker operation, the unchanged candidate commit, prior candidate
+gates, permanent validation evidence, GitHub App access, and the absence of a remote branch
+and pull request. It fails closed if any proof is missing, stale or different.
+
+Stop the coordinator before both plan and apply. Run as `factory-coordinator` with the
+protected service environment and current workflow loaded. A standalone `mix run --no-start`
+process must start the required OTP applications, load the Symphony modules and workflow, and
+start `Linear.OAuth` first. Do not pass credentials to the helper. Use the same request for the
+plan and apply calls:
+
+```elixir
+{:ok, config} = SymphonyElixir.Config.linear_delegation()
+
+request = [
+  store_path: config["store_path"],
+  linear_config: config,
+  run_id: "run-...",
+  attempt_id: "run-.../publish/16",
+  activity_id: "<persisted rejected Linear activity UUID>",
+  operator: "<operator audit label>"
+]
+
+SymphonyElixir.WorkstreamPublisherPortRecovery.run(Keyword.put(request, :mode, :plan))
+SymphonyElixir.WorkstreamPublisherPortRecovery.run(Keyword.put(request, :mode, :apply))
+```
+
+Apply keeps the failed run and every historical attempt, operation and receipt intact as a
+stopped record. It atomically creates a same-task successor under current service policy and
+switches the Linear task binding to it. The successor uses the same issue, workspace, branch,
+thread, session, candidate and repair counters, with empty attempt and operation history. It
+starts at the candidate-producer check, so normal checks and validation run again; this action
+does not publish or start another coding agent.
+
+The successor uses a separately source-backed qualification definition from the protected
+qualification directory. It does not change the immutable worker release or candidate. It must
+match the original parsed stage graph, agent definitions, models, settings and resources, with
+only the fixed controlled-review instruction appended to the review prompt. The run journals retain
+the source path and text hash, old and new definition fingerprints, policy/source hashes,
+proof identities and Linear activity. If a real review finds no issue, the reviewer records a
+harmless, clearly labeled controlled test finding while keeping overall correctness true; it
+must not present that test finding as a defect. A real review finding takes precedence. The
+qualification source and pinned successor definition do not change after creation.
+
+Restart the coordinator after apply. Stable activity-derived IDs make a repeated call return
+the same successor, including after it advances. The original Linear reply remains rejected;
+the new run continues through ordinary readiness and stage-authorization checks.
+
 ## Event and recovery behavior
 
 - `AgentSessionEvent` created: validate current ownership/session and routing, queue one run,

@@ -108,6 +108,59 @@ defmodule SymphonyElixir.PublisherGitTest do
     refute_receive {:args, _push_args}
   end
 
+  test "production Git runner clears inherited secrets and stops before push on a changed HEAD", %{
+    workspace: workspace,
+    sha: sha
+  } do
+    File.write!(Path.join(workspace, "file.txt"), "changed head\n")
+    git!(workspace, ["add", "file.txt"])
+    git!(workspace, ["commit", "--quiet", "-m", "new HEAD"])
+
+    real_git = System.find_executable("git") || flunk("git executable is required")
+    wrapper_dir = Path.join(Path.dirname(workspace), "git-wrapper")
+    File.mkdir_p!(wrapper_dir)
+    File.write!(Path.join(wrapper_dir, "real-git"), real_git)
+
+    wrapper = Path.join(wrapper_dir, "git")
+
+    File.write!(
+      wrapper,
+      """
+      #!/bin/sh
+      if [ "${SYMPHONY_PUBLISHER_TEST_SECRET+x}" = x ]; then
+        exit 91
+      fi
+      printf '%s\\n' "$*" >> "$0.calls"
+      real_git=$(cat "$(dirname "$0")/real-git")
+      exec "$real_git" "$@"
+      """
+    )
+
+    File.chmod!(wrapper, 0o755)
+
+    old_path = System.get_env("PATH")
+    old_secret = System.get_env("SYMPHONY_PUBLISHER_TEST_SECRET")
+    on_exit(fn -> restore_env("PATH", old_path) end)
+    on_exit(fn -> restore_env("SYMPHONY_PUBLISHER_TEST_SECRET", old_secret) end)
+
+    System.put_env("SYMPHONY_PUBLISHER_TEST_SECRET", "inherited-secret-must-not-reach-child")
+
+    System.put_env(
+      "PATH",
+      if(old_path, do: wrapper_dir <> ":" <> old_path, else: wrapper_dir)
+    )
+
+    assert {:error, :candidate_head_changed} =
+             PublisherGit.push(workspace, sha, "feature/publish", "installation-token", nil)
+
+    calls = File.read!(wrapper <> ".calls") |> String.split("\n", trim: true)
+    assert length(calls) == 2
+    assert Enum.all?(calls, &String.contains?(&1, "rev-parse"))
+    assert String.contains?(hd(calls), sha <> "^{commit}")
+    assert String.contains?(List.last(calls), "HEAD^{commit}")
+    refute Enum.any?(calls, &String.contains?(&1, "push"))
+  end
+
   test "Git failure details cannot return an installation token", %{workspace: workspace, sha: sha} do
     secret = "private-token-in-error"
     parent = self()
@@ -147,4 +200,7 @@ defmodule SymphonyElixir.PublisherGitTest do
     |> Enum.flat_map(fn {key, _value} -> if String.starts_with?(key, "GIT_"), do: [{key, nil}], else: [] end)
     |> Kernel.++([{"GIT_CONFIG_GLOBAL", "/dev/null"}, {"GIT_CONFIG_NOSYSTEM", "1"}])
   end
+
+  defp restore_env(key, nil), do: System.delete_env(key)
+  defp restore_env(key, value), do: System.put_env(key, value)
 end

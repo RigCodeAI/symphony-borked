@@ -202,15 +202,82 @@ defmodule SymphonyElixir.AgentReadiness do
   defp nonempty_binary?(_value), do: false
 
   defp usage_allowed({:ok, limits}) do
-    if explicit_flag?(limits, "ordinaryUsageAllowed", false) or
-         explicit_flag?(limits, "spendControlReached", true) do
-      {:error, :usage_paused}
-    else
-      :ok
+    cond do
+      explicit_flag?(limits, "spendControlReached", true) ->
+        {:error, :usage_paused}
+
+      explicit_flag?(limits, "ordinaryUsageAllowed", false) and
+          not credit_usage_allowed?(limits) ->
+        {:error, :usage_paused}
+
+      true ->
+        :ok
     end
   end
 
   defp usage_allowed(_limits), do: :ok
+
+  defp credit_usage_allowed?(limits) do
+    with {:ok, codex_limits} <- codex_rate_limits(limits),
+         {:ok, false} <- field(codex_limits, "spendControlReached"),
+         {:ok, credits} <- field(codex_limits, "credits") do
+      credits_available?(credits)
+    else
+      _ -> false
+    end
+  end
+
+  defp codex_rate_limits(limits) do
+    case field(limits, "rateLimitsByLimitId") do
+      {:ok, rate_limits_by_id} when is_map(rate_limits_by_id) ->
+        case field(rate_limits_by_id, "codex") do
+          {:ok, snapshot} -> if(is_map(snapshot), do: {:ok, snapshot}, else: :error)
+          :error -> legacy_codex_rate_limits(limits)
+        end
+
+      {:ok, nil} ->
+        legacy_codex_rate_limits(limits)
+
+      :error ->
+        legacy_codex_rate_limits(limits)
+
+      _ ->
+        :error
+    end
+  end
+
+  defp legacy_codex_rate_limits(limits) do
+    case field(limits, "rateLimits") do
+      {:ok, snapshot} when is_map(snapshot) ->
+        if field(snapshot, "limitId") == {:ok, "codex"}, do: {:ok, snapshot}, else: :error
+
+      _ ->
+        :error
+    end
+  end
+
+  defp credits_available?(credits) when is_map(credits) do
+    has_credits? = field(credits, "hasCredits") == {:ok, true}
+    valid_unlimited? = field(credits, "unlimited") in [{:ok, true}, {:ok, false}]
+
+    balance_available? =
+      case field(credits, "balance") do
+        {:ok, nil} -> true
+        {:ok, balance} -> positive_credit_balance?(balance)
+        :error -> false
+      end
+
+    has_credits? and valid_unlimited? and balance_available?
+  end
+
+  defp credits_available?(_credits), do: false
+
+  defp positive_credit_balance?(balance) when is_binary(balance) do
+    Regex.match?(~r/\A\d+(?:\.\d+)?\z/, balance) and
+      Regex.match?(~r/[1-9]/, balance)
+  end
+
+  defp positive_credit_balance?(_balance), do: false
 
   defp explicit_flag?(value, key, expected) when is_map(value) do
     field(value, key) == {:ok, expected} or

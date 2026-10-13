@@ -78,6 +78,11 @@ metadata boundary. Automatic conversation resume, worker broker restart, signed-
 access, provider token lifecycle, Daybreak, scaled capacity and the wider Factory Setup flow
 remain unqualified. Rig candidate publication and merge were not attempted.
 
+The source includes a narrow operator retry for a pre-code blocked run and explicit App Server
+credit-readiness rules. Confirm the protected release includes the helper before using it; see
+[the retry contract](docs/linear-delegation.md#operator-retry-for-a-pre-code-failure) and
+[account readiness](docs/linear-delegation.md#app-server-account-readiness).
+
 DEV-234 adds durable native questions, replies and artifact-bound approval waits. Agents
 can continue independent work before suspending; suspension releases capacity after confirmed
 termination. Continuation reconstructs saved context in a fresh Codex conversation. See the

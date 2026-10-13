@@ -33,6 +33,32 @@ defmodule SymphonyElixir.AgentReadinessTest do
     )
   end
 
+  defp codex_rate_limit(overrides \\ %{}) do
+    Map.merge(
+      %{
+        "limitId" => "codex",
+        "spendControlReached" => false,
+        "credits" => %{"hasCredits" => true, "unlimited" => false, "balance" => nil}
+      },
+      overrides
+    )
+  end
+
+  defp paused_runtime(rate_limits_by_id, legacy_rate_limit \\ :missing) do
+    limits = %{
+      "ordinaryUsageAllowed" => false,
+      "rateLimitsByLimitId" => rate_limits_by_id
+    }
+
+    limits =
+      case legacy_rate_limit do
+        :missing -> limits
+        legacy -> Map.put(limits, "rateLimits", legacy)
+      end
+
+    runtime(%{limits: limits})
+  end
+
   test "dispatch accepts subscription and legacy agents but rejects other authentication" do
     assert :ok = AgentReadiness.dispatch(agent())
     assert :ok = AgentReadiness.dispatch(%{daybreak: false})
@@ -146,9 +172,122 @@ defmodule SymphonyElixir.AgentReadinessTest do
     assert {:error, :daybreak_execution_unverified} = AgentReadiness.dispatch(daybreak_agent)
   end
 
-  test "explicit usage pause flags block while absent usage values are not treated as zero" do
+  test "credit entitlement can recover an included-usage pause for the exact Codex limit" do
+    limits = %{
+      "ordinaryUsageAllowed" => false,
+      "rateLimitsByLimitId" => %{"codex" => codex_rate_limit()}
+    }
+
+    assert :ok = AgentReadiness.check(agent(), runtime(%{limits: limits}))
+
+    legacy_limits = %{
+      "ordinaryUsageAllowed" => false,
+      "rateLimits" => codex_rate_limit()
+    }
+
+    assert :ok = AgentReadiness.check(agent(), runtime(%{limits: legacy_limits}))
+
+    positive_balance =
+      codex_rate_limit(%{
+        "credits" => %{"hasCredits" => true, "unlimited" => false, "balance" => "24.00"}
+      })
+
+    assert :ok =
+             AgentReadiness.check(
+               agent(),
+               runtime(%{
+                 limits: %{
+                   "ordinaryUsageAllowed" => false,
+                   "rateLimitsByLimitId" => %{"codex" => positive_balance}
+                 }
+               })
+             )
+  end
+
+  test "explicit usage pauses, malformed credits, and credits from other limits block readiness" do
     assert {:error, :usage_paused} =
              AgentReadiness.check(agent(), runtime(%{limits: %{"ordinaryUsageAllowed" => false}}))
+
+    invalid_credit_snapshots = [
+      %{"hasCredits" => false, "unlimited" => false, "balance" => nil},
+      %{"unlimited" => false, "balance" => nil},
+      %{"hasCredits" => true, "balance" => nil},
+      %{"hasCredits" => true, "unlimited" => false},
+      %{"hasCredits" => true, "unlimited" => nil, "balance" => nil},
+      %{"hasCredits" => true, "unlimited" => false, "balance" => "unknown"},
+      %{"hasCredits" => true, "unlimited" => false, "balance" => "0"}
+    ]
+
+    for credits <- invalid_credit_snapshots do
+      assert {:error, :usage_paused} =
+               AgentReadiness.check(
+                 agent(),
+                 paused_runtime(%{
+                   "codex" => codex_rate_limit(%{"credits" => credits})
+                 })
+               )
+    end
+
+    assert {:error, :usage_paused} =
+             AgentReadiness.check(
+               agent(),
+               paused_runtime(%{
+                 "codex" => codex_rate_limit(%{"credits" => nil}),
+                 "other" => %{
+                   "spendControlReached" => false,
+                   "credits" => %{"hasCredits" => true, "unlimited" => false, "balance" => nil}
+                 }
+               })
+             )
+
+    assert {:error, :usage_paused} =
+             AgentReadiness.check(
+               agent(),
+               paused_runtime(%{
+                 "codex" => Map.delete(codex_rate_limit(), "credits")
+               })
+             )
+
+    assert {:error, :usage_paused} =
+             AgentReadiness.check(
+               agent(),
+               paused_runtime(%{
+                 "codex" => Map.delete(codex_rate_limit(), "spendControlReached")
+               })
+             )
+
+    assert {:error, :usage_paused} =
+             AgentReadiness.check(
+               agent(),
+               paused_runtime(
+                 %{
+                   "other" => %{
+                     "spendControlReached" => false,
+                     "credits" => %{"hasCredits" => true, "unlimited" => false, "balance" => nil}
+                   }
+                 },
+                 %{
+                   "limitId" => "other",
+                   "spendControlReached" => false,
+                   "credits" => %{"hasCredits" => true, "unlimited" => false, "balance" => nil}
+                 }
+               )
+             )
+  end
+
+  test "spend control blocks even when Codex credits are available" do
+    assert {:error, :usage_paused} =
+             AgentReadiness.check(
+               agent(),
+               runtime(%{
+                 limits: %{
+                   "ordinaryUsageAllowed" => false,
+                   "rateLimitsByLimitId" => %{
+                     "codex" => codex_rate_limit(%{"spendControlReached" => true})
+                   }
+                 }
+               })
+             )
 
     assert {:error, :usage_paused} =
              AgentReadiness.check(

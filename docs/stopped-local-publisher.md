@@ -83,15 +83,20 @@ checks. The command cannot start or stop the service and has no GitHub adapter.
 
 ## DEV-259 policy compatibility
 
-Changing `orchestrator.ex` or another executor-owned module would change
-`WorkstreamRun.policy().executor_sha256` and block DEV-259's saved ready run before
-its first attempt. This maintenance helper is outside the executor source digest;
-no executor module, source policy, definition or saved pin changes in this fix.
-The supported running executor remains
+Changing `orchestrator.ex` or another executor-owned module changes
+`WorkstreamRun.policy().executor_sha256`; it must not change DEV-259's saved run pin.
+The original termination-only maintenance change did not modify the executor source
+or rewrite saved pins. The later PublisherGit port fix does change the current executor
+fingerprint. The supported running executor remains
 `ec8ae546aeb408243529f96a1a7048c92d4a61bbe268eee6decbccfb169f4c22` (deployed 68cc09a).
-The helper accepts stopped local publisher pins from that executor or the inspected
-87ffc28 executor `505e0686567846995558b576a12f5e63a1edf2cfdd0e2a285e890683a9d15179`,
-with identical lifecycle, validation and child pins. Future policies fail closed.
+The helper's runtime source check accepts only the exact full policy for that deployed
+executor or the exact full policy for the PublisherGit port fix, whose executor fingerprint
+is `30c942265ee1c5b9e40f6ff36ee6dab2bbdb11b398c11bf11aae2ae27f5177c1`. This lets the same
+termination-only helper run with either reviewed service build. The saved run must still be
+pinned to the deployed executor above or the inspected 87ffc28 executor
+`505e0686567846995558b576a12f5e63a1edf2cfdd0e2a285e890683a9d15179`, with identical
+lifecycle, validation and child pins. A saved run pinned to the new executor or any other
+runtime/run policy is rejected; no pin is rewritten.
 
 DEV-259's executor policy therefore remains compatible. Worker operations separately
 use the run's saved `execution.worker_control` service revision and release digest;

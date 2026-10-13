@@ -123,6 +123,53 @@ version and source SHA-256. Replays MUST NOT add another attempt. The original
 Linear reply remains rejected. Normal readiness and stage authorization still gate dispatch;
 this maintenance action does not launch a worker or weaken those gates.
 
+The narrowly identified PublisherGit unset-environment defect MAY use a separate
+`publisher_port_recovery` maintenance transition when a blocked run has a completed failed
+`publish/16` attempt with a durable intent, the exact current signed Linear retry activity,
+the same still-active delegation, a fresh terminated receipt for the exact successful
+`implement/2` operation, a clean candidate whose head matches the intent, passed prior
+candidate gates, verified permanent validation archival, authenticated GitHub App access,
+and no remote branch or pull request for the pinned publication branch. This exception MUST
+match the exact saved old policy, exact current policy, and recorded PublisherGit source
+fingerprints for the one `nil` to `false` environment change. It MUST NOT rewrite the old
+run's policy or evidence identity, or accept an arbitrary policy migration.
+
+The one-shot helper MUST own the SQLite store while the coordinator is stopped in both plan
+and apply modes. Apply MUST atomically stop the original run, create a new run under current
+policy, and switch the same Linear task binding to that successor, with compare-and-swap on
+the exact old run, task and rejected reply. The original run, attempts, operations and receipts
+remain intact. The successor MUST keep the same task, issue, execution pins, worker release,
+workspace, branch, thread, session, candidate and repair counters. Its separately loaded
+qualification definition MUST preserve the original stage graph, agent definitions, models,
+settings and resources, with only the fixed controlled-review instruction appended to the
+review stage prompt. The helper MUST verify this exact transformation and record the source
+path, source-text SHA-256 and old/new definition fingerprints in both run journals. The
+controlled instruction MUST request one harmless, clearly labeled test finding only when the
+review otherwise finds no real issue; it MUST keep the review's correctness assessment true
+and MUST NOT claim that the test finding is a defect. The successor MUST have fresh attempt
+and operation collections and begin at the pinned candidate-producer check so validation is
+repeated. It MUST NOT use the child-run parent field or dispatch a replacement coding agent.
+Both run journals and the task switch MUST commit together, with the old and new policy
+fingerprints, publisher source hashes, proof IDs and Linear activity recorded. Stable
+activity-derived event IDs MUST make restart/replay return the same successor even after it
+advances. The rejected Linear reply remains rejected, and normal readiness and stage
+authorization gate all work after the local producer check. No publication write is part of
+this transition.
+
+If a service scope-check stopped this same run after an earlier retry was rejected, a separate
+stopped-origin variant MAY proceed only from the exact initial handled `created` event recorded
+as the task's stop tombstone. The stopped task MUST still have its initial scope revision, no
+assignment history or pending/blocked reassignment, and no persisted native stop, undelegation,
+issue update or other assignment event for that task. The operator must provide a distinct,
+authenticated exact-body retry activity persisted as `ignored_after_stop`; its delivery and
+activity IDs MUST be unique and its timestamp MUST be later than the stop and every earlier
+matching retry receipt. The helper MUST recheck the live app route, delegation, assignee and
+session, as well as every publisher-port proof above. Apply MUST compare-and-swap the stopped
+run and tombstoned task in the same transaction that creates the successor. It clears the stop
+fields only on the successor task; the old stopped run, task stop receipt, attempts, operations,
+policy and other history remain intact. This exception MUST NOT admit native stop, undelegation,
+reassignment, stale retry, or any other stopped run.
+
 DEV-235 extends native intake with optional `cloud_agents` entries for the two additional
 named cloud apps, sharing the backend, worker pool and workstream. Each identity has an
 exact organization/app-user/client tuple and a distinct signing secret; a valid signature
